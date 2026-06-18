@@ -515,7 +515,7 @@ def test_step_minio_upload_missing_source(config, task_dict):
 
 
 def test_step_minio_upload_with_mock(config, task_dict):
-    """Test minio upload with mocked subprocess."""
+    """Test minio upload with mocked subprocess — placeholder replaced with real URL."""
     source_path = Path(config.temp_dir) / f"{task_dict['slug']}_raw.md"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text("# Test source content", encoding="utf-8")
@@ -523,19 +523,35 @@ def test_step_minio_upload_with_mock(config, task_dict):
     with patch("agent.archival.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        # Also create the note so frontmatter update works
+        # Create the note with a minio: placeholder (real-world LLM output)
         note_path = config.vault_path / "Knowledge base" / "articles" / f"{task_dict['slug']}.md"
         note_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.write_text("""---
 date: 2026-06-19
 source: test
+minio: http://vmi3304846.tail5c02a1.ts.net:9000/kb-agent-archive/placeholder/slug.md
 ---
+
 # Test
+
+## Sources
+- Archived at minio: <placeholder>
 """)
 
         result = step_minio_upload(task_dict, config)
 
     assert "tail5c02a1.ts.net" in result
+
+    # Verify the placeholder was replaced with the real MinIO URL in frontmatter
+    updated_content = note_path.read_text(encoding="utf-8")
+    assert result in updated_content, (
+        f"Real MinIO URL ({result}) not found in note frontmatter. "
+        f"Placeholder was not replaced."
+    )
+    # The minio: field in frontmatter must point to the real URL (not the placeholder path)
+    assert "kb-agent-archive/articles/" in updated_content, (
+        "MinIO URL should contain the real folder path (articles/...), not the template placeholder"
+    )
 
 
 # ── step_git_push tests ───────────────────────────────────────────────────────
