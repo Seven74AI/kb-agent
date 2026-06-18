@@ -662,12 +662,19 @@ def step_minio_upload(task: dict, config: Config) -> str:
     note_path = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
     if note_path.exists():
         content = note_path.read_text(encoding="utf-8")
-        # Insert minio: field after the first --- line
+        # Insert or replace minio: field in frontmatter
         if content.startswith("---"):
             end_fm = content.find("---", 3)
             if end_fm != -1:
                 frontmatter = content[3:end_fm]
-                if "minio:" not in frontmatter:
+                if re.search(r'^minio:', frontmatter, re.MULTILINE):
+                    # LLM-template includes a minio: placeholder — replace with real URL
+                    content = re.sub(
+                        r'^minio:.*$', f'minio: {minio_url}',
+                        content, flags=re.MULTILINE
+                    )
+                else:
+                    # No minio: field — insert one after the opening ---
                     content = content[:3] + "\nminio: " + minio_url + content[3:]
                 note_path.write_text(content, encoding="utf-8")
 
