@@ -1,0 +1,42 @@
+# KB Agent configuration
+
+# Paths
+kb_agent_dir: /root/kb-agent
+vault_path: /root/kb-agent-vault
+cookie_dir: /root/kb-agent/cookies
+temp_dir: /tmp
+
+# Concurrency
+video_semaphore: 1      # Only one video pipeline at a time (pyannote RAM)
+text_parallel: 3        # Parallel text pipelines
+
+# Retry (exponential backoff)
+retry_delays: [5, 15, 60, 180]
+max_retries: 5
+
+# Quality gate thresholds
+quality:
+  book_min_lines: 100
+  book_min_quotes: 4
+  book_min_size: 8000
+  article_min_quotes: 4
+  article_min_size: 5000
+  youtube_min_concepts: 3
+  youtube_min_key_points: 8
+
+# LLM
+llm_provider: deepseek       # deepseek or edgee
+llm_model: deepseek-v4-pro
+llm_base_url: https://api.deepseek.com/v1
+# llm_base_url: https://api.edgee.ai/v1   # Edgee alternative
+
+# MinIO
+minio_endpoint: http://localhost:9000
+minio_bucket: kb-agent-archive
+
+# Firecrawl (shared with Hermes)
+firecrawl_url: http://localhost:3002/v2/scrape
+
+# Webhook
+webhook_host: 0.0.0.0
+webhook_port: 5000
