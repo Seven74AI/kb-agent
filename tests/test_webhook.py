@@ -307,31 +307,36 @@ def test_upload_cookies_success(client, monkeypatch, tmp_path):
     cookie_dir = tmp_path / "cookies"
     monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
 
-    data = {
-        "cookie_type": "yt_cookies.txt",
-    }
-    file_data = (tempfile.NamedTemporaryFile(suffix=".txt", delete=False),)
-    Path(file_data[0].name).write_text("LOGIN_INFO\nSAPISID\n__Secure-3PSID\n")
+    cookie_content = "LOGIN_INFO\nSAPISID\n__Secure-3PSID\n"
+    tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+    tmp.write(cookie_content.encode())
+    tmp.close()
 
     try:
-        with open(file_data[0].name, "rb") as f:
+        with open(tmp.name, "rb") as f:
             resp = client.post(
                 "/upload-cookies",
-                data={"cookie_type": "yt_cookies.txt"},
+                data={
+                    "cookie_type": "yt_cookies.txt",
+                    "cookie_file": (f, "yt_cookies.txt"),
+                },
                 content_type="multipart/form-data",
-                buffered=True,
             )
 
-        # Re-do with proper file attachment
-        resp = client.post(
-            "/upload-cookies",
-            data={
-                "cookie_type": "yt_cookies.txt",
-                "cookie_file": (tempfile.NamedTemporaryFile(suffix=".txt", delete=False), "yt_cookies.txt"),
-            },
-        )
+        assert resp.status_code == 201
+        data = json.loads(resp.data)
+        assert data["status"] == "ok"
+        assert data["file"] == "yt_cookies.txt"
+        assert data["size_bytes"] == len(cookie_content)
+        assert data["permissions"] == "444"
+
+        # Verify file exists on disk with correct content and permissions
+        dest = cookie_dir / "yt_cookies.txt"
+        assert dest.exists()
+        assert dest.read_text() == cookie_content
+        assert oct(dest.stat().st_mode)[-3:] == "444"
     finally:
-        os.unlink(file_data[0].name)
+        os.unlink(tmp.name)
 
 
 def test_upload_cookies_invalid_type(client):
