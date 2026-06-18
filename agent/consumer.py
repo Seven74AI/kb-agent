@@ -58,6 +58,10 @@ class Consumer:
 
         # Import pipeline modules to register steps
         from agent.pipelines import web  # noqa: F401
+        from agent.pipelines import PIPELINES
+        for steps in PIPELINES.values():
+            for step in steps:
+                register_step(step.name, step.fn)
 
         # ── Crash recovery: orphan detection ──
         await self._recover_orphans()
