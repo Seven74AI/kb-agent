@@ -34,6 +34,7 @@ class Config:
     article_min_size: int = 5000
     youtube_min_concepts: int = 3
     youtube_min_key_points: int = 8
+    youtube_min_density: int = 100
 
     # ── LLM ──
     llm_provider: str = "deepseek"
@@ -113,6 +114,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         article_min_size=int(quality.get("article_min_size", 5000)),
         youtube_min_concepts=int(quality.get("youtube_min_concepts", 3)),
         youtube_min_key_points=int(quality.get("youtube_min_key_points", 8)),
+        youtube_min_density=int(quality.get("youtube_min_density", 100)),
         # LLM
         llm_provider=str(_env_or_default(raw.get("llm_provider"), "KB_LLM_PROVIDER", "deepseek")),
         llm_model=str(_env_or_default(raw.get("llm_model"), "KB_LLM_MODEL", "deepseek-v4-pro")),
