@@ -213,6 +213,85 @@ def pause_task(conn: sqlite3.Connection, task_id: str, reason: str):
         )
 
 
+def get_last_log_line(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """Get the most recent log line for a task from logs.db.
+
+    Args:
+        conn: Logs database connection.
+        task_id: The task UUID.
+
+    Returns:
+        The most recent log content, or None if no logs exist.
+    """
+    row = conn.execute(
+        "SELECT content FROM step_logs WHERE task_id = ? "
+        "ORDER BY logged_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int:
+    """Resume all paused tasks matching a reason pattern.
+
+    Resets retries to 0 and sets status back to 'pending'.
+
+    Args:
+        conn: Agent database connection.
+        reason_pattern: SQL LIKE pattern for the error/reason field
+                        (e.g., '%cookies%', '%firecrawl%').
+
+    Returns:
+        Number of tasks resumed.
+    """
+    with conn:
+        cursor = conn.execute(
+            "UPDATE tasks SET status = 'pending', retries = 0, "
+            "error = NULL, updated_at = datetime('now') "
+            "WHERE status = 'paused' AND error LIKE ?",
+            (reason_pattern,),
+        )
+        return cursor.rowcount
+
+
+def get_task_steps(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """Get all steps for a task, ordered by step_order.
+
+    Args:
+        conn: Agent database connection.
+        task_id: The task UUID.
+
+    Returns:
+        List of step dicts with keys: id, step_order, name, status, output,
+        started_at, finished_at.
+    """
+    rows = conn.execute(
+        "SELECT id, step_order, name, status, output, started_at, finished_at "
+        "FROM task_steps WHERE task_id = ? ORDER BY step_order",
+        (task_id,),
+    ).fetchall()
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+def get_all_tasks(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    """Get all tasks ordered by creation time, newest first.
+
+    Args:
+        conn: Agent database connection.
+        limit: Maximum number of tasks to return.
+
+    Returns:
+        List of task dicts.
+    """
+    rows = conn.execute(
+        "SELECT id, source_url, content_type, status, error, slug, "
+        "retries, created_at, updated_at "
+        "FROM tasks ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
 def archive_llm_call(conn: sqlite3.Connection, task_id: str, role: str,
                      prompt: str, response: str, model: str,
                      tokens_in: int | None = None, tokens_out: int | None = None):
