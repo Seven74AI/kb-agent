@@ -61,7 +61,7 @@ def _logs_db_path() -> Path:
 PIPELINE_STEPS: dict[str, list[str]] = {
     "web": [
         "firecrawl_extract", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
+        "minio_upload", "see_also", "git_push",
     ],
     "youtube": [
         "cookie_validate", "yt_dlp_download", "ffmpeg_extract_audio",
@@ -83,7 +83,7 @@ PIPELINE_STEPS: dict[str, list[str]] = {
     ],
     "substack": [
         "firecrawl_extract", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
+        "minio_upload", "see_also", "git_push",
     ],
     "book": [
         "extract_text", "synthesize_note", "quality_gate",
