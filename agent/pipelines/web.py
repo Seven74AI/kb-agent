@@ -701,10 +701,10 @@ def step_git_push(task: dict, config: Config) -> str:
 # ── Pipeline Registration ────────────────────────────────────────────────────
 
 register_pipeline("web", [
-    Step(name="firecrawl_extract", fn=step_firecrawl_extract),
-    Step(name="synthesize_note", fn=step_synthesize_web),
-    Step(name="quality_gate", fn=step_quality_gate),
-    Step(name="minio_upload", fn=step_minio_upload),
-    Step(name="see_also", fn=step_see_also),
-    Step(name="git_push", fn=step_git_push),
+    Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
+    Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])

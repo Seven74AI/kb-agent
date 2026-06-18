@@ -1,7 +1,16 @@
-"""Streaming — real-time subprocess output to logs.db.
+"""Streaming — real-time subprocess output to logs.db and async execution helpers.
 
-Reads subprocess stdout line-by-line and writes each line to the logs
-database. Used for monitoring long-running steps (diarize, transcribe, yt-dlp).
+Core utilities:
+- stream_to_logs: Reads subprocess stdout/stderr line-by-line, writes to logs.db.
+- stream_both: Streams both stdout and stderr simultaneously.
+- run_with_streaming: Launches an async subprocess with live streaming.
+- read_logs: Reads recent log entries for a task step.
+
+Process management (see CONTEXT.md):
+- No timeouts on steps — HTTP calls have built-in ~30s timeouts.
+- readline() streaming — NOT communicate() (which buffers all output).
+- proc.returncode is None → process alive; int → exited.
+- PR_SET_PDEATHSIG in canonical scripts kills children when parent dies.
 """
 
 import asyncio
@@ -43,7 +52,8 @@ async def stream_to_logs(
 
         with logs_conn:
             logs_conn.execute(
-                "INSERT INTO step_logs (task_id, step_name, stream, content) VALUES (?, ?, ?, ?)",
+                "INSERT INTO step_logs (task_id, step_name, stream, content) "
+                "VALUES (?, ?, ?, ?)",
                 (task_id, step_name, stream, text),
             )
 
@@ -70,6 +80,85 @@ async def stream_both(
 
     if tasks:
         await asyncio.gather(*tasks)
+
+
+async def run_with_streaming(
+    *args: str,
+    logs_conn: sqlite3.Connection,
+    task_id: str,
+    step_name: str,
+    **kwargs,
+) -> asyncio.subprocess.Process:
+    """Launch an async subprocess with stdout/stderr streaming to logs.db.
+
+    Wraps asyncio.create_subprocess_exec, sets up streaming tasks,
+    and returns the process handle. The caller MUST await proc.wait()
+    after this returns.
+
+    Args:
+        *args: Command and arguments (e.g., 'curl', '-s', url).
+        logs_conn: SQLite connection to logs.db.
+        task_id: The task UUID.
+        step_name: Step name for log entries.
+        **kwargs: Passed through to asyncio.create_subprocess_exec
+                  (e.g., cwd, env).
+
+    Returns:
+        The asyncio.subprocess.Process handle with streaming active.
+
+    Example:
+        proc = await run_with_streaming(
+            'yt-dlp', url,
+            logs_conn=logs_conn, task_id=task_id, step_name='download',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        if proc.returncode != 0:
+            raise StepError("Download failed", error_type=ErrorType.RETRY)
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **kwargs,
+    )
+
+    # Start streaming tasks (they'll end when the pipes close on process exit)
+    asyncio.create_task(
+        stream_both(proc, logs_conn, task_id, step_name)
+    )
+
+    return proc
+
+
+async def wait_with_logging(
+    proc: asyncio.subprocess.Process,
+    logs_conn: sqlite3.Connection,
+    task_id: str,
+    step_name: str,
+) -> int:
+    """Wait for a subprocess to complete, logging the exit status.
+
+    Args:
+        proc: The subprocess handle.
+        logs_conn: SQLite connection to logs.db.
+        task_id: The task UUID.
+        step_name: Step name for log entries.
+
+    Returns:
+        The process return code.
+    """
+    returncode = await proc.wait()
+
+    with logs_conn:
+        logs_conn.execute(
+            "INSERT INTO step_logs (task_id, step_name, stream, content) "
+            "VALUES (?, ?, 'stderr', ?)",
+            (task_id, step_name, f"[consumer] Process exited with code {returncode}"),
+        )
+
+    return returncode
 
 
 def read_logs(logs_path: Path, task_id: str, step_name: str | None = None,
