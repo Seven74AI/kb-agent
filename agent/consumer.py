@@ -249,7 +249,6 @@ class Consumer:
         """
         task_id = task["id"]
         retries = 0
-        last_error_type: str | None = None
 
         while True:
             step = get_next_step(self.agent_conn, task_id)
