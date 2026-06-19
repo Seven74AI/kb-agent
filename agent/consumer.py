@@ -18,7 +18,6 @@ Process management:
 import asyncio
 import inspect
 import os
-import signal
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -414,37 +413,3 @@ class Consumer:
             # Sync function — run in default executor to avoid blocking the event loop
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, fn, task, self.config)
-
-
-def start_consumer(config: Config) -> Consumer:
-    """Create and start the consumer in a background thread.
-
-    Returns the Consumer instance for shutdown control.
-
-    Graceful shutdown:
-    - SIGTERM/SIGINT triggers consumer.shutdown()
-    - shutdown() stops polling, then waits for running steps
-    - Children die via PR_SET_PDEATHSIG in canonical scripts
-    """
-    consumer = Consumer(config)
-
-    loop = asyncio.new_event_loop()
-
-    def _run():
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(consumer.run())
-
-    import threading
-    thread = threading.Thread(target=_run, daemon=True, name="kb-consumer")
-    thread.start()
-
-    # Install signal handlers on the main thread
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            signal.signal(sig, lambda s, f: loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(consumer.shutdown(), loop=loop)
-            ))
-        except ValueError:
-            pass  # Not in main thread
-
-    return consumer
