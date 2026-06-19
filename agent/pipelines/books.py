@@ -966,7 +966,7 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
         JSON string with quality gate results.
 
     Raises:
-        StepError: If quality gates fail after max retries.
+        StepError: If quality gates fail (unrecoverable — FAIL, no retry).
     """
     slug = task.get("slug", task["id"][:8])
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
@@ -977,7 +977,7 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
     if not passed:
         raise StepError(
             f"Book quality gates failed: {'; '.join(failures)}",
-            error_type=ErrorType.RETRY,
+            error_type=ErrorType.FAIL,
             step_name="book_quality_gate",
         )
 
