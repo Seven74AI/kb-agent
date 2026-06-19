@@ -202,7 +202,7 @@ def _classify_mega_filenames(filenames: list[str]) -> str:
         n for ext, n in extensions.items()
         if ext in MEGA_VIDEO_EXTENSIONS
     )
-    if video_count > 0 and video_count >= total * 0.5:
+    if video_count > 0 and video_count > total * 0.5:
         return "mega_video"
 
     # Check for book files

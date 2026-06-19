@@ -24,6 +24,24 @@ from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.quality import quality_gate_book
 
+# Optional dependencies — imported at module level for testability
+try:
+    import pymupdf
+    HAS_PYMUPDF = True
+except ImportError:
+    pymupdf = None  # type: ignore
+    HAS_PYMUPDF = False
+
+try:
+    from ebooklib import epub, ITEM_DOCUMENT
+    from bs4 import BeautifulSoup
+    HAS_EBOOKLIB = True
+except ImportError:
+    epub = None  # type: ignore
+    ITEM_DOCUMENT = None
+    BeautifulSoup = None  # type: ignore
+    HAS_EBOOKLIB = False
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -236,9 +254,7 @@ def _pdf_preflight(pdf_path: Path) -> tuple[str, int]:
         (classification, score) where classification is 'scanned',
         'degraded', or 'text', and score is 0-100.
     """
-    try:
-        import pymupdf
-    except ImportError:
+    if not HAS_PYMUPDF:
         return "text", 100  # Assume clean if pymupdf unavailable
 
     try:
@@ -286,9 +302,7 @@ def quality_score(pdf_path: str | Path) -> int:
     Returns:
         Quality score 0-100.
     """
-    try:
-        import pymupdf
-    except ImportError:
+    if not HAS_PYMUPDF:
         return 100
 
     try:
@@ -306,7 +320,6 @@ def _quality_score(doc, page_count: int) -> int:
     Samples 16 pages evenly distributed across the document.
     Returns 0-100.
     """
-    import pymupdf  # noqa: F811
 
     # Determine sample pages
     if page_count <= 16:
@@ -415,15 +428,12 @@ def step_extract_epub(task: dict, config: Config) -> str:
                 step_name="extract_epub",
             )
 
-    try:
-        from ebooklib import epub, ITEM_DOCUMENT
-        from bs4 import BeautifulSoup
-    except ImportError as e:
+    if not HAS_EBOOKLIB:
         raise StepError(
-            f"Missing dependency: {e}",
+            "Missing dependencies: ebooklib/beautifulsoup4 — install with pip",
             error_type=ErrorType.PAUSE,
             step_name="extract_epub",
-        ) from e
+        )
 
     try:
         book = epub.read_epub(str(epub_path))
@@ -514,14 +524,12 @@ def step_extract_pdf(task: dict, config: Config) -> str:
                 step_name="extract_pdf",
             )
 
-    try:
-        import pymupdf
-    except ImportError as e:
+    if not HAS_PYMUPDF:
         raise StepError(
-            f"Missing dependency: pymupdf — install with pip install pymupdf",
+            "Missing dependency: pymupdf — install with pip install pymupdf",
             error_type=ErrorType.PAUSE,
             step_name="extract_pdf",
-        ) from e
+        )
 
     try:
         doc = pymupdf.open(str(pdf_path))

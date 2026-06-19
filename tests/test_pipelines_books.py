@@ -386,31 +386,34 @@ class TestBookQualityGate:
         note_dir.mkdir(parents=True, exist_ok=True)
         note_path = note_dir / f"{book_task['slug']}.md"
 
-        # Create a valid book note with all required sections
+        # Build a long enough book note without repetition
+        # (repetition with *3 breaks section indexing)
+        chapters = []
+        for i in range(1, 11):
+            chapters.append(f"### Chapter {i}")
+            chapters.append(f"This is a detailed summary of chapter {i}. " * 10)
+
         note_content = "\n".join([
             "## Summary",
-            "This is a summary.",
+            "This is a comprehensive book summary that captures the central thesis.",
             "",
             "## Key Claims",
-            "> \"Direct quote one\" — Chapter 1",
-            "> \"Direct quote two\" — Chapter 2",
+            '> "Direct quote one from the book" — Chapter 1',
+            '> "Direct quote two proving a key point" — Chapter 2',
+            '> "Direct quote three with evidence" — Chapter 5',
+            '> "Direct quote four with analysis" — Chapter 8',
             "",
             "## Chapter Summaries",
-            "### Chapter 1",
-            "Detailed summary of chapter one with enough text.",
-            "### Chapter 2",
-            "Detailed summary of chapter two with enough text.",
-            "### Chapter 3",
-            "Detailed summary of chapter three.",
+            *chapters,
             "",
             "## Who Is the Author",
-            "Author bio.",
+            "A detailed author biography with credentials and background information. " * 5,
             "",
             "## Critical Analysis",
-            "Brief analysis.",
+            "This section evaluates the book critically but briefly. " * 5,
             "",
             "## Nuances",
-            "Some nuances.",
+            "Some nuanced points about where the book falls short.",
             "",
             "## Reliability",
             "plausible",
@@ -418,8 +421,6 @@ class TestBookQualityGate:
             "## Sources",
             "Author. *Title* (2024)",
         ])
-        # Make it long enough
-        note_content = note_content * 3
         note_path.write_text(note_content)
 
         result = step_book_quality_gate(book_task, config)
