@@ -238,20 +238,22 @@ class TestEpubExtraction:
         mock_epub.read_epub.return_value = mock_book
         mock_epub.ITEM_DOCUMENT = 9
 
-        # Create mock document items
-        def create_item(body_text):
-            item = MagicMock()
+        # Create mock document items with unique soups
+        soups = []
+        items = []
+        chapters = [
+            "Chapter 1: Introduction\nThis is the first chapter.",
+            "Chapter 2: Methods\nThis is the second chapter.",
+            "Chapter 3: Results\nThis is the third chapter.",
+        ]
+        for body_text in chapters:
             soup = MagicMock()
             soup.get_text.return_value = body_text
-            mock_bs.return_value = soup
+            soups.append(soup)
+            item = MagicMock()
             item.get_body_content.return_value = b"<p>test</p>"
-            return item
-
-        items = [
-            create_item("Chapter 1: Introduction\nThis is the first chapter."),
-            create_item("Chapter 2: Methods\nThis is the second chapter."),
-            create_item("Chapter 3: Results\nThis is the third chapter."),
-        ]
+            items.append(item)
+        mock_bs.side_effect = soups
         mock_book.get_items_of_type.return_value = items
 
         # Mock metadata
@@ -287,19 +289,17 @@ class TestEpubExtraction:
         mock_epub.read_epub.return_value = mock_book
         mock_epub.ITEM_DOCUMENT = 9
 
-        def create_item(body_text):
-            item = MagicMock()
+        # Chapter 1 is long, Chapter 2 is short
+        soups = []
+        items = []
+        for body_text in ["A" * 500, "B"]:
             soup = MagicMock()
             soup.get_text.return_value = body_text
-            mock_bs.return_value = soup
+            soups.append(soup)
+            item = MagicMock()
             item.get_body_content.return_value = b"<p>test</p>"
-            return item
-
-        # Chapter 1 is long, Chapter 2 is short
-        items = [
-            create_item("A" * 500),  # Large chapter first
-            create_item("B"),         # Small chapter second
-        ]
+            items.append(item)
+        mock_bs.side_effect = soups
         mock_book.get_items_of_type.return_value = items
         mock_book.get_metadata.return_value = [("Test",)]
 
@@ -326,18 +326,16 @@ class TestEpubExtraction:
         mock_epub.read_epub.return_value = mock_book
         mock_epub.ITEM_DOCUMENT = 9
 
-        def create_item(body_text):
-            item = MagicMock()
+        soups = []
+        items = []
+        for body_text in ["Tiny", "A" * 100]:
             soup = MagicMock()
             soup.get_text.return_value = body_text
-            mock_bs.return_value = soup
+            soups.append(soup)
+            item = MagicMock()
             item.get_body_content.return_value = b"<p>test</p>"
-            return item
-
-        items = [
-            create_item("Tiny"),    # 4 chars — should be skipped
-            create_item("A" * 100),  # 100 chars — should be included
-        ]
+            items.append(item)
+        mock_bs.side_effect = soups
         mock_book.get_items_of_type.return_value = items
         mock_book.get_metadata.return_value = [("Test",)]
 
@@ -361,14 +359,19 @@ class TestPdfExtraction:
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         pdf_path.write_text("dummy pdf content")
         book_task["source_url"] = str(pdf_path)
-        mock_doc = MagicMock()
-        mock_doc.page_count = 3
-        mock_doc.__getitem__.return_value.get_text.return_value = (
-            "Page content with enough characters to pass "
-            "the scanned detection threshold of 500 chars. "
-            * 5
-        )
-        mock_pymupdf.open.return_value = mock_doc
+
+        # pymupdf.open is called twice (preflight + extraction), so return new doc each time
+        def make_doc():
+            mock_doc = MagicMock()
+            mock_doc.page_count = 3
+            mock_doc.__getitem__.return_value.get_text.return_value = (
+                "Page content with enough characters to pass "
+                "the scanned detection threshold of 500 chars. "
+                * 5
+            )
+            return mock_doc
+
+        mock_pymupdf.open.side_effect = [make_doc(), make_doc()]
 
         Path(config.temp_dir).mkdir(parents=True, exist_ok=True)
 
@@ -387,6 +390,8 @@ class TestPdfExtraction:
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         pdf_path.write_text("dummy pdf content")
         book_task["source_url"] = str(pdf_path)
+
+        # Return a doc with 0 text → scanned
         mock_doc = MagicMock()
         mock_doc.page_count = 1
         mock_doc.__getitem__.return_value.get_text.return_value = ""  # 0 chars
