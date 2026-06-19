@@ -120,7 +120,16 @@ class Consumer:
             ).fetchone()
 
             if not step:
-                print(f"[consumer] Orphan task {task_id[:8]} — no running step, resuming next pending")
+                # Task was claimed but no step started — reset to pending for re-claim
+                print(
+                    f"[consumer] Orphan task {task_id[:8]} — "
+                    f"no running step, resetting to pending"
+                )
+                self.agent_conn.execute(
+                    "UPDATE tasks SET status = 'pending' WHERE id = ?",
+                    (task_id,)
+                )
+                self.agent_conn.commit()
                 continue
 
             step_id, step_order, step_name, step_output = step
@@ -370,7 +379,7 @@ class Consumer:
         subprocesses survive a consumer crash.
         """
         # Resolve step from the task's pipeline first (avoids namespace collisions)
-        from agent.pipelines import PIPELINES, get_pipeline
+        from agent.pipelines import get_pipeline
         content_type = task.get("content_type", "web")
         pipeline = get_pipeline(content_type)
         entry = None
