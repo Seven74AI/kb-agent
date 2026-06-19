@@ -243,9 +243,9 @@ class TestEpubExtraction:
         soups = []
         items = []
         chapters = [
-            "Chapter 1: Introduction\nThis is the first chapter.",
-            "Chapter 2: Methods\nThis is the second chapter.",
-            "Chapter 3: Results\nThis is the third chapter.",
+            "Chapter 1: Introduction\nThis is the first chapter with enough text to pass the threshold.",
+            "Chapter 2: Methods\nThis is the second chapter with detailed methodology description.",
+            "Chapter 3: Results\nThis is the third chapter presenting the key findings and analysis.",
         ]
         for body_text in chapters:
             soup = MagicMock()
