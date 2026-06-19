@@ -354,6 +354,11 @@ class Consumer:
     async def _run_step(self, step_name: str, task: dict) -> Any:
         """Execute a single pipeline step, supporting both sync and async functions.
 
+        Resolves step from the task's content_type pipeline registry FIRST
+        (to avoid namespace collisions between pipelines with shared step names
+        like 'synthesize_note', 'quality_gate', 'minio_upload', 'git_push').
+        Falls back to global STEP_REGISTRY for backward compatibility.
+
         For mechanical steps that launch subprocesses, step functions should:
         - Launch the subprocess via asyncio.create_subprocess_exec
         - Stream output to logs.db via agent.streaming.stream_to_logs
@@ -364,10 +369,22 @@ class Consumer:
         auto-kills children when the consumer process dies. No orphan
         subprocesses survive a consumer crash.
         """
-        entry = STEP_REGISTRY.get(step_name)
+        # Resolve step from the task's pipeline first (avoids namespace collisions)
+        from agent.pipelines import PIPELINES, get_pipeline
+        content_type = task.get("content_type", "web")
+        pipeline = get_pipeline(content_type)
+        entry = None
+        if pipeline:
+            for s in pipeline:
+                if s.name == step_name:
+                    entry = (s.fn, s.on_error)
+                    break
+        if entry is None:
+            # Fall back to global registry (backward compat)
+            entry = STEP_REGISTRY.get(step_name)
         if entry is None:
             raise StepError(
-                f"Unknown step: {step_name}",
+                f"Unknown step: {step_name} (content_type={content_type})",
                 error_type=ErrorType.FAIL,
                 step_name=step_name,
             )
