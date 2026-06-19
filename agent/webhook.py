@@ -69,17 +69,25 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "quality_gate", "minio_upload", "git_push",
     ],
     "instagram_reel": [
-        "cookie_validate", "yt_dlp_download", "ffmpeg_extract_audio",
-        "diarize", "transcribe", "synthesize_note",
-        "quality_gate", "minio_upload", "git_push",
+        "ig_reel_validate", "ig_reel_download", "ig_reel_audio",
+        "ig_reel_diarize", "ig_reel_transcribe", "ig_reel_merge",
+        "ig_reel_synthesize", "ig_quality_gate", "ig_cleanup",
+        "ig_minio_upload", "ig_git_push",
     ],
     "instagram_post": [
-        "cookie_validate", "extract_images", "synthesize_note",
-        "quality_gate", "minio_upload", "git_push",
+        "ig_reel_validate", "ig_carousel_metadata", "ig_carousel_extract",
+        "ig_carousel_synthesize", "ig_quality_gate",
+        "ig_minio_upload", "ig_git_push",
     ],
     "threads": [
-        "cookie_validate", "extract_content", "synthesize_note",
-        "quality_gate", "minio_upload", "git_push",
+        "threads_detect", "threads_extract_text", "threads_text_synthesize",
+        "threads_quality_gate", "threads_minio_upload", "threads_git_push",
+    ],
+    "threads_video": [
+        "threads_detect", "threads_extract_video", "threads_extract_audio",
+        "threads_diarize", "threads_transcribe", "threads_merge",
+        "threads_video_synthesize", "threads_quality_gate", "threads_cleanup",
+        "threads_minio_upload", "threads_git_push",
     ],
     "substack": [
         "firecrawl_extract", "synthesize_note", "quality_gate",

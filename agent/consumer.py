@@ -81,6 +81,9 @@ class Consumer:
 
         # Import pipeline modules to register steps
         from agent.pipelines import web  # noqa: F401
+        from agent.pipelines import youtube  # noqa: F401
+        from agent.pipelines import threads  # noqa: F401
+        from agent.pipelines import instagram  # noqa: F401
         from agent.pipelines import PIPELINES
 
         for steps in PIPELINES.values():
@@ -201,7 +204,7 @@ class Consumer:
                 task_id = task["id"]
                 content_type = task.get("content_type", "web")
 
-                if content_type in ("youtube", "instagram_reel", "mega"):
+                if content_type in ("youtube", "instagram_reel", "mega", "threads_video"):
                     # Video tasks — semaphore-controlled
                     task_obj = asyncio.create_task(self._execute_video(task))
                 else:

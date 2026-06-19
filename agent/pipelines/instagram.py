@@ -1,0 +1,1060 @@
+"""Instagram pipeline — reel video and carousel post extraction.
+
+Routing:
+- /reel/ → video pipeline (yt-dlp download → dual audio → diarize →
+  transcribe → merge → synthesize → quality → MinIO → Git)
+- /p/ → carousel pipeline (yt-dlp metadata → Playwright alt text extraction →
+  LLM synthesis → quality → MinIO → Git)
+
+Pitfalls handled:
+- Cookie validation: grep -c sessionid >= 1
+- Rate limiting: yt-dlp --sleep-requests 3 --sleep-interval 5 --max-sleep-interval 15 --limit-rate 2M
+- Music-only reels: post-transcription segments < 50 chars → use caption as primary content
+- Carousel hard cap: 2 slides max (Playwright alt text extraction), slides 3+ not extractable
+"""
+
+import json
+import re
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+
+from agent.config import Config
+from agent.exceptions import ErrorType, StepError
+from agent.llm import LLMClient, get_llm_client
+from agent.pipelines import Step, register_pipeline
+from agent.quality import quality_gate_retry_loop, quality_gate_youtube
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+# Instagram cookies file (Netscape format)
+IG_COOKIES_FILE = "/root/.hermes/cookies/ig_cookies.txt"
+
+# yt-dlp rate limiting for Instagram (per spec)
+IGDL_RATE_FLAGS = [
+    "--sleep-requests", "3",
+    "--sleep-interval", "5",
+    "--max-sleep-interval", "15",
+    "--limit-rate", "2M",
+]
+
+# Max retry rounds for quality gate
+MAX_QUALITY_RETRIES = 3
+
+# Music-only detection threshold (total chars across all segments)
+MUSIC_ONLY_CHAR_THRESHOLD = 50
+
+# Hard cap for carousel slides (Playwright alt text extraction)
+CAROUSEL_SLIDE_CAP = 2
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _validate_ig_cookies() -> None:
+    """Validate Instagram cookies before any operation.
+
+    Checks: sessionid present in cookie file (grep -c sessionid >= 1).
+
+    Raises:
+        StepError(PAUSE): If cookies invalid or missing.
+    """
+    cookie_path = Path(IG_COOKIES_FILE)
+    if not cookie_path.exists():
+        raise StepError(
+            f"Instagram cookies not found: {IG_COOKIES_FILE}",
+            error_type=ErrorType.PAUSE,
+            step_name="cookie_validate",
+            details="Export cookies from Chrome to /root/.hermes/cookies/ig_cookies.txt",
+        )
+
+    cookies_text = cookie_path.read_text()
+    sessionid_count = cookies_text.count("sessionid")
+    if sessionid_count < 1:
+        raise StepError(
+            "Instagram cookies missing sessionid",
+            error_type=ErrorType.PAUSE,
+            step_name="cookie_validate",
+            details="Re-export cookies from Chrome — sessionid is required",
+        )
+
+
+def _slug_path(slug: str) -> str:
+    """Convert slug to a filesystem-safe path segment."""
+    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)[:80]
+
+
+def _is_music_only(transcript: dict) -> bool:
+    """Detect if a reel is music-only (no real speech).
+
+    Post-transcription: if total chars across all segments < threshold,
+    the reel is likely music/BGM-only.
+
+    Args:
+        transcript: Transcript dict with segments.
+
+    Returns:
+        True if the reel appears to be music-only.
+    """
+    total_chars = sum(
+        len(seg.get("text", "").strip())
+        for seg in transcript.get("segments", [])
+    )
+    return total_chars < MUSIC_ONLY_CHAR_THRESHOLD
+
+
+# ── Reel Steps ────────────────────────────────────────────────────────────────
+
+def step_ig_reel_validate(task: dict, config: Config) -> str:
+    """Validate Instagram cookies for reel processing.
+
+    Args:
+        task: Task dict.
+        config: Config dataclass.
+
+    Returns:
+        "cookies_valid"
+    """
+    _validate_ig_cookies()
+    return "cookies_valid"
+
+
+def step_ig_reel_download(task: dict, config: Config) -> str:
+    """Download Instagram reel video via yt-dlp.
+
+    Uses cookies + rate limiting. Saves to temp dir.
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to the downloaded video file.
+    """
+    _validate_ig_cookies()
+
+    url = task["source_url"]
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    output_path = Path(config.temp_dir) / f"{safe_slug}_reel.mp4"
+
+    result = subprocess.run(
+        [
+            "yt-dlp",
+            "--cookies", IG_COOKIES_FILE,
+            "--js-runtimes", "node",
+            "--output", str(output_path.with_suffix("")),
+            *IGDL_RATE_FLAGS,
+            url,
+        ],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "Sign in" in stderr or "login" in stderr.lower():
+            raise StepError(
+                "Instagram auth failed — sessionid may be expired",
+                error_type=ErrorType.PAUSE,
+                step_name="reel_download",
+                details="Re-export cookies from Chrome",
+            )
+        if "Private" in stderr or "unavailable" in stderr.lower():
+            raise StepError(
+                "Reel is private or unavailable",
+                error_type=ErrorType.FAIL,
+                step_name="reel_download",
+            )
+        raise StepError(
+            f"yt-dlp reel download failed: {stderr[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="reel_download",
+        )
+
+    # yt-dlp may add extension automatically; find the actual file
+    actual_files = list(Path(config.temp_dir).glob(f"{safe_slug}_reel.*"))
+    if not actual_files:
+        raise StepError(
+            f"No output file found for slug {safe_slug}",
+            error_type=ErrorType.RETRY,
+            step_name="reel_download",
+        )
+
+    output_path = actual_files[0]
+
+    if output_path.stat().st_size < 1024:
+        raise StepError(
+            f"Downloaded reel too small ({output_path.stat().st_size} bytes)",
+            error_type=ErrorType.FAIL,
+            step_name="reel_download",
+        )
+
+    return str(output_path)
+
+
+def step_ig_reel_audio(task: dict, config: Config) -> str:
+    """Extract dual WAV audio (16kHz + 8kHz) from downloaded reel.
+
+    16kHz for transcription, 8kHz for diarization.
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        JSON string with paths to both WAV files.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    # Find the reel video file (yt-dlp may add .mp4 or other extension)
+    reel_files = list(Path(config.temp_dir).glob(f"{safe_slug}_reel.*"))
+    if not reel_files:
+        raise FileNotFoundError(f"Reel video not found for slug: {safe_slug}")
+
+    video_path = reel_files[0]
+    wav_16k_path = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
+    wav_8k_path = Path(config.temp_dir) / f"{safe_slug}_8k.wav"
+
+    # Extract 16kHz mono WAV for transcription
+    result_16k = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(video_path),
+            "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+            str(wav_16k_path),
+        ],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    if result_16k.returncode != 0:
+        raise StepError(
+            f"ffmpeg 16kHz extraction failed: {result_16k.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="reel_audio",
+        )
+
+    # Extract 8kHz mono WAV for diarization
+    result_8k = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(video_path),
+            "-ar", "8000", "-ac", "1", "-sample_fmt", "s16",
+            str(wav_8k_path),
+        ],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    if result_8k.returncode != 0:
+        raise StepError(
+            f"ffmpeg 8kHz extraction failed: {result_8k.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="reel_audio",
+        )
+
+    return json.dumps({
+        "wav_16k": str(wav_16k_path),
+        "wav_8k": str(wav_8k_path),
+        "video_path": str(video_path),
+    })
+
+
+def step_ig_reel_diarize(task: dict, config: Config) -> str:
+    """Diarize reel audio via pyannote using canonical script.
+
+    MUST run before transcription (sequential — RAM safety).
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to the diarization JSON file.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    audio_8k = Path(config.temp_dir) / f"{safe_slug}_8k.wav"
+    output_json = Path(config.temp_dir) / f"{safe_slug}_diarization.json"
+
+    if not audio_8k.exists():
+        raise FileNotFoundError(f"8kHz audio not found: {audio_8k}")
+
+    script_path = config.kb_agent_dir / "scripts" / "diarize.py"
+    if not script_path.exists():
+        raise StepError(
+            f"Diarize script not found: {script_path}",
+            error_type=ErrorType.FAIL,
+            step_name="diarize",
+        )
+
+    result = subprocess.run(
+        ["python3", str(script_path), str(audio_8k), str(output_json)],
+        capture_output=True, text=True, timeout=7200,
+    )
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "401" in stderr or "403" in stderr:
+            raise StepError(
+                "Pyannote model access denied — check HF_TOKEN",
+                error_type=ErrorType.PAUSE,
+                step_name="diarize",
+                details=stderr[:500],
+            )
+        raise StepError(
+            f"Diarization failed: {stderr[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="diarize",
+        )
+
+    if not output_json.exists():
+        raise StepError(
+            f"Diarization claimed success but output missing: {output_json}",
+            error_type=ErrorType.RETRY,
+            step_name="diarize",
+        )
+
+    return str(output_json)
+
+
+def step_ig_reel_transcribe(task: dict, config: Config) -> str:
+    """Transcribe reel audio via faster-whisper using canonical script.
+
+    MUST run after diarization (sequential — RAM safety).
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to the transcript JSON file.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    audio_16k = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
+    output_json = Path(config.temp_dir) / f"{safe_slug}_transcript.json"
+
+    if not audio_16k.exists():
+        raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
+
+    script_path = config.kb_agent_dir / "scripts" / "transcribe.py"
+    if not script_path.exists():
+        raise StepError(
+            f"Transcribe script not found: {script_path}",
+            error_type=ErrorType.FAIL,
+            step_name="transcribe",
+        )
+
+    result = subprocess.run(
+        ["python3", str(script_path), str(audio_16k), str(output_json), "0"],
+        capture_output=True, text=True, timeout=7200,
+    )
+
+    if result.returncode != 0:
+        raise StepError(
+            f"Transcription failed: {result.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="transcribe",
+        )
+
+    if not output_json.exists():
+        raise StepError(
+            f"Transcription claimed success but output missing: {output_json}",
+            error_type=ErrorType.RETRY,
+            step_name="transcribe",
+        )
+
+    return str(output_json)
+
+
+def step_ig_reel_merge(task: dict, config: Config) -> str:
+    """Merge diarization speaker labels with transcript segments.
+
+    Merges at segment midpoint. Performs music-only detection.
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        JSON string summarizing merge result (includes music_only flag).
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    diar_path = Path(config.temp_dir) / f"{safe_slug}_diarization.json"
+    trans_path = Path(config.temp_dir) / f"{safe_slug}_transcript.json"
+
+    if not diar_path.exists():
+        raise FileNotFoundError(f"Diarization not found: {diar_path}")
+    if not trans_path.exists():
+        raise FileNotFoundError(f"Transcript not found: {trans_path}")
+
+    diar = json.loads(diar_path.read_text())
+    trans = json.loads(trans_path.read_text())
+
+    dia_segments = diar.get("segments", [])
+    if not dia_segments:
+        raise StepError(
+            "Diarization produced zero segments",
+            error_type=ErrorType.FAIL,
+            step_name="merge",
+        )
+
+    # Music-only detection BEFORE merge (avoid unnecessary work)
+    music_only = _is_music_only(trans)
+
+    # Merge: assign speaker to each transcript segment at midpoint
+    for seg in trans.get("segments", []):
+        seg_mid = (seg.get("start", 0) + seg.get("end", 0)) / 2
+
+        best_speaker = None
+        for dia in dia_segments:
+            if dia.get("start", 0) <= seg_mid <= dia.get("end", 0):
+                speaker = dia.get("speaker", "Unknown")
+                if "|" in speaker:
+                    if best_speaker is None:
+                        best_speaker = speaker
+                else:
+                    if best_speaker is None or "|" in best_speaker:
+                        best_speaker = speaker
+
+        seg["speaker"] = best_speaker if best_speaker else "Unknown"
+        if "|" in str(seg.get("speaker", "")):
+            seg["overlap"] = True
+
+    # Count distinct speakers
+    speakers = set(
+        s.get("speaker", "Unknown") for s in trans.get("segments", [])
+    )
+
+    trans["music_only"] = music_only
+
+    # Write merged
+    merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+    merged_path.write_text(json.dumps(trans, indent=2, ensure_ascii=False))
+
+    return json.dumps({
+        "segments": len(trans.get("segments", [])),
+        "speakers": len(speakers),
+        "music_only": music_only,
+        "merged_path": str(merged_path),
+    })
+
+
+def step_ig_reel_synthesize(task: dict, config: Config) -> str:
+    """LLM synthesis for Instagram reel videos.
+
+    Music-only detection: if transcript < 50 chars total, uses caption
+    as primary content with warning annotation.
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to the generated note file.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    source_url = task.get("source_url", "")
+
+    merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+    if not merged_path.exists():
+        raise FileNotFoundError(f"Merged transcript not found: {merged_path}")
+
+    merged = json.loads(merged_path.read_text())
+    music_only = merged.get("music_only", False)
+
+    llm = get_llm_client(config)
+
+    # Build compact transcript
+    transcript_text = _format_transcript_for_llm(merged)
+    source_domain = urlparse(source_url).netloc or "instagram.com"
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    if music_only:
+        # Music-only reel: use caption as primary content
+        system_prompt = f"""You are a knowledge base curator processing an Instagram reel.
+
+WARNING: This reel is music-only — the audio contains no meaningful speech.
+The transcript is provided for completeness but the primary content
+comes from the reel's caption/description.
+
+SOURCE: Instagram reel ({source_url})
+DATE: {date_str}
+
+TASK: Write a note that:
+1. Notes this is a music/BGM reel with minimal speech
+2. If a caption was detected, analyze it as the primary content
+3. Describe what can be observed from the transcript (if any words were detected)
+
+OUTPUT FORMAT:
+- YAML frontmatter: date, source: instagram.com, source_url, minio placeholder,
+  confidence: low (music-only reel), tags: [instagram, reel, music]
+- Note sections: Title, Summary, Caption Analysis (if any), Transcript Notes,
+  Reliability (note music-only limitation)"""
+    else:
+        system_prompt = f"""You are a knowledge base curator specialized in Instagram reel content.
+
+SOURCE: An Instagram reel video transcript.
+
+INSTAGRAM CONTEXT:
+- This is short-form social media content — typically 15-90 seconds
+- Format: vertical video, often trending audio + visual content
+
+TASK: Write a concise but thorough analysis note.
+
+SECTIONS:
+1. YAML frontmatter
+2. Title — descriptive
+3. Summary — 2-3 sentences
+4. Key Points — ≥2, with direct quotes from transcript
+5. Speaker Analysis — who is speaking, perspective
+6. Context — platform context, trends if identifiable
+7. Critical Analysis — what's being communicated, what's omitted
+8. Reliability — confidence assessment
+
+OUTPUT FORMAT:
+- Start with YAML frontmatter:
+  date: {date_str}
+  source: instagram.com
+  source_url: {source_url}
+  minio: <filled by archival step>
+  confidence: plausible
+  tags: [instagram, reel]
+- Then sections as above."""
+
+    user_prompt = f"""TRANSCRIPT:
+{transcript_text}
+
+=== END TRANSCRIPT ===
+
+Write a note following the template above.
+{'This is a music-only reel — prioritize any detected caption text over the transcript.' if music_only else 'Analyze the full transcript for key points.'}"""
+
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    note_content = response.content
+
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(note_content, encoding="utf-8")
+
+    return str(note_path)
+
+
+# ── Carousel Steps ────────────────────────────────────────────────────────────
+
+def step_ig_carousel_metadata(task: dict, config: Config) -> str:
+    """Extract Instagram carousel metadata via yt-dlp.
+
+    Gets: caption, likes, author, playlist_count (slide count).
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to metadata JSON file.
+    """
+    _validate_ig_cookies()
+
+    url = task["source_url"]
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    # Extract metadata via yt-dlp print
+    result = subprocess.run(
+        [
+            "yt-dlp",
+            "--cookies", IG_COOKIES_FILE,
+            "--js-runtimes", "node",
+            "--print", "%(title)s||%(uploader)s||%(like_count)s||%(playlist_count)s",
+            *IGDL_RATE_FLAGS,
+            url,
+        ],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    metadata = {
+        "url": url,
+        "title": "",
+        "uploader": "",
+        "like_count": 0,
+        "playlist_count": 0,
+    }
+
+    if result.returncode == 0 and result.stdout.strip():
+        parts = result.stdout.strip().split("||")
+        if len(parts) >= 1:
+            metadata["title"] = parts[0]
+        if len(parts) >= 2:
+            metadata["uploader"] = parts[1]
+        if len(parts) >= 3:
+            try:
+                metadata["like_count"] = int(parts[2])
+            except (ValueError, TypeError):
+                pass
+        if len(parts) >= 4:
+            try:
+                metadata["playlist_count"] = int(parts[3])
+            except (ValueError, TypeError):
+                pass
+
+    # Also try to get caption via description
+    caption_result = subprocess.run(
+        [
+            "yt-dlp",
+            "--cookies", IG_COOKIES_FILE,
+            "--js-runtimes", "node",
+            "--print", "%(description)s",
+            *IGDL_RATE_FLAGS,
+            url,
+        ],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    if caption_result.returncode == 0:
+        metadata["caption"] = caption_result.stdout.strip()
+
+    # Write metadata
+    meta_path = Path(config.temp_dir) / f"{safe_slug}_carousel_meta.json"
+    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+
+    return str(meta_path)
+
+
+def step_ig_carousel_extract(task: dict, config: Config) -> str:
+    """Extract alt text from carousel slides via Playwright.
+
+    Hard cap: 2 slides. Slides 3+ are NOT extractable (anti-bot measures).
+    Saves alt texts to JSON. No vision_analyze needed (alt text is content).
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to extracted slides JSON file.
+    """
+    url = task["source_url"]
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    # Build Playwright script for alt text extraction
+    playwright_script = f"""import asyncio, json, sys
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = await context.new_page()
+        
+        try:
+            await page.goto("{url}", wait_until="networkidle", timeout=30000)
+        except Exception:
+            pass
+        
+        await page.wait_for_timeout(3000)
+        
+        slides = []
+        # Find all img elements — Instagram carousel slides
+        images = await page.query_selector_all('article img')
+        
+        slide_num = 0
+        for img in images:
+            if slide_num >= {CAROUSEL_SLIDE_CAP}:
+                break
+            
+            alt = await img.get_attribute('alt') or ''
+            src = await img.get_attribute('src') or ''
+            
+            if src and (alt or slide_num < {CAROUSEL_SLIDE_CAP}):
+                slides.append({{
+                    "slide": slide_num + 1,
+                    "alt_text": alt,
+                    "src": src,
+                }})
+                slide_num += 1
+        
+        await browser.close()
+        print(json.dumps(slides))
+        
+        if slide_num < {CAROUSEL_SLIDE_CAP}:
+            sys.stderr.write(f"WARNING: Only found {{slide_num}}/{CAROUSEL_SLIDE_CAP} slides\\n")
+
+asyncio.run(main())
+"""
+
+    script_path = Path(config.temp_dir) / f"{safe_slug}_playwright.py"
+    script_path.write_text(playwright_script)
+
+    result = subprocess.run(
+        ["python3", str(script_path)],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    if result.returncode != 0:
+        raise StepError(
+            f"Playwright carousel extraction failed: {result.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="carousel_extract",
+        )
+
+    try:
+        slides = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        raise StepError(
+            f"Failed to parse Playwright output for carousel: {result.stdout[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="carousel_extract",
+        )
+
+    # Write extracted slides
+    slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
+    slides_data = {
+        "url": url,
+        "slides": slides,
+        "slide_count": len(slides),
+        "cap_note": f"Hard cap: {CAROUSEL_SLIDE_CAP} slides. Slides beyond {CAROUSEL_SLIDE_CAP} are not extractable.",
+    }
+    slides_path.write_text(json.dumps(slides_data, indent=2, ensure_ascii=False))
+
+    # Clean up the temp script
+    try:
+        script_path.unlink()
+    except OSError:
+        pass
+
+    return str(slides_path)
+
+
+def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
+    """LLM synthesis for Instagram carousel posts.
+
+    Uses alt text from extracted slides + metadata caption.
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        Path to the generated note file.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    source_url = task.get("source_url", "")
+
+    # Load carousel data
+    slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
+    if not slides_path.exists():
+        raise FileNotFoundError(f"Carousel slides not found: {slides_path}")
+
+    slides_data = json.loads(slides_path.read_text())
+
+    # Load metadata
+    meta_path = Path(config.temp_dir) / f"{safe_slug}_carousel_meta.json"
+    caption = ""
+    uploader = ""
+    like_count = 0
+    playlist_count = 0
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        caption = meta.get("caption", "")
+        uploader = meta.get("uploader", "")
+        like_count = meta.get("like_count", 0)
+        playlist_count = meta.get("playlist_count", 0)
+
+    # Build content for LLM
+    slides_text = "\n\n".join(
+        f"Slide {s['slide']}: {s.get('alt_text', '(no alt text)')}"
+        for s in slides_data.get("slides", [])
+    )
+
+    llm = get_llm_client(config)
+
+    source_domain = urlparse(source_url).netloc or "instagram.com"
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    system_prompt = f"""You are a knowledge base curator specialized in Instagram carousel posts.
+
+SOURCE: An Instagram carousel post by @{uploader}.
+
+CONTEXT:
+- {playlist_count} slides in carousel (extracted {len(slides_data.get('slides', []))})
+- {like_count} likes
+- Caption: {caption[:500] if caption else '(no caption)'}
+
+TASK: Write a comprehensive note analyzing this carousel post.
+Each slide's alt text is provided — this IS the slide content.
+
+SECTIONS:
+1. YAML frontmatter
+2. Title — descriptive title
+3. Summary — 2-3 sentences capturing the carousel's message
+4. Slide-by-Slide Analysis — for each slide, describe its content from alt text
+5. Key Themes — patterns across slides
+6. Context — who posted, why, platform context
+7. Critical Analysis — strengths, weaknesses, what's communicated
+8. Reliability — confidence level
+
+OUTPUT FORMAT:
+- Start with YAML frontmatter:
+  date: {date_str}
+  source: instagram.com (@{uploader})
+  source_url: {source_url}
+  minio: <filled by archival step>
+  confidence: plausible
+  tags: [instagram, carousel]
+- Then sections as above."""
+
+    user_prompt = f"""CAPTION:
+{caption if caption else '(no caption)'}
+
+SLIDES ({len(slides_data.get('slides', []))} of {playlist_count} extracted):
+{slides_text}
+
+=== END SLIDES ===
+
+Write a note analyzing this carousel post.
+Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could be extracted (anti-bot limitation on slides 3+)."""
+
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    note_content = response.content
+
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(note_content, encoding="utf-8")
+
+    return str(note_path)
+
+
+# ── Quality Gate ──────────────────────────────────────────────────────────────
+
+def step_ig_quality_gate(task: dict, config: Config) -> str:
+    """Run quality gates on the generated Instagram note.
+
+    Uses YouTube quality gate for reel videos.
+    Uses simpler size check for carousel posts.
+
+    Args:
+        task: Task dict with slug, content_type.
+        config: Config dataclass.
+
+    Returns:
+        Status string: "passed" or description of failures.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    content_type = task.get("content_type", "instagram_post")
+
+    if content_type == "instagram_reel":
+        note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+    else:
+        note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+
+    if not note_path.exists():
+        raise FileNotFoundError(f"Note not found: {note_path}")
+
+    if content_type == "instagram_reel":
+        llm = get_llm_client(config)
+        passed, rounds = quality_gate_retry_loop(
+            note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
+        )
+        return json.dumps({"passed": passed, "rounds": rounds})
+    else:
+        # Carousel: simple size + section check
+        content = note_path.read_text(encoding="utf-8")
+        size = len(content)
+
+        # Must have Slide-by-Slide Analysis section
+        has_slide_analysis = "## Slide-by-Slide Analysis" in content or "## Slide-by-Slide" in content
+
+        passed = size >= 2000 and has_slide_analysis
+        failures = []
+        if size < 2000:
+            failures.append(f"Note too short: {size} chars < 2000")
+        if not has_slide_analysis:
+            failures.append("Missing Slide-by-Slide Analysis section")
+
+        return json.dumps({
+            "passed": passed,
+            "failures": failures,
+            "rounds": 1,
+        })
+
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+
+def step_ig_cleanup(task: dict, config: Config) -> str:
+    """Clean up temporary files after successful pipeline execution.
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        Status message listing removed files.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    to_remove = []
+    for ext in ["_reel.mp4", "_reel.webm", "_16k.wav", "_8k.wav",
+                "_playwright.py", "_carousel_slides.json", "_carousel_meta.json"]:
+        path = Path(config.temp_dir) / f"{safe_slug}{ext}"
+        if path.exists():
+            to_remove.append(str(path.name))
+
+    removed = []
+    for filename in to_remove:
+        path = Path(config.temp_dir) / filename
+        try:
+            path.unlink()
+            removed.append(filename)
+        except OSError:
+            pass
+
+    return f"Cleaned up: {', '.join(removed)}" if removed else "Nothing to clean up"
+
+
+# ── MinIO Upload ──────────────────────────────────────────────────────────────
+
+def step_ig_minio_upload(task: dict, config: Config) -> str:
+    """Upload the generated note to MinIO.
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        MinIO URL of the uploaded note.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+    if not note_path.exists():
+        raise FileNotFoundError(f"Note not found: {note_path}")
+
+    bucket = config.minio_bucket
+
+    # Upload note
+    note_key = f"instagram/{safe_slug}.md"
+    result = subprocess.run(
+        [
+            "mc", "cp",
+            str(note_path),
+            f"minio/{bucket}/{note_key}",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    if result.returncode != 0:
+        raise StepError(
+            f"MinIO upload failed: {result.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="minio_upload",
+        )
+
+    # Update note frontmatter with minio URL
+    minio_url = f"minio://{bucket}/{note_key}"
+    content = note_path.read_text(encoding="utf-8")
+    updated = re.sub(
+        r"minio:\s*<filled by archival step>",
+        f"minio: {minio_url}",
+        content,
+    )
+    note_path.write_text(updated, encoding="utf-8")
+
+    return minio_url
+
+
+# ── Git Push ──────────────────────────────────────────────────────────────────
+
+def step_ig_git_push(task: dict, config: Config) -> str:
+    """Push the generated note to the Obsidian vault Git repo.
+
+    Args:
+        task: Task dict with slug.
+        config: Config dataclass.
+
+    Returns:
+        Commit hash.
+    """
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+    if not note_path.exists():
+        raise FileNotFoundError(f"Note not found: {note_path}")
+
+    try:
+        subprocess.run(
+            ["git", "-C", str(config.vault_path), "add", str(note_path)],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        commit_result = subprocess.run(
+            ["git", "-C", str(config.vault_path), "commit", "-m", f"add instagram: {safe_slug}"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        subprocess.run(
+            ["git", "-C", str(config.vault_path), "push", "origin", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        commit_hash = (
+            commit_result.stdout.strip().split()[-1]
+            if commit_result.stdout else "unknown"
+        )
+        return commit_hash
+    except subprocess.CalledProcessError as e:
+        raise StepError(
+            f"Git push failed: {e.stderr.strip() if e.stderr else str(e)}",
+            error_type=ErrorType.RETRY,
+            step_name="git_push",
+        ) from e
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _format_transcript_for_llm(merged: dict) -> str:
+    """Format merged transcript as compact text for LLM consumption."""
+    lines = []
+    for seg in merged.get("segments", []):
+        start = seg.get("start", 0)
+        speaker = seg.get("speaker", "Unknown")
+        text = seg.get("text", "").strip()
+        if text:
+            lines.append(f"({start:.1f}s) {speaker}: {text}")
+    return "\n".join(lines)
+
+
+# ── Pipeline Registration ────────────────────────────────────────────────────
+
+# Instagram reel pipeline: validate → download → audio → diarize → transcribe → merge → synthesize → quality → cleanup → minio → git
+register_pipeline("instagram_reel", [
+    Step(name="ig_reel_validate", fn=step_ig_reel_validate, on_error="pause"),
+    Step(name="ig_reel_download", fn=step_ig_reel_download, on_error="retry"),
+    Step(name="ig_reel_audio", fn=step_ig_reel_audio, on_error="retry"),
+    Step(name="ig_reel_diarize", fn=step_ig_reel_diarize, on_error="retry"),
+    Step(name="ig_reel_transcribe", fn=step_ig_reel_transcribe, on_error="retry"),
+    Step(name="ig_reel_merge", fn=step_ig_reel_merge, on_error="retry"),
+    Step(name="ig_reel_synthesize", fn=step_ig_reel_synthesize, on_error="retry"),
+    Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
+    Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
+    Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
+])
+
+# Instagram carousel pipeline: validate → metadata → extract → synthesize → quality → minio → git
+register_pipeline("instagram_post", [
+    Step(name="ig_reel_validate", fn=step_ig_reel_validate, on_error="pause"),
+    Step(name="ig_carousel_metadata", fn=step_ig_carousel_metadata, on_error="retry"),
+    Step(name="ig_carousel_extract", fn=step_ig_carousel_extract, on_error="retry"),
+    Step(name="ig_carousel_synthesize", fn=step_ig_carousel_synthesize, on_error="retry"),
+    Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
+    Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
+])

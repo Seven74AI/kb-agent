@@ -35,6 +35,12 @@ class Config:
     youtube_min_concepts: int = 3
     youtube_min_key_points: int = 8
     youtube_min_density: int = 100
+    threads_video_min_density: int = 100
+    threads_text_min_quotes: int = 2
+    threads_text_min_size: int = 2000
+    ig_reel_min_concepts: int = 2
+    ig_reel_min_key_points: int = 3
+    ig_carousel_min_size: int = 2000
 
     # ── LLM ──
     llm_provider: str = "deepseek"
@@ -115,6 +121,12 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         youtube_min_concepts=int(quality.get("youtube_min_concepts", 3)),
         youtube_min_key_points=int(quality.get("youtube_min_key_points", 8)),
         youtube_min_density=int(quality.get("youtube_min_density", 100)),
+        threads_video_min_density=int(quality.get("threads_video_min_density", 100)),
+        threads_text_min_quotes=int(quality.get("threads_text_min_quotes", 2)),
+        threads_text_min_size=int(quality.get("threads_text_min_size", 2000)),
+        ig_reel_min_concepts=int(quality.get("ig_reel_min_concepts", 2)),
+        ig_reel_min_key_points=int(quality.get("ig_reel_min_key_points", 3)),
+        ig_carousel_min_size=int(quality.get("ig_carousel_min_size", 2000)),
         # LLM
         llm_provider=str(_env_or_default(raw.get("llm_provider"), "KB_LLM_PROVIDER", "deepseek")),
         llm_model=str(_env_or_default(raw.get("llm_model"), "KB_LLM_MODEL", "deepseek-v4-pro")),
