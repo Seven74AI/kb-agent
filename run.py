@@ -182,12 +182,6 @@ def main():
         shutdown_flag["shutdown"] = True
         print(f"[run] Received signal {signum} — graceful shutdown")
 
-        # Stop consumer event loop
-        consumer_loop.call_soon_threadsafe(
-            lambda: setattr(
-                consumer_loop, "_kb_shutdown", True
-            )
-        )
         # Stop Flask
         from flask import request
         # Use werkzeug shutdown
