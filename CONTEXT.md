@@ -231,7 +231,7 @@ Two tiers, run AFTER synthesis, BEFORE git push:
 - Book: line_count ≥ 100, quote_count ≥ 4, size ≥ 8K chars, fact_check_count ≥ 2,
   chapter_coverage (every source chapter → note section)
 - YouTube: concept_count ≥ 3, key_points ≥ 8, density ≥ 100 chars/min
-- Article: quote_count ≥ 4, size ≥ 5K chars
+- Article: quote_count ≥ 4, size ≥ 5K chars, fact_check_count ≥ 2
 
 **Tier 2 — Structural review (cheap LLM call):**
 - Is the dominant section actually dominant (Content > Critique)?

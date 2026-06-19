@@ -33,6 +33,7 @@ class Config:
     book_min_fact_checks: int = 2
     article_min_quotes: int = 4
     article_min_size: int = 5000
+    article_min_fact_checks: int = 2
     youtube_min_concepts: int = 3
     youtube_min_key_points: int = 8
     youtube_min_density: int = 100
@@ -121,6 +122,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         book_min_fact_checks=int(quality.get("book_min_fact_checks", 2)),
         article_min_quotes=int(quality.get("article_min_quotes", 4)),
         article_min_size=int(quality.get("article_min_size", 5000)),
+        article_min_fact_checks=int(quality.get("article_min_fact_checks", 2)),
         youtube_min_concepts=int(quality.get("youtube_min_concepts", 3)),
         youtube_min_key_points=int(quality.get("youtube_min_key_points", 8)),
         youtube_min_density=int(quality.get("youtube_min_density", 100)),

@@ -12,6 +12,14 @@ import re
 def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) -> tuple[bool, list[str]]:
     """Run quality gates on a web article note.
 
+    Checks:
+    - quote_count >= config.article_min_quotes
+    - size >= config.article_min_size
+    - line_count >= 20
+    - fact_check_count >= config.article_min_fact_checks
+    - Section-by-Section > Critical Analysis (Tier 2 structural)
+    - No empty/placeholder sections
+
     Args:
         note_path: Path to the generated note file.
         config: Config dataclass with quality thresholds.
@@ -60,6 +68,16 @@ def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) ->
                 f"Critical Analysis ({critique_section_lines} lines) longer than "
                 f"Section-by-Section ({content_section_lines} lines) — unbalanced"
             )
+
+    # Fact-check count — count bullet points under \"### Factual Issues\"
+    # within \"## Critical Analysis\"
+    fact_check_count = _count_fact_checks(lines)
+    if fact_check_count < config.article_min_fact_checks:
+        failures.append(
+            f"Too few fact checks: {fact_check_count} < "
+            f"{config.article_min_fact_checks} required (under ## Critical Analysis"
+            f" → ### Factual Issues)"
+        )
 
     # Check for empty sections
     current_section = None
