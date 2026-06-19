@@ -224,6 +224,7 @@ class TestQualityScore:
 class TestEpubExtraction:
     """Tests for step_extract_epub."""
 
+    @patch("agent.pipelines.books.ITEM_DOCUMENT", 9)
     @patch("agent.pipelines.books.epub")
     @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_basic(self, mock_bs, mock_epub, config, book_task):
@@ -276,6 +277,7 @@ class TestEpubExtraction:
         assert "CHAPTER 0" in content
         assert "CHAPTER 1" in content
 
+    @patch("agent.pipelines.books.ITEM_DOCUMENT", 9)
     @patch("agent.pipelines.books.epub")
     @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_preserves_order(self, mock_bs, mock_epub, config, book_task):
@@ -313,6 +315,7 @@ class TestEpubExtraction:
         idx_b = full_text.index("CHAPTER 1")
         assert idx_a < idx_b, "Chapter order must be preserved"
 
+    @patch("agent.pipelines.books.ITEM_DOCUMENT", 9)
     @patch("agent.pipelines.books.epub")
     @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_skips_tiny_fragments(self, mock_bs, mock_epub, config, book_task):
@@ -361,14 +364,23 @@ class TestPdfExtraction:
         book_task["source_url"] = str(pdf_path)
 
         # pymupdf.open is called twice (preflight + extraction), so return new doc each time
+        text_per_page = (
+            "Page content with enough characters to pass "
+            "the scanned detection threshold of 500 chars. "
+            * 5
+        )
+
         def make_doc():
             mock_doc = MagicMock()
             mock_doc.page_count = 3
-            mock_doc.__getitem__.return_value.get_text.return_value = (
-                "Page content with enough characters to pass "
-                "the scanned detection threshold of 500 chars. "
-                * 5
-            )
+            # Make doc iterable over pages
+            pages = []
+            for _ in range(3):
+                page = MagicMock()
+                page.get_text.return_value = text_per_page
+                pages.append(page)
+            mock_doc.__iter__.return_value = iter(pages)
+            mock_doc.__getitem__.return_value = pages[0]
             return mock_doc
 
         mock_pymupdf.open.side_effect = [make_doc(), make_doc()]
