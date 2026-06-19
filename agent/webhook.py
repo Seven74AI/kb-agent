@@ -90,7 +90,18 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "threads_minio_upload", "threads_git_push",
     ],
     "substack": [
-        "firecrawl_extract", "synthesize_note", "quality_gate",
+        "firecrawl_extract", "substack_cleanup", "synthesize_note", "quality_gate",
+        "minio_upload", "see_also", "git_push",
+    ],
+    "substack_text": [
+        "firecrawl_extract", "substack_cleanup", "synthesize_note", "quality_gate",
+        "minio_upload", "see_also", "git_push",
+    ],
+    "substack_video": [
+        "substack_video_pause",
+    ],
+    "substack_image": [
+        "firecrawl_extract", "substack_image_extract", "synthesize_note", "quality_gate",
         "minio_upload", "see_also", "git_push",
     ],
     "book": [
@@ -424,8 +435,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     {% endif %}
 
-    <p class="refresh">Auto-refresh: 60s · {{ now }}</p>
-    <script>setTimeout(() => location.reload(), 60000);</script>
+    <p class="refresh">Auto-refresh: <select id="polling-interval" onchange="setPolling(this.value)">
+        <option value="5000">5s</option>
+        <option value="30000">30s</option>
+        <option value="60000" selected>1min</option>
+    </select> · {{ now }}</p>
+    <script>
+    const POLL_KEY = 'kb-agent-polling-ms';
+    const saved = localStorage.getItem(POLL_KEY) || '60000';
+    document.getElementById('polling-interval').value = saved;
+    let timer = null;
+
+    function setPolling(val) {
+        localStorage.setItem(POLL_KEY, val);
+        clearTimeout(timer);
+        scheduleRefresh(parseInt(val));
+    }
+
+    function scheduleRefresh(ms) {
+        timer = setTimeout(() => location.reload(), ms);
+    }
+
+    // Start with saved preference
+    scheduleRefresh(parseInt(saved));
+
+    // Stop refresh when user interacts with forms to avoid data loss
+    document.querySelectorAll('form').forEach(f => {
+        f.addEventListener('submit', () => { clearTimeout(timer); });
+    });
+    </script>
 </body>
 </html>"""
 
