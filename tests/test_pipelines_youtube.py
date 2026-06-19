@@ -849,12 +849,13 @@ def test_step_git_push(config, task_dict):
         capture_output=True,
     )
     # Set up a dummy remote to avoid "no push destination" error
+    dummy_remote = str(config.temp_dir / f"test-dummy-remote-{slug}")
     subprocess.run(
-        ["git", "-C", str(config.vault_path), "remote", "add", "origin", "/tmp/test-dummy-remote"],
+        ["git", "-C", str(config.vault_path), "remote", "add", "origin", dummy_remote],
         capture_output=True,
     )
-    # Initialize the dummy remote as a bare repo
-    subprocess.run(["git", "init", "--bare", "/tmp/test-dummy-remote"], capture_output=True)
+    # Initialize the dummy remote as a bare repo (use temp path to avoid cross-test contamination)
+    subprocess.run(["git", "init", "--bare", dummy_remote], capture_output=True)
     
     result = step_git_push(task_dict, config)
     assert len(result) > 0  # Should get a commit hash

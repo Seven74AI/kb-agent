@@ -452,10 +452,10 @@ minio: <filled by archival step>
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         result = step_ig_minio_upload(reel_task, config)
-        assert "minio://" in result
+        assert "http://vmi3304846.tail5c02a1.ts.net:9000/" in result
 
         content = note_path.read_text()
-        assert "minio: minio://" in content
+        assert "minio: http://vmi3304846.tail5c02a1.ts.net:9000/" in content
 
 
 # ── Git Push ─────────────────────────────────────────────────────────────────
