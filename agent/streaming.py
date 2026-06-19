@@ -194,3 +194,31 @@ def read_logs(logs_path: Path, task_id: str, step_name: str | None = None,
 
     conn.close()
     return [dict(r) for r in rows]
+
+
+def log_progress(
+    logs_conn: sqlite3.Connection,
+    task_id: str,
+    step_name: str,
+    message: str,
+    stream: str = "stdout",
+) -> None:
+    """Synchronous progress logger — safe to call from any thread.
+
+    Write a progress message to step_logs for dashboard visibility.
+    Designed for sync step functions running in run_in_executor threads
+    (logs_conn must have check_same_thread=False, set by init_db for logs.db).
+
+    Args:
+        logs_conn: SQLite connection to logs.db.
+        task_id: The task UUID.
+        step_name: Name of the current pipeline step.
+        message: Progress message to log.
+        stream: 'stdout' or 'stderr' (default: stdout).
+    """
+    with logs_conn:
+        logs_conn.execute(
+            "INSERT INTO step_logs (task_id, step_name, stream, content) "
+            "VALUES (?, ?, ?, ?)",
+            (task_id, step_name, stream, message),
+        )
