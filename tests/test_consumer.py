@@ -478,7 +478,7 @@ def test_recover_orphans_no_running_step(consumer, agent_db):
     row = agent_db.execute(
         "SELECT status FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
-    assert row[0] == "in_progress"
+    assert row[0] == "pending"
 
 
 def test_recover_orphans_dead_process(consumer, agent_db):

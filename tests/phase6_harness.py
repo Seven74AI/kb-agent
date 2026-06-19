@@ -371,9 +371,10 @@ def test_2_youtube():
     step_statuses = {s["name"]: s["status"] for s in steps}
 
     # Verify all expected steps ran
-    expected = ["cookie_validate", "yt_dlp_download", "ffmpeg_extract_audio",
-                "diarize", "transcribe", "synthesize_note",
-                "quality_gate", "minio_upload", "git_push"]
+    expected = ["extract_metadata", "download_video", "extract_audio",
+                "diarize", "transcribe", "merge_and_identify",
+                "cleanup_temp", "synthesize_youtube", "quality_gate",
+                "minio_upload", "git_push"]
     for step in expected:
         status = step_statuses.get(step, "missing")
         checks.append(f"{step}={status}")

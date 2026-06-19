@@ -379,7 +379,7 @@ class Consumer:
         subprocesses survive a consumer crash.
         """
         # Resolve step from the task's pipeline first (avoids namespace collisions)
-        from agent.pipelines import PIPELINES, get_pipeline
+        from agent.pipelines import get_pipeline
         content_type = task.get("content_type", "web")
         pipeline = get_pipeline(content_type)
         entry = None
