@@ -687,7 +687,7 @@ The video presents opinions as facts in some sections.
     )
     
     call_count = [0]
-    def mock_llm_call(system_prompt="", user_prompt=""):
+    def mock_llm_call(system_prompt="", user_prompt="", **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
             return mock_response_pass1

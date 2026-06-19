@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -663,8 +664,10 @@ def step_synthesize_book(task: dict, config: Config) -> str:
     full_text = full_text_path.read_text(encoding="utf-8")
     estimated_tokens = len(full_text) // CHARS_PER_TOKEN
 
-    # Get LLM client
+    # Get LLM client with archiving
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Determine note path
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
@@ -679,6 +682,7 @@ def step_synthesize_book(task: dict, config: Config) -> str:
         response = llm.call(
             system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            role="synthesis",
         )
         note_content = response.content
     else:
@@ -777,6 +781,7 @@ TEXT ENDS"""
                     "No markdown, no explanation — just the array."
                 ),
                 user_prompt=prompt,
+                role="boundary",
             )
 
             # Parse JSON array from response
@@ -922,6 +927,7 @@ quotes, and analysis. Maintain the full template structure."""
             response = llm.call(
                 system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
                 user_prompt=chunk_prompt,
+                role="synthesis",
             )
             note_so_far = response.content
         except Exception:
@@ -935,6 +941,7 @@ quotes, and analysis. Maintain the full template structure."""
             full_text[:BOUNDARY_EXPAND_TOKENS * CHARS_PER_TOKEN],
             title, author
         ),
+        role="synthesis",
     ).content
 
 

@@ -289,7 +289,7 @@ def _structural_review(note_content: str, llm) -> str:
     )
 
     try:
-        response = llm.call(system_prompt=prompt, user_prompt="Review this note.")
+        response = llm.call(system_prompt=prompt, user_prompt="Review this note.", role="review")
         return response.content.strip()
     except Exception as e:
         # If LLM review fails, pass through (don't block on infra)
