@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
 from agent.archival import step_minio_upload as archival_minio_upload
@@ -274,8 +275,10 @@ def step_synthesize_web(task: dict, config: Config) -> str:
     source_content = source_path.read_text(encoding="utf-8")
     estimated_tokens = _estimate_tokens(source_content)
 
-    # Get the LLM client
+    # Open logs DB and get the LLM client with archiving enabled
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     note_path = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,7 +309,7 @@ def _synthesize_single_pass(
         f"=== SOURCE ===\n{source}\n=== END SOURCE ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     return response.content
 
 
@@ -354,6 +357,7 @@ def _synthesize_chunked(
     polish_response = llm.call(
         system_prompt=polish_prompt,
         user_prompt=f"Polish this note:\n\n{previous_note}",
+        role="polish",
     )
     return polish_response.content
 
@@ -394,7 +398,7 @@ def _synthesize_chunk(
         f"=== CHUNK {chunk_index + 1}/{total} ===\n{chunk}\n=== END CHUNK ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     return response.content
 
 
@@ -554,7 +558,7 @@ def _find_semantic_boundaries(source: str, llm: LLMClient) -> list[tuple[int, in
     )
 
     try:
-        response = llm.call(system_prompt=boundary_prompt, user_prompt=user_prompt)
+        response = llm.call(system_prompt=boundary_prompt, user_prompt=user_prompt, role="boundary")
         # Extract JSON from response
         content = response.content.strip()
         # Find the JSON array in the response
@@ -645,7 +649,9 @@ def step_see_also(task: dict, config: Config) -> str:
         return f"No related notes found in vault for {slug}"
 
     # Use a cheap LLM to pick the best related notes
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     candidates_text = "\n".join(
         f"- [[{p.stem}]]: {p.read_text(encoding='utf-8')[:200]}..."
@@ -671,6 +677,7 @@ def step_see_also(task: dict, config: Config) -> str:
             f"CURRENT NOTE:\n{note_content[:2000]}\n\n"
             f"CANDIDATE NOTES:\n{candidates_text}"
         ),
+        role="see_also",
     )
 
     # Replace or append the See Also section
@@ -785,7 +792,9 @@ def step_quality_gate(task: dict, config: Config) -> str:
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     passed, rounds = quality_gate_retry_loop(
         note_path, config, quality_gate_web, llm, max_rounds=MAX_QUALITY_RETRIES,

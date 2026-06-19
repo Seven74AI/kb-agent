@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -468,7 +469,9 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     merged = json.loads(merged_path.read_text())
     music_only = merged.get("music_only", False)
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Build compact transcript
     transcript_text = _format_transcript_for_llm(merged)
@@ -535,7 +538,7 @@ OUTPUT FORMAT:
 Write a note following the template above.
 {'This is a music-only reel — prioritize any detected caption text over the transcript.' if music_only else 'Analyze the full transcript for key points.'}"""
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = response.content
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
@@ -777,7 +780,9 @@ def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
         for s in slides_data.get("slides", [])
     )
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     source_domain = urlparse(source_url).netloc or "instagram.com"
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -825,7 +830,7 @@ SLIDES ({len(slides_data.get('slides', []))} of {playlist_count} extracted):
 Write a note analyzing this carousel post.
 Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could be extracted (anti-bot limitation on slides 3+)."""
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = response.content
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
@@ -859,7 +864,9 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found: {note_path}")
 
     if content_type == "instagram_reel":
+        logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
         llm = get_llm_client(config)
+        llm.set_task_context(task["id"], logs_conn)
         passed, rounds = quality_gate_retry_loop(
             note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
         )

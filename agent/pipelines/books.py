@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -657,8 +658,10 @@ def step_synthesize_book(task: dict, config: Config) -> str:
     full_text = full_text_path.read_text(encoding="utf-8")
     estimated_tokens = len(full_text) // CHARS_PER_TOKEN
 
-    # Get LLM client
+    # Get LLM client with archiving
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Determine note path
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
@@ -673,6 +676,7 @@ def step_synthesize_book(task: dict, config: Config) -> str:
         response = llm.call(
             system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            role="synthesis",
         )
         note_content = response.content
     else:
@@ -741,6 +745,7 @@ def _chunked_book_synthesis(full_text: str, full_text_path: Path,
         return llm.call(
             system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
             user_prompt=_build_book_prompt(full_text[:180_000], title, author),
+            role="synthesis",
         ).content
 
     # Chapter 0 is usually empty/intro text before first === CHAPTER ===
@@ -774,6 +779,7 @@ Output format:
             response = llm.call(
                 system_prompt="You are a precise book summarizer. Summarize each chapter thoroughly.",
                 user_prompt=group_prompt,
+                role="synthesis",
             )
             chapter_summaries.append(response.content)
         except Exception:
@@ -804,6 +810,7 @@ at least 3 sentences."""
     return llm.call(
         system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
         user_prompt=final_prompt,
+        role="synthesis",
     ).content
 
 
