@@ -986,6 +986,17 @@ register_pipeline("book", [
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 
+# Duplicate registration for "book_epub" — step_classify_content outputs
+# "book_epub" as the pipeline name for ePub files (line 214), so it must
+# resolve to the same book pipeline instead of falling back to "web".
+register_pipeline("book_epub", [
+    Step(name="extract_text", fn=step_extract_epub, on_error="fail"),
+    Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
+    Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="git_push", fn=step_book_git_push, on_error="retry"),
+])
+
 register_pipeline("book_pdf", [
     Step(name="extract_text", fn=step_extract_pdf, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
@@ -997,6 +1008,9 @@ register_pipeline("book_pdf", [
 register_pipeline("mega", [
     Step(name="megadl_download", fn=step_megadl_download, on_error="pause"),
     Step(name="classify_content", fn=step_classify_content, on_error="retry"),
+    # FIXME: delegate step currently re-runs step_classify_content instead of
+    # delegating to per-book sub-pipelines. Replace with a real delegation
+    # function once sub-task dispatch is implemented.
     Step(name="delegate", fn=step_classify_content, on_error="fail"),
 ])
 
@@ -1004,5 +1018,8 @@ register_pipeline("mega", [
 register_pipeline("book_batch", [
     Step(name="megadl_download", fn=step_megadl_download, on_error="pause"),
     Step(name="classify_content", fn=step_classify_content, on_error="retry"),
+    # FIXME: delegate step currently re-runs step_classify_content instead of
+    # delegating to per-book sub-pipelines. Replace with a real delegation
+    # function once sub-task dispatch is implemented.
     Step(name="delegate", fn=step_classify_content, on_error="fail"),
 ])
