@@ -23,6 +23,13 @@ quality:
   article_min_size: 5000
   youtube_min_concepts: 3
   youtube_min_key_points: 8
+  youtube_min_density: 100
+  threads_video_min_density: 100
+  threads_text_min_quotes: 2
+  threads_text_min_size: 2000
+  ig_reel_min_concepts: 2
+  ig_reel_min_key_points: 3
+  ig_carousel_min_size: 2000
 
 # LLM
 llm_provider: deepseek       # deepseek or edgee

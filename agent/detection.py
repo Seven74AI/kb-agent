@@ -76,18 +76,31 @@ def detect_content_subtype(url: str, platform: str) -> str:
 def _detect_threads_subtype(url: str) -> str:
     """Check a Threads URL for video_versions in the page JSON.
 
-    Returns 'video' if video_versions is present, 'text' otherwise.
+    Uses cookies + Googlebot UA for reliable scraping.
+    Returns 'threads_video' if video_versions is present, 'threads_text' otherwise.
+
+    Handles media_type=19 (Instagram video cross-post) — checks video_versions
+    regardless of outer media type.
     """
     try:
+        cookie_path = Path("/root/.hermes/cookies/threads_cookies.txt")
+        cmd = [
+            "curl", "-s", "--max-time", "15",
+            "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "-H", "Accept: text/html,application/xhtml+xml",
+        ]
+        if cookie_path.exists():
+            cmd.extend(["-b", str(cookie_path)])
+        cmd.append(url)
+
         result = subprocess.run(
-            ["curl", "-s", "--max-time", "15", url],
-            capture_output=True, text=True, timeout=20,
+            cmd, capture_output=True, text=True, timeout=20,
         )
         if 'video_versions' in result.stdout:
-            return "video"
+            return "threads_video"
     except (subprocess.TimeoutExpired, Exception):
         pass
-    return "text"
+    return "threads_text"
 
 
 def _detect_substack_subtype(url: str) -> str:
