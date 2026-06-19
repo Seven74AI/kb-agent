@@ -203,9 +203,12 @@ class Consumer:
     # ── Main loop ─────────────────────────────────────────────────────────
 
     async def run(self):
-        """Main polling loop. Claims tasks and executes them."""
-        await self.startup()
+        """Main polling loop. Claims tasks and executes them.
 
+        IMPORTANT: Does NOT call startup() — the caller MUST initialize
+        the consumer via startup() before calling run(). See run.py:_run_consumer()
+        for the correct sequence: startup() first, then run().
+        """
         while self._running:
             task = claim_task(self.agent_conn) if self.agent_conn else None
 
