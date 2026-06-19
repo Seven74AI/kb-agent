@@ -30,6 +30,7 @@ class Config:
     book_min_lines: int = 100
     book_min_quotes: int = 4
     book_min_size: int = 8000
+    book_min_fact_checks: int = 2
     article_min_quotes: int = 4
     article_min_size: int = 5000
     youtube_min_concepts: int = 3
@@ -117,6 +118,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         book_min_lines=int(quality.get("book_min_lines", 100)),
         book_min_quotes=int(quality.get("book_min_quotes", 4)),
         book_min_size=int(quality.get("book_min_size", 8000)),
+        book_min_fact_checks=int(quality.get("book_min_fact_checks", 2)),
         article_min_quotes=int(quality.get("article_min_quotes", 4)),
         article_min_size=int(quality.get("article_min_size", 5000)),
         youtube_min_concepts=int(quality.get("youtube_min_concepts", 3)),
