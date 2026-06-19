@@ -34,7 +34,6 @@ from agent.pipelines.threads import (
     step_threads_cleanup,
     step_threads_minio_upload,
     step_threads_git_push,
-    THREADS_COOKIES_FILE,
     GOOGLEBOT_UA,
 )
 
@@ -494,9 +493,8 @@ class TestQualityGate:
         note_path = Path(config.vault_path) / "Knowledge base" / "threads" / f"{task_dict['slug']}.md"
         note_path.write_text("Too short")
 
-        result = step_threads_quality_gate(task_dict, config)
-        data = json.loads(result)
-        assert data["passed"] is False
+        with pytest.raises(StepError, match="Threads text quality gate failed"):
+            step_threads_quality_gate(task_dict, config)
 
 
 # ── Step Tests: Cleanup ──────────────────────────────────────────────────────

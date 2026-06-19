@@ -29,9 +29,6 @@ from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Threads cookies file (Netscape format)
-THREADS_COOKIES_FILE = "/root/.hermes/cookies/threads_cookies.txt"
-
 # Googlebot user-agent for Threads scraping
 GOOGLEBOT_UA = (
     "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) "
@@ -53,12 +50,14 @@ THREADS_VIDEO_DENSITY_MIN = 100
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _curl_threads(url: str, timeout: int = 30) -> str:
+def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> str:
     """Fetch a Threads URL with cookies + Googlebot UA.
 
     Args:
         url: The Threads post URL.
         timeout: Curl max-time in seconds.
+        cookie_dir: Directory containing threads_cookies.txt. Defaults to
+            /root/kb-agent/cookies (matching config.cookie_dir default).
 
     Returns:
         Raw HTTP response body.
@@ -66,13 +65,15 @@ def _curl_threads(url: str, timeout: int = 30) -> str:
     Raises:
         StepError: If curl fails.
     """
-    cookie_path = Path(THREADS_COOKIES_FILE)
+    if cookie_dir is None:
+        cookie_dir = Path("/root/kb-agent/cookies")
+    cookie_path = cookie_dir / "threads_cookies.txt"
     if not cookie_path.exists():
         raise StepError(
-            f"Threads cookies not found: {THREADS_COOKIES_FILE}",
+            f"Threads cookies not found: {cookie_path}",
             error_type=ErrorType.PAUSE,
             step_name="curl_threads",
-            details="Export cookies from Chrome to /root/.hermes/cookies/threads_cookies.txt",
+            details=f"Export cookies from Chrome to {cookie_path}",
         )
 
     result = subprocess.run(
@@ -192,17 +193,18 @@ def _is_reply_post(html: str) -> bool:
     return match.group(1) == "true" if match else False
 
 
-def _fetch_parent_post(parent_url: str) -> str | None:
+def _fetch_parent_post(parent_url: str, cookie_dir: Path | None = None) -> str | None:
     """Fetch parent post content for reply context.
 
     Args:
         parent_url: The parent post URL.
+        cookie_dir: Directory containing threads_cookies.txt.
 
     Returns:
         Caption text of the parent post, or None if fetch fails.
     """
     try:
-        html = _curl_threads(parent_url, timeout=20)
+        html = _curl_threads(parent_url, timeout=20, cookie_dir=cookie_dir)
         captions = _extract_all_captions(html)
         return captions[0] if captions else None
     except Exception:
@@ -279,7 +281,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url)
+    html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     # Check for login wall before doing deeper analysis
     if _is_login_wall(html):
@@ -321,7 +323,7 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
 
-    html = _curl_threads(url)
+    html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     # Check for login wall
     if _is_login_wall(html):
@@ -369,7 +371,7 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
         )
         if parent_match:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
-            parent_context = _fetch_parent_post(parent_url)
+            parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
 
     # Write raw extraction for archival
     raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_threads_raw.json"
@@ -408,7 +410,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
 
-    html = _curl_threads(url)
+    html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     if _is_login_wall(html):
         raise StepError(
@@ -960,7 +962,10 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         config: Config dataclass.
 
     Returns:
-        Status string: "passed" or description of failures.
+        Status string: "passed" or raises StepError on failure.
+
+    Raises:
+        StepError: If quality gates fail.
     """
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
@@ -977,7 +982,15 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         passed, rounds = quality_gate_retry_loop(
             note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
         )
-        return json.dumps({"passed": passed, "rounds": rounds})
+        if not passed:
+            content = note_path.read_text(encoding="utf-8")
+            raise StepError(
+                f"Threads video quality gate failed after {rounds} rounds. "
+                f"First line: {content.split(chr(10))[0]}",
+                error_type=ErrorType.FAIL,
+                step_name="threads_quality_gate",
+            )
+        return json.dumps({"passed": True, "rounds": rounds})
     else:
         # Text posts: simple size + quote check
         content = note_path.read_text(encoding="utf-8")
@@ -991,9 +1004,16 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         if size < 2000:
             failures.append(f"Note too short: {size} chars < 2000")
 
+        if not passed:
+            raise StepError(
+                f"Threads text quality gate failed: {'; '.join(failures)}",
+                error_type=ErrorType.FAIL,
+                step_name="threads_quality_gate",
+            )
+
         return json.dumps({
-            "passed": passed,
-            "failures": failures,
+            "passed": True,
+            "failures": [],
             "rounds": 1,
         })
 
@@ -1018,7 +1038,6 @@ def step_threads_minio_upload(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found: {note_path}")
 
     bucket = config.minio_bucket
-    endpoint = config.minio_endpoint
 
     # Upload note
     note_key = f"threads/{safe_slug}.md"
