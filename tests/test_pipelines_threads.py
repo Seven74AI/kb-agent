@@ -34,7 +34,6 @@ from agent.pipelines.threads import (
     step_threads_cleanup,
     step_threads_minio_upload,
     step_threads_git_push,
-    THREADS_COOKIES_FILE,
     GOOGLEBOT_UA,
 )
 
