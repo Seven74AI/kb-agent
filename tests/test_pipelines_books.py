@@ -619,6 +619,21 @@ class TestPipelineRegistration:
         pipeline = get_pipeline("book_batch")
         assert pipeline is not None
 
+    def test_book_epub_pipeline_resolves_to_book(self):
+        """get_pipeline('book_epub') returns the book pipeline, not web fallback."""
+        from agent.pipelines import get_pipeline
+        pipeline = get_pipeline("book_epub")
+        assert pipeline is not None
+        step_names = [s.name for s in pipeline]
+        # Must have book pipeline steps, not web pipeline steps
+        assert "extract_text" in step_names
+        assert "synthesize_note" in step_names
+        assert "quality_gate" in step_names
+        assert "minio_upload" in step_names
+        assert "git_push" in step_names
+        # Web pipeline has firecrawl_extract — book pipeline should not
+        assert "firecrawl_extract" not in step_names
+
 
 # ── Book Constants Tests ──────────────────────────────────────────────────────
 
