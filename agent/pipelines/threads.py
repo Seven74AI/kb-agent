@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -743,7 +744,9 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
         author = raw.get("author", "unknown")
         parent_context = raw.get("parent_context")
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Build compact transcript
     transcript_text = _format_transcript_for_llm(merged)
@@ -814,7 +817,7 @@ Extract 3-5 key points with direct quotes.
 Analyze the speaker's perspective and credibility.
 Note whether this appears to be an original post or a reaction."""
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = response.content
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
@@ -859,7 +862,9 @@ def step_threads_text_synthesize(task: dict, config: Config) -> str:
 
     content = "\n\n".join(captions)
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     source_domain = urlparse(source_url).netloc or "threads.net"
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -903,7 +908,7 @@ OUTPUT FORMAT:
 Write a note following the template above.
 The confidence level is '{confidence}' — be appropriately cautious if it's 'untested'."""
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = response.content
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
@@ -978,7 +983,9 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
     if "video" in content_type:
+        logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
         llm = get_llm_client(config)
+        llm.set_task_context(task["id"], logs_conn)
         passed, rounds = quality_gate_retry_loop(
             note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
         )

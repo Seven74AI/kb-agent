@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -785,7 +786,9 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
     else:
         metadata = {}
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Build transcript text for the LLM (compact but complete)
     transcript_text = _format_transcript_for_llm(merged)
@@ -882,7 +885,7 @@ Respond with ONLY valid JSON:
         f"=== TRANSCRIPT ===\n{transcript}\n=== END ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     content = response.content.strip()
 
     # Extract JSON from response (may have markdown code fences)
@@ -1021,7 +1024,7 @@ OUTPUT FORMAT:
         f"=== TRANSCRIPT ===\n{transcript}\n=== END ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     return response.content
 
 
@@ -1096,7 +1099,9 @@ def step_quality_gate(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
     # Run standard YouTube quality gates (concepts + key points)
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     passed, rounds = quality_gate_retry_loop(
         note_path, config, quality_gate_youtube, llm, max_rounds=MAX_QUALITY_RETRIES,
