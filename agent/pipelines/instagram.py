@@ -29,9 +29,6 @@ from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Instagram cookies file (Netscape format)
-IG_COOKIES_FILE = "/root/.hermes/cookies/ig_cookies.txt"
-
 # yt-dlp rate limiting for Instagram (per spec)
 IGDL_RATE_FLAGS = [
     "--sleep-requests", "3",
@@ -52,21 +49,27 @@ CAROUSEL_SLIDE_CAP = 2
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _validate_ig_cookies() -> None:
+def _validate_ig_cookies(cookie_dir: Path | None = None) -> None:
     """Validate Instagram cookies before any operation.
 
     Checks: sessionid present in cookie file (grep -c sessionid >= 1).
 
+    Args:
+        cookie_dir: Directory containing ig_cookies.txt. Defaults to
+            /root/kb-agent/cookies (matching config.cookie_dir default).
+
     Raises:
         StepError(PAUSE): If cookies invalid or missing.
     """
-    cookie_path = Path(IG_COOKIES_FILE)
+    if cookie_dir is None:
+        cookie_dir = Path("/root/kb-agent/cookies")
+    cookie_path = cookie_dir / "ig_cookies.txt"
     if not cookie_path.exists():
         raise StepError(
-            f"Instagram cookies not found: {IG_COOKIES_FILE}",
+            f"Instagram cookies not found: {cookie_path}",
             error_type=ErrorType.PAUSE,
             step_name="cookie_validate",
-            details="Export cookies from Chrome to /root/.hermes/cookies/ig_cookies.txt",
+            details=f"Export cookies from Chrome to {cookie_path}",
         )
 
     cookies_text = cookie_path.read_text()
@@ -116,7 +119,7 @@ def step_ig_reel_validate(task: dict, config: Config) -> str:
     Returns:
         "cookies_valid"
     """
-    _validate_ig_cookies()
+    _validate_ig_cookies(cookie_dir=config.cookie_dir)
     return "cookies_valid"
 
 
@@ -132,7 +135,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     Returns:
         Path to the downloaded video file.
     """
-    _validate_ig_cookies()
+    _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
@@ -143,7 +146,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             "yt-dlp",
-            "--cookies", IG_COOKIES_FILE,
+            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--output", str(output_path.with_suffix("")),
             *IGDL_RATE_FLAGS,
@@ -556,7 +559,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     Returns:
         Path to metadata JSON file.
     """
-    _validate_ig_cookies()
+    _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
@@ -566,7 +569,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             "yt-dlp",
-            "--cookies", IG_COOKIES_FILE,
+            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(title)s||%(uploader)s||%(like_count)s||%(playlist_count)s",
             *IGDL_RATE_FLAGS,
@@ -604,7 +607,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     caption_result = subprocess.run(
         [
             "yt-dlp",
-            "--cookies", IG_COOKIES_FILE,
+            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(description)s",
             *IGDL_RATE_FLAGS,
@@ -680,6 +683,7 @@ async def main():
                 slide_num += 1
         
         await browser.close()
+        # Output slides JSON to stdout — captured by the pipeline via subprocess.run().stdout
         print(json.dumps(slides))
         
         if slide_num < {CAROUSEL_SLIDE_CAP}:
@@ -850,11 +854,7 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
     safe_slug = _slug_path(slug)
     content_type = task.get("content_type", "instagram_post")
 
-    if content_type == "instagram_reel":
-        note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-    else:
-        note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found: {note_path}")
 

@@ -31,7 +31,6 @@ from agent.pipelines.instagram import (
     step_ig_cleanup,
     step_ig_minio_upload,
     step_ig_git_push,
-    IG_COOKIES_FILE,
     CAROUSEL_SLIDE_CAP,
     MUSIC_ONLY_CHAR_THRESHOLD,
 )
