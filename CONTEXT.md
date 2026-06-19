@@ -28,9 +28,8 @@ Python consumer loop (async)
               │     child process crash → consumer catches, RETRY
               │     consumer crash → orphan check on restart, resume step
               │
-              └── Synthesis (LLM with synthesis-only tools)
-                    tools: read_file, write_file, search_files, web_search(conditional)
-                    source read via read_file, note written via write_file
+              └── Synthesis (LLM prompt-only calls)
+                    source text embedded in prompt, note returned as text
                     │
                     ▼
               Quality gates (orchestrator)
@@ -204,23 +203,25 @@ Three buckets — no per-step complexity:
   diarization-transcription merge, speaker identification, chapter generation,
   Firecrawl extraction, markdown cleanup, ePub extraction, MinIO upload, Git push.
   All deterministic shell commands or Python functions.
-- **LLM with synthesis-only tools:** YouTube two-pass resume (concepts → note),
+- **LLM synthesis calls:** YouTube two-pass resume (concepts → note),
   deep-treatment note, book note with chapter summaries, fact-checking.
 
 ### LLM Interface
-- **Model:** LLM with synthesis-only tools — `read_file`, `write_file`, `search_files`
-  always. `web_search` conditional (books + health/science articles only). No terminal,
-  no browser, no process management.
-- **Source delivery:** LLM reads source via `read_file`. For content ≤50K tokens, reads
-  entire source in one pass. For large content, the LLM builds the note progressively:
-  chunk 1 → write partial note → chunk 2 + previous note → append → ... → final
+- **Model:** Prompt-only interface — no tool calling. The LLM receives source text
+  inline in the user prompt and returns synthesized notes as text. Source retrieval
+  (Firecrawl, yt-dlp, ePub extraction) is done by Python before the LLM call. No
+  terminal, no browser, no process management.
+- **Source delivery:** Source text is embedded directly in the user prompt by Python.
+  For content ≤50K tokens, the full source is sent in a single prompt. For large
+  content, Python-side progressive chunking is used:
+  chunk 1 → partial note → chunk 2 + previous note → append → ... → final
   polish call. Context stays clean (current chunk ~50K + growing note ~20K).
-- **Chunk boundaries:** A separate, cheap LLM call determines semantic boundaries
-  (not regex). This boundary-detection LLM receives the full source and returns
-  byte offsets where splits should occur. Fallback: if no boundary at 50K → expand
-  to 100K. If still none → boundary LLM picks best boundary even if imperfect.
-  The synthesis LLM receives chunks progressively, building the note as it goes.
-  10K token overlap between chunks.
+- **Chunk boundaries:** A separate, cheap LLM call (also prompt-only) determines
+  semantic boundaries (not regex). This boundary-detection LLM receives a
+  structural sample (beginning + end + section headers) and returns byte offsets.
+  Fallback: if no boundary at 50K → expand to 100K. If still none → boundary LLM
+  picks best boundary even if imperfect. The synthesis LLM receives chunks
+  progressively, building the note as it goes. 10K token overlap between chunks.
 - **Template:** Python injects template + quality rules into system prompt. Template
   varies by content type (YouTube resume-prompt, book-note-template, deep-treatment).
 
@@ -372,8 +373,9 @@ against yt-dlp overwrites) and re-validates paused tasks for that platform.
 - **See Also:** The wikilinks section at the bottom of a note. Generated in a
   separate LLM call after the main note is written, using vault search results as
   candidates.
-- **LLM with synthesis-only tools:** The LLM only gets tools for reading source and
-  writing notes (`read_file`, `write_file`, `search_files`, `web_search` conditional).
+- **LLM synthesis:** Prompt-only LLM calls used for note generation. Source text
+  is embedded directly in the prompt by Python; the LLM returns synthesized notes
+  as text. No tool calling — Python handles all file I/O and source retrieval.
   No terminal, no browser, no process management. The LLM reads, thinks, writes.
 - **RETURNING:** SQLite clause that makes UPDATE/INSERT/DELETE return the affected row.
   Enables atomic claim + read in one query. Eliminates race conditions on task claiming.
