@@ -23,6 +23,7 @@ from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
+from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_book
 
 # Optional dependencies — imported at module level for testability
@@ -996,6 +997,8 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
 def step_book_minio_upload(task: dict, config: Config) -> str:
     """Upload book source and extracted full text to MinIO.
 
+    Delegates to archival.upload_file_to_minio for each file.
+
     Uploads:
     - Source epub/PDF → kb-agent-archive/books/{slug}.epub (or .pdf)
     - Extracted full text → kb-agent-archive/books/{slug}.txt
@@ -1007,6 +1010,8 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
     Returns:
         JSON string with MinIO URLs.
     """
+    from agent.archival import upload_file_to_minio
+
     slug = task.get("slug", task["id"][:8])
     full_text_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
 
@@ -1021,16 +1026,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
 
     # Upload full text
     txt_dest = f"{config.minio_bucket}/books/{slug}.txt"
-    result = subprocess.run(
-        ["mc", "cp", str(full_text_path), f"minio/{txt_dest}"],
-        capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode != 0:
-        raise StepError(
-            f"MinIO upload failed (txt): {result.stderr.strip()}",
-            error_type=ErrorType.RETRY,
-            step_name="book_minio_upload",
-        )
+    upload_file_to_minio(full_text_path, txt_dest)
     uploaded.append(f"books/{slug}.txt")
 
     # Try to upload source epub/PDF
@@ -1041,12 +1037,11 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
     if source_files:
         sf = source_files[0]
         sf_dest = f"{config.minio_bucket}/books/{slug}{sf.suffix.lower()}"
-        result = subprocess.run(
-            ["mc", "cp", str(sf), f"minio/{sf_dest}"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0:
+        try:
+            upload_file_to_minio(sf, sf_dest, timeout=120)
             uploaded.append(f"books/{slug}{sf.suffix.lower()}")
+        except StepError:
+            pass  # Source file upload is best-effort
 
     tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
     return json.dumps({
@@ -1060,6 +1055,8 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
 def step_book_git_push(task: dict, config: Config) -> str:
     """Push the book note to the Obsidian vault Git repo.
 
+    Delegates to archival.step_git_push with book-specific params.
+
     Args:
         task: Task dict with slug.
         config: Config dataclass.
@@ -1067,45 +1064,17 @@ def step_book_git_push(task: dict, config: Config) -> str:
     Returns:
         Commit hash.
     """
+    from agent.archival import step_git_push as archival_git_push
+
     slug = task.get("slug", task["id"][:8])
-    vault_path = config.vault_path
-    note_path = vault_path / "Knowledge base" / "books" / f"{slug}.md"
-
-    if not note_path.exists():
-        raise FileNotFoundError(f"Note not found for Git push: {note_path}")
-
-    try:
-        subprocess.run(
-            ["git", "-C", str(vault_path), "add", str(note_path)],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-
-        title = task.get("_book_title", slug)
-        author = task.get("_book_author", "")
-        commit_msg = f"add: {slug} — {author}: {title}"[:200]
-
-        commit_result = subprocess.run(
-            ["git", "-C", str(vault_path), "commit", "-m", commit_msg],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-
-        subprocess.run(
-            ["git", "-C", str(vault_path), "push", "origin", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-
-        commit_hash = (
-            commit_result.stdout.strip().split()[-1]
-            if commit_result.stdout else "unknown"
-        )
-        return commit_hash
-
-    except subprocess.CalledProcessError as e:
-        raise StepError(
-            f"Git push failed: {e.stderr.strip()}",
-            error_type=ErrorType.RETRY,
-            step_name="book_git_push",
-        ) from e
+    title = task.get("_book_title", slug)
+    author = task.get("_book_author", "")
+    commit_prefix = f"add: — {author}: {title}"[:200]
+    return archival_git_push(
+        task, config,
+        vault_subfolder="books",
+        commit_prefix=commit_prefix,
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1123,6 +1092,7 @@ register_pipeline("book", [
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 
@@ -1134,6 +1104,7 @@ register_pipeline("book_epub", [
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 
@@ -1142,6 +1113,7 @@ register_pipeline("book_pdf", [
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 

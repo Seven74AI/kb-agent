@@ -26,6 +26,7 @@ from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
+from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -932,6 +933,9 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
 def step_ig_minio_upload(task: dict, config: Config) -> str:
     """Upload the generated note to MinIO.
 
+    Delegates to archival.upload_file_to_minio then updates the note
+    frontmatter with the MinIO URL.
+
     Args:
         task: Task dict with slug.
         config: Config dataclass.
@@ -939,35 +943,18 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
     Returns:
         MinIO URL of the uploaded note.
     """
+    from agent.archival import upload_file_to_minio
+
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-    if not note_path.exists():
-        raise FileNotFoundError(f"Note not found: {note_path}")
-
-    bucket = config.minio_bucket
-
-    # Upload note
     note_key = f"instagram/{safe_slug}.md"
-    result = subprocess.run(
-        [
-            "mc", "cp",
-            str(note_path),
-            f"minio/{bucket}/{note_key}",
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
+    dest = f"{config.minio_bucket}/{note_key}"
 
-    if result.returncode != 0:
-        raise StepError(
-            f"MinIO upload failed: {result.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="minio_upload",
-        )
+    minio_url = upload_file_to_minio(note_path, dest)
 
     # Update note frontmatter with minio URL
-    minio_url = f"minio://{bucket}/{note_key}"
     content = note_path.read_text(encoding="utf-8")
     updated = re.sub(
         r"minio:\s*<filled by archival step>",
@@ -984,6 +971,8 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
 def step_ig_git_push(task: dict, config: Config) -> str:
     """Push the generated note to the Obsidian vault Git repo.
 
+    Delegates to archival.step_git_push with instagram-specific params.
+
     Args:
         task: Task dict with slug.
         config: Config dataclass.
@@ -991,37 +980,17 @@ def step_ig_git_push(task: dict, config: Config) -> str:
     Returns:
         Commit hash.
     """
+    from agent.archival import step_git_push as archival_git_push
+
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
-
-    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-    if not note_path.exists():
-        raise FileNotFoundError(f"Note not found: {note_path}")
-
-    try:
-        subprocess.run(
-            ["git", "-C", str(config.vault_path), "add", str(note_path)],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-        commit_result = subprocess.run(
-            ["git", "-C", str(config.vault_path), "commit", "-m", f"add instagram: {safe_slug}"],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-        subprocess.run(
-            ["git", "-C", str(config.vault_path), "push", "origin", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        commit_hash = (
-            commit_result.stdout.strip().split()[-1]
-            if commit_result.stdout else "unknown"
-        )
-        return commit_hash
-    except subprocess.CalledProcessError as e:
-        raise StepError(
-            f"Git push failed: {e.stderr.strip() if e.stderr else str(e)}",
-            error_type=ErrorType.RETRY,
-            step_name="git_push",
-        ) from e
+    # Pass safe_slug so archival finds the right file
+    modified_task = {**task, "slug": safe_slug}
+    return archival_git_push(
+        modified_task, config,
+        vault_subfolder="instagram",
+        commit_prefix="add instagram:",
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1052,6 +1021,7 @@ register_pipeline("instagram_reel", [
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
     Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])
 
@@ -1063,5 +1033,6 @@ register_pipeline("instagram_post", [
     Step(name="ig_carousel_synthesize", fn=step_ig_carousel_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
     Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])

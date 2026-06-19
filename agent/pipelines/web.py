@@ -13,12 +13,12 @@ from urllib.parse import urlparse
 
 from agent.config import Config
 from agent.exceptions import ErrorType, StepError
-from agent.db import init_db, LOGS_SCHEMA
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
 from agent.archival import step_minio_upload as archival_minio_upload
 from agent.archival import step_git_push as archival_git_push
 from agent.pipelines import Step, register_pipeline
+from agent.pipelines.see_also import step_see_also
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -276,10 +276,8 @@ def step_synthesize_web(task: dict, config: Config) -> str:
     source_content = source_path.read_text(encoding="utf-8")
     estimated_tokens = _estimate_tokens(source_content)
 
-    # Open logs DB and get the LLM client with archiving enabled
-    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
+    # Get the LLM client
     llm = get_llm_client(config)
-    llm.set_task_context(task["id"], logs_conn)
 
     note_path = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,7 +308,7 @@ def _synthesize_single_pass(
         f"=== SOURCE ===\n{source}\n=== END SOURCE ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
     return response.content
 
 
@@ -358,7 +356,6 @@ def _synthesize_chunked(
     polish_response = llm.call(
         system_prompt=polish_prompt,
         user_prompt=f"Polish this note:\n\n{previous_note}",
-        role="polish",
     )
     return polish_response.content
 
@@ -399,7 +396,7 @@ def _synthesize_chunk(
         f"=== CHUNK {chunk_index + 1}/{total} ===\n{chunk}\n=== END CHUNK ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
     return response.content
 
 
@@ -434,8 +431,6 @@ QUALITY RULES (non-negotiable):
 - The Summary should capture the essential argument in 3-5 sentences.
 - Context must identify who wrote this, why now, and any conflicts of interest.
 - Critical Analysis must identify what's new vs restating, what's omitted.
-- Critical Analysis MUST include a \"### Factual Issues\" subsection with ≥2 specific factual problems
-  (e.g., \"Claim X on page Y contradicts Z\"). Use bullet points (-).
 - Nuances must address what the source exaggerates or distorts.
 
 OUTPUT FORMAT:
@@ -561,7 +556,7 @@ def _find_semantic_boundaries(source: str, llm: LLMClient) -> list[tuple[int, in
     )
 
     try:
-        response = llm.call(system_prompt=boundary_prompt, user_prompt=user_prompt, role="boundary")
+        response = llm.call(system_prompt=boundary_prompt, user_prompt=user_prompt)
         # Extract JSON from response
         content = response.content.strip()
         # Find the JSON array in the response
@@ -607,169 +602,6 @@ def _equal_chunks(source: str, num_chunks: int) -> list[tuple[int, int]]:
     return boundaries
 
 
-# ── See Also ──────────────────────────────────────────────────────────────────
-
-def step_see_also(task: dict, config: Config) -> str:
-    """Search vault for related notes and add wikilinks to the note.
-
-    Searches the vault for notes matching keywords from the generated note,
-    then calls a lightweight LLM to select the most relevant ones and add
-    a See Also section.
-
-    Only links to notes that actually exist in the vault are added.
-
-    Args:
-        task: Task dict with slug, content_type.
-        config: Config dataclass.
-
-    Returns:
-        Status message describing how many links were added.
-    """
-    slug = task.get("slug", task["id"][:8])
-    content_type = task.get("content_type", "web")
-
-    folder = "articles"
-    note_path = config.vault_path / "Knowledge base" / folder / f"{slug}.md"
-
-    if not note_path.exists():
-        return f"No note to add See Also to: {note_path}"
-
-    note_content = note_path.read_text(encoding="utf-8")
-
-    # Skip if See Also already populated
-    if "## See Also" in note_content and "[[ " not in note_content:
-        # Has the section but no actual links yet — that's OK, we'll fill it
-        pass
-
-    # Extract keywords from the note for searching
-    keywords = _extract_keywords(note_content)
-
-    # Search vault for matching notes
-    candidate_paths = _search_vault(keywords, config.vault_path, exclude_slug=slug)
-
-    if not candidate_paths:
-        # No related notes found
-        return f"No related notes found in vault for {slug}"
-
-    # Use a cheap LLM to pick the best related notes
-    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
-    llm = get_llm_client(config)
-    llm.set_task_context(task["id"], logs_conn)
-
-    candidates_text = "\n".join(
-        f"- [[{p.stem}]]: {p.read_text(encoding='utf-8')[:200]}..."
-        for p in candidate_paths[:10]
-    )
-
-    see_also_prompt = (
-        "You are a knowledge base linker. Given a note and a list of candidate "
-        "related notes, select the 3-5 most relevant ones. A relevant note:\n"
-        "1. Covers overlapping topics or themes\n"
-        "2. Provides context that enriches the current note\n"
-        "3. Is NOT about a completely different subject\n\n"
-        "RESPOND with ONLY a ## See Also section with wikilinks, like:\n"
-        "## See Also\n"
-        "- [[note-slug-1]] — why it's related\n"
-        "- [[note-slug-2]] — why it's related\n\n"
-        "If none are truly related, respond with ## See Also\n_No related notes found._"
-    )
-
-    response = llm.call(
-        system_prompt=see_also_prompt,
-        user_prompt=(
-            f"CURRENT NOTE:\n{note_content[:2000]}\n\n"
-            f"CANDIDATE NOTES:\n{candidates_text}"
-        ),
-        role="see_also",
-    )
-
-    # Replace or append the See Also section
-    see_also_content = response.content.strip()
-    if "## See Also" not in see_also_content:
-        see_also_content = f"## See Also\n{see_also_content}"
-
-    updated = re.sub(
-        r'## See Also.*?(?=\n## |\Z)',
-        see_also_content,
-        note_content,
-        flags=re.DOTALL,
-    )
-
-    note_path.write_text(updated, encoding="utf-8")
-
-    # Count links added
-    link_count = see_also_content.count("[[")
-    return f"Added {link_count} See Also links to {slug}"
-
-
-def _extract_keywords(note_content: str, max_keywords: int = 8) -> list[str]:
-    """Extract meaningful keywords from a note for vault search.
-
-    Uses simple heuristics: section titles, capitalized phrases.
-    """
-    keywords = set()
-    lines = note_content.split("\n")
-
-    # Template headers to exclude
-    template_headers = {
-        "summary", "key claims", "key claims / points",
-        "section-by-section analysis", "section-by-section / thematic analysis",
-        "context", "critical analysis", "nuances", "reliability",
-        "sources", "see also",
-    }
-
-    # Section headers — lines starting with #, ##, or ###
-    for line in lines:
-        line_stripped = line.strip()
-        if line_stripped.startswith("### ") and line_stripped[4:].strip()[0].isdigit():
-            # Numbered sub-header like "### 1. Claim Title"
-            header = line_stripped[4:].strip()
-            # Strip leading number (e.g., "1. Claim Title" → "Claim Title")
-            if ". " in header[:4]:
-                header = header.split(". ", 1)[1]
-            keywords.add(header)
-        elif line_stripped.startswith("## ") and not line_stripped.startswith("### "):
-            header = line_stripped[3:].strip()
-            if header.lower() not in template_headers:
-                keywords.add(header)
-
-    # Capitalized multi-word phrases (potential names, concepts)
-    for match in re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', note_content):
-        phrase = match.group(1)
-        if len(phrase) > 10 and not phrase.startswith(("The ", "This ", "That ")):
-            keywords.add(phrase)
-
-    return list(keywords)[:max_keywords]
-
-
-def _search_vault(
-    keywords: list[str], vault_path: Path, exclude_slug: str,
-) -> list[Path]:
-    """Search the vault for notes matching keywords.
-
-    Uses grep for keyword matching — fast and works on the filesystem.
-    """
-    knowledge_dir = vault_path / "Knowledge base"
-    if not knowledge_dir.exists():
-        return []
-
-    results: set[Path] = set()
-    for kw in keywords[:5]:  # Limit keywords to avoid excessive grep calls
-        try:
-            proc = subprocess.run(
-                ["grep", "-rl", "--include=*.md", kw, str(knowledge_dir)],
-                capture_output=True, text=True, timeout=30,
-            )
-            for line in proc.stdout.strip().split("\n"):
-                if line:
-                    p = Path(line)
-                    if p.stem != exclude_slug:
-                        results.add(p)
-        except subprocess.TimeoutExpired:
-            continue
-
-    return list(results)
-
 
 # ── Quality Gate Step (wraps quality.py) ──────────────────────────────────────
 
@@ -795,9 +627,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
-    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
-    llm.set_task_context(task["id"], logs_conn)
 
     passed, rounds = quality_gate_retry_loop(
         note_path, config, quality_gate_web, llm, max_rounds=MAX_QUALITY_RETRIES,

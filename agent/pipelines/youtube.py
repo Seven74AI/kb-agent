@@ -24,6 +24,7 @@ from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
+from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -1154,6 +1155,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
     """Upload video, audio, and transcript to MinIO.
     
     Uploads .webm, extracted .mp3, and transcript JSON.
+    Delegates upload to archival.upload_file_to_minio.
     Updates note frontmatter with MinIO URLs.
 
     Args:
@@ -1163,6 +1165,8 @@ def step_minio_upload(task: dict, config: Config) -> str:
     Returns:
         Status message listing uploaded files.
     """
+    from agent.archival import upload_file_to_minio
+
     slug = task.get("slug", task["id"][:8])
     bucket = config.minio_bucket
     uploaded = []
@@ -1171,16 +1175,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
     video_path = Path(config.temp_dir) / f"{slug}.webm"
     if video_path.exists():
         dest = f"{bucket}/videos/{slug}.webm"
-        result = subprocess.run(
-            ["mc", "cp", str(video_path), f"minio/{dest}"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            raise StepError(
-                f"MinIO video upload failed: {result.stderr.strip()[:200]}",
-                error_type=ErrorType.RETRY,
-                step_name="minio_upload",
-            )
+        upload_file_to_minio(video_path, dest, timeout=120)
         uploaded.append(f"videos/{slug}.webm")
 
     # 2. Extract and upload MP3
@@ -1193,32 +1188,14 @@ def step_minio_upload(task: dict, config: Config) -> str:
         )
         if result.returncode == 0 and mp3_path.exists():
             dest = f"{bucket}/videos/{slug}.mp3"
-            result = subprocess.run(
-                ["mc", "cp", str(mp3_path), f"minio/{dest}"],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode != 0:
-                raise StepError(
-                    f"MinIO MP3 upload failed: {result.stderr.strip()[:200]}",
-                    error_type=ErrorType.RETRY,
-                    step_name="minio_upload",
-                )
+            upload_file_to_minio(mp3_path, dest, timeout=120)
             uploaded.append(f"videos/{slug}.mp3")
 
     # 3. Upload merged transcript JSON
     merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
     if merged_path.exists():
         dest = f"{bucket}/videos/{slug}.json"
-        result = subprocess.run(
-            ["mc", "cp", str(merged_path), f"minio/{dest}"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            raise StepError(
-                f"MinIO transcript upload failed: {result.stderr.strip()[:200]}",
-                error_type=ErrorType.RETRY,
-                step_name="minio_upload",
-            )
+        upload_file_to_minio(merged_path, dest, timeout=120)
         uploaded.append(f"videos/{slug}.json")
 
     # 4. Update note frontmatter with MinIO URLs
@@ -1259,6 +1236,8 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
 def step_git_push(task: dict, config: Config) -> str:
     """Push the generated note to the Obsidian vault Git repo.
 
+    Delegates to archival.step_git_push.
+
     Args:
         task: Task dict with slug.
         config: Config dataclass.
@@ -1266,39 +1245,9 @@ def step_git_push(task: dict, config: Config) -> str:
     Returns:
         Commit hash.
     """
-    slug = task.get("slug", task["id"][:8])
-    vault_path = config.vault_path
-    note_path = vault_path / "Knowledge base" / "videos" / f"{slug}.md"
+    from agent.archival import step_git_push as archival_git_push
 
-    if not note_path.exists():
-        raise FileNotFoundError(f"Note not found for Git push: {note_path}")
-
-    try:
-        subprocess.run(
-            ["git", "-C", str(vault_path), "add", str(note_path)],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-
-        commit_result = subprocess.run(
-            ["git", "-C", str(vault_path), "commit", "-m", f"add: {slug}"],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-
-        # Push — use 'git push origin HEAD' to avoid needing upstream tracking
-        subprocess.run(
-            ["git", "-C", str(vault_path), "push", "origin", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-
-        commit_hash = commit_result.stdout.strip().split()[-1] if commit_result.stdout else "unknown"
-        return commit_hash
-
-    except subprocess.CalledProcessError as e:
-        raise StepError(
-            f"Git push failed: {e.stderr.strip()}",
-            error_type=ErrorType.RETRY,
-            step_name="git_push",
-        ) from e
+    return archival_git_push(task, config, vault_subfolder="videos")
 
 
 # ── Pipeline Registration ────────────────────────────────────────────────────
@@ -1314,5 +1263,6 @@ register_pipeline("youtube", [
     Step(name="synthesize_youtube", fn=step_synthesize_youtube, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])

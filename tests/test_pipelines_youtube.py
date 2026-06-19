@@ -849,12 +849,13 @@ def test_step_git_push(config, task_dict):
         capture_output=True,
     )
     # Set up a dummy remote to avoid "no push destination" error
+    dummy_remote = str(config.temp_dir / f"test-dummy-remote-{slug}")
     subprocess.run(
-        ["git", "-C", str(config.vault_path), "remote", "add", "origin", "/tmp/test-dummy-remote"],
+        ["git", "-C", str(config.vault_path), "remote", "add", "origin", dummy_remote],
         capture_output=True,
     )
-    # Initialize the dummy remote as a bare repo
-    subprocess.run(["git", "init", "--bare", "/tmp/test-dummy-remote"], capture_output=True)
+    # Initialize the dummy remote as a bare repo (use temp path to avoid cross-test contamination)
+    subprocess.run(["git", "init", "--bare", dummy_remote], capture_output=True)
     
     result = step_git_push(task_dict, config)
     assert len(result) > 0  # Should get a commit hash
@@ -874,7 +875,7 @@ def test_pipeline_registered():
     assert "youtube" in PIPELINES
     pipeline = get_pipeline("youtube")
     assert pipeline is not None
-    assert len(pipeline) == 11  # 11 steps
+    assert len(pipeline) == 12  # 12 steps (added see_also)
     step_names = [s.name for s in pipeline]
     assert "extract_metadata" in step_names
     assert "download_video" in step_names
@@ -886,6 +887,7 @@ def test_pipeline_registered():
     assert "synthesize_youtube" in step_names
     assert "quality_gate" in step_names
     assert "minio_upload" in step_names
+    assert "see_also" in step_names
     assert "git_push" in step_names
 
     # Check error strategies
