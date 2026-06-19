@@ -64,8 +64,9 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "minio_upload", "see_also", "git_push",
     ],
     "youtube": [
-        "cookie_validate", "yt_dlp_download", "ffmpeg_extract_audio",
-        "diarize", "transcribe", "synthesize_note",
+        "extract_metadata", "download_video", "extract_audio",
+        "diarize", "transcribe", "merge_and_identify",
+        "cleanup_temp", "synthesize_youtube",
         "quality_gate", "minio_upload", "git_push",
     ],
     "instagram_reel": [
