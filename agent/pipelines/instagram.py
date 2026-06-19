@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -29,9 +30,6 @@ from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-
-# Instagram cookies file (Netscape format)
-IG_COOKIES_FILE = "/root/.hermes/cookies/ig_cookies.txt"
 
 # yt-dlp rate limiting for Instagram (per spec)
 IGDL_RATE_FLAGS = [
@@ -53,21 +51,27 @@ CAROUSEL_SLIDE_CAP = 2
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _validate_ig_cookies() -> None:
+def _validate_ig_cookies(cookie_dir: Path | None = None) -> None:
     """Validate Instagram cookies before any operation.
 
     Checks: sessionid present in cookie file (grep -c sessionid >= 1).
 
+    Args:
+        cookie_dir: Directory containing ig_cookies.txt. Defaults to
+            /root/kb-agent/cookies (matching config.cookie_dir default).
+
     Raises:
         StepError(PAUSE): If cookies invalid or missing.
     """
-    cookie_path = Path(IG_COOKIES_FILE)
+    if cookie_dir is None:
+        cookie_dir = Path("/root/kb-agent/cookies")
+    cookie_path = cookie_dir / "ig_cookies.txt"
     if not cookie_path.exists():
         raise StepError(
-            f"Instagram cookies not found: {IG_COOKIES_FILE}",
+            f"Instagram cookies not found: {cookie_path}",
             error_type=ErrorType.PAUSE,
             step_name="cookie_validate",
-            details="Export cookies from Chrome to /root/.hermes/cookies/ig_cookies.txt",
+            details=f"Export cookies from Chrome to {cookie_path}",
         )
 
     cookies_text = cookie_path.read_text()
@@ -117,7 +121,7 @@ def step_ig_reel_validate(task: dict, config: Config) -> str:
     Returns:
         "cookies_valid"
     """
-    _validate_ig_cookies()
+    _validate_ig_cookies(cookie_dir=config.cookie_dir)
     return "cookies_valid"
 
 
@@ -133,7 +137,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     Returns:
         Path to the downloaded video file.
     """
-    _validate_ig_cookies()
+    _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
@@ -144,7 +148,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             "yt-dlp",
-            "--cookies", IG_COOKIES_FILE,
+            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--output", str(output_path.with_suffix("")),
             *IGDL_RATE_FLAGS,
@@ -466,7 +470,9 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     merged = json.loads(merged_path.read_text())
     music_only = merged.get("music_only", False)
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Build compact transcript
     transcript_text = _format_transcript_for_llm(merged)
@@ -533,7 +539,7 @@ OUTPUT FORMAT:
 Write a note following the template above.
 {'This is a music-only reel — prioritize any detected caption text over the transcript.' if music_only else 'Analyze the full transcript for key points.'}"""
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = response.content
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
@@ -557,7 +563,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     Returns:
         Path to metadata JSON file.
     """
-    _validate_ig_cookies()
+    _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
@@ -567,7 +573,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             "yt-dlp",
-            "--cookies", IG_COOKIES_FILE,
+            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(title)s||%(uploader)s||%(like_count)s||%(playlist_count)s",
             *IGDL_RATE_FLAGS,
@@ -605,7 +611,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     caption_result = subprocess.run(
         [
             "yt-dlp",
-            "--cookies", IG_COOKIES_FILE,
+            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(description)s",
             *IGDL_RATE_FLAGS,
@@ -681,6 +687,7 @@ async def main():
                 slide_num += 1
         
         await browser.close()
+        # Output slides JSON to stdout — captured by the pipeline via subprocess.run().stdout
         print(json.dumps(slides))
         
         if slide_num < {CAROUSEL_SLIDE_CAP}:
@@ -774,7 +781,9 @@ def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
         for s in slides_data.get("slides", [])
     )
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     source_domain = urlparse(source_url).netloc or "instagram.com"
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -822,7 +831,7 @@ SLIDES ({len(slides_data.get('slides', []))} of {playlist_count} extracted):
 Write a note analyzing this carousel post.
 Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could be extracted (anti-bot limitation on slides 3+)."""
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = response.content
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
@@ -851,16 +860,14 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
     safe_slug = _slug_path(slug)
     content_type = task.get("content_type", "instagram_post")
 
-    if content_type == "instagram_reel":
-        note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-    else:
-        note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found: {note_path}")
 
     if content_type == "instagram_reel":
+        logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
         llm = get_llm_client(config)
+        llm.set_task_context(task["id"], logs_conn)
         passed, rounds = quality_gate_retry_loop(
             note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
         )

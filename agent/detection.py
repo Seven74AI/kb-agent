@@ -58,7 +58,7 @@ def detect_content_subtype(url: str, platform: str) -> str:
 
     Returns:
         Content subtype string. For most platforms, just returns the platform.
-        - threads → 'text' or 'video' (based on video_versions in page JSON)
+        - threads -> 'threads_text' or 'threads_video' (based on video_versions in page JSON)
         - substack → 'text', 'image', or 'video'
         - mega → 'book_batch', 'video', or 'unknown'
     """

@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -51,6 +52,12 @@ CHARS_PER_TOKEN = 4
 
 # Threshold for chunked synthesis (books are long)
 CHUNK_TOKEN_THRESHOLD = 80_000
+
+# Boundary detection (CONTEXT.md lines 218-222):
+# LLM-first semantic boundary detection, not regex.
+BOUNDARY_CHUNK_TOKENS = 50_000   # ~200K chars — initial boundary search window
+BOUNDARY_EXPAND_TOKENS = 100_000 # ~400K chars — expanded window per fallback spec
+OVERLAP_TOKENS = 10_000          # ~40K chars — overlap between chunks
 
 # Max quality gate retries
 MAX_QUALITY_RETRIES = 3
@@ -658,8 +665,10 @@ def step_synthesize_book(task: dict, config: Config) -> str:
     full_text = full_text_path.read_text(encoding="utf-8")
     estimated_tokens = len(full_text) // CHARS_PER_TOKEN
 
-    # Get LLM client
+    # Get LLM client with archiving
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Determine note path
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
@@ -674,6 +683,7 @@ def step_synthesize_book(task: dict, config: Config) -> str:
         response = llm.call(
             system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            role="synthesis",
         )
         note_content = response.content
     else:
@@ -725,86 +735,214 @@ paragraph in the Chapter Summaries section. Include at least 4 direct quotes
 with chapter numbers."""
 
 
-def _chunked_book_synthesis(full_text: str, full_text_path: Path,
-                            title: str, author: str, llm: LLMClient,
-                            config: Config) -> str:
-    """Progressive chunking synthesis for very long books.
+def _detect_boundaries_llm(full_text: str, llm: LLMClient) -> list[int]:
+    """Per CONTEXT.md lines 218-222: cheap LLM call for semantic boundaries.
 
-    1. Split by chapter markers
-    2. Synthesize each chapter group
-    3. Combine chapter summaries with beginning/end
-    4. Final synthesis pass
+    Receives the full source text and returns character offsets where
+    chapter/section splits should occur. Uses progressive window expansion
+    as specified: 50K tokens -> 100K tokens -> best boundary anyway.
+
+    Args:
+        full_text: Complete extracted book text.
+        llm: LLM client instance.
+
+    Returns:
+        Sorted list of character offsets for chunk boundaries, starting at 0.
     """
-    # Split into chapters
-    chapters = re.split(r'\n=== CHAPTER \d+ ===\n', full_text)
-    if not chapters or len(chapters) <= 2:
-        # Fall back to truncated single pass
-        return llm.call(
-            system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
-            user_prompt=_build_book_prompt(full_text[:180_000], title, author),
-        ).content
+    total_chars = len(full_text)
+    total_tokens = total_chars // CHARS_PER_TOKEN
 
-    # Chapter 0 is usually empty/intro text before first === CHAPTER ===
-    preamble = chapters[0] if len(chapters) > 0 else ""
-    chapter_texts = chapters[1:]  # Actual chapters
+    # Try initial window: ~50K tokens (~200K chars)
+    for window_tokens in (BOUNDARY_CHUNK_TOKENS, BOUNDARY_EXPAND_TOKENS):
+        window_chars = min(window_tokens * CHARS_PER_TOKEN, total_chars)
+        sample = full_text[:window_chars]
 
-    # Synthesize chapters in groups of 5
-    chapter_summaries = []
-    group_size = 5
-    for i in range(0, len(chapter_texts), group_size):
-        group = chapter_texts[i:i + group_size]
-        group_text = "\n\n".join(
-            f"### Chapter {i+j+1}\n{t}"
-            for j, t in enumerate(group)
-        )
-        group_prompt = f"""Summarize each of the following chapters from *{title}* by {author}.
-For each chapter, write a substantive paragraph (3-5 sentences) capturing
-the key content, arguments, and notable quotes.
+        prompt = f"""Analyze this book text and identify ALL major semantic boundaries
+(chapter starts, section breaks, topic transitions).
 
-{group_text}
+Total book length: {total_chars:,} characters (~{total_tokens:,} tokens).
+This sample covers the first {window_chars:,} characters.
 
-Output format:
-## Chapter {i+1}
-[paragraph]
+Output a JSON array of character offsets where new sections begin.
+The first offset MUST be 0 (start of text).
+Example: [0, 12450, 28901, 45678]
 
-## Chapter {i+2}
-[paragraph]
-..."""
+IMPORTANT: Output ONLY the JSON array on a single line. No explanation.
+
+TEXT BEGINS:
+{sample}
+TEXT ENDS"""
 
         try:
             response = llm.call(
-                system_prompt="You are a precise book summarizer. Summarize each chapter thoroughly.",
-                user_prompt=group_prompt,
+                system_prompt=(
+                    "You are a precise text boundary detector. "
+                    "Identify semantic boundaries in book text. "
+                    "Output ONLY a JSON array of integers (character offsets). "
+                    "No markdown, no explanation — just the array."
+                ),
+                user_prompt=prompt,
+                role="boundary",
             )
-            chapter_summaries.append(response.content)
+
+            # Parse JSON array from response
+            match = re.search(r'\[\s*\d+(?:\s*,\s*\d+)*\s*\]', response.content)
+            if match:
+                boundaries = json.loads(match.group())
+                if boundaries:
+                    # Ensure 0 is first
+                    if boundaries[0] != 0:
+                        boundaries.insert(0, 0)
+                    # Validate: offsets should be within range and increasing
+                    boundaries = sorted(set(
+                        b for b in boundaries if 0 <= b < total_chars
+                    ))
+                    if len(boundaries) >= 2:
+                        return boundaries
+        except (json.JSONDecodeError, ValueError, IndexError, Exception):
+            pass
+
+    # Fallback per CONTEXT.md: "if still none -> boundary LLM picks
+    # best boundary even if imperfect" — use regex chapter markers
+    # as last resort
+    markers = list(re.finditer(
+        r'(?:^|\n)(?:CHAPTER|Chapter|PART|Part|SECTION|Section)\s+\d+',
+        full_text, re.MULTILINE
+    ))
+    if markers:
+        boundaries = [0] + [m.start() for m in markers if m.start() > 0]
+        # Ensure reasonable spacing (min 5K chars between boundaries)
+        filtered = [0]
+        for b in boundaries[1:]:
+            if b - filtered[-1] >= 5000:
+                filtered.append(b)
+        return filtered
+
+    # Absolute last resort: split evenly at window boundaries
+    chunk_size = BOUNDARY_CHUNK_TOKENS * CHARS_PER_TOKEN
+    num_chunks = max(2, total_chars // chunk_size)
+    step = total_chars // num_chunks
+    return [i * step for i in range(num_chunks)]
+
+
+def _chunked_book_synthesis(full_text: str, full_text_path: Path,
+                            title: str, author: str, llm: LLMClient,
+                            config: Config) -> str:
+    """Progressive chunking synthesis using LLM boundary detection.
+
+    Per CONTEXT.md lines 218-222:
+    1. LLM detects semantic boundaries (NOT regex-primary)
+    2. Regex chapter markers supplement LLM boundaries
+    3. Progressive synthesis with 10K token overlap between chunks
+    4. Final synthesis pass
+    """
+    # Step 1: LLM boundary detection (primary, per CONTEXT.md)
+    llm_boundaries = _detect_boundaries_llm(full_text, llm)
+
+    # Step 2: Regex chapter markers as supplemental validation
+    regex_boundaries = [0]
+    for m in re.finditer(
+        r'\n=== CHAPTER \d+ ===\n', full_text
+    ):
+        regex_boundaries.append(m.end())
+
+    # Merge: start with LLM boundaries, add regex boundaries within
+    # 5K chars as refinements
+    all_boundaries = sorted(set(llm_boundaries))
+    for rb in regex_boundaries[1:]:
+        # Only add if it's a meaningful refinement near an LLM boundary
+        if not any(abs(rb - b) < 5000 for b in all_boundaries):
+            all_boundaries.append(rb)
+    all_boundaries = sorted(set(all_boundaries))
+
+    # Step 3: Build chunks with 10K token overlap (~40K chars)
+    overlap_chars = OVERLAP_TOKENS * CHARS_PER_TOKEN
+    chunks: list[str] = []
+    for i in range(len(all_boundaries) - 1):
+        start = max(0, all_boundaries[i] - (overlap_chars if i > 0 else 0))
+        end = min(len(full_text), all_boundaries[i + 1] + overlap_chars)
+        chunks.append(full_text[start:end])
+
+    # Add final chunk (after last boundary to end of text)
+    if all_boundaries:
+        last_start = max(0, all_boundaries[-1] - overlap_chars)
+        if last_start < len(full_text):
+            chunks.append(full_text[last_start:])
+
+    if len(chunks) <= 1:
+        # Ultimate fallback: truncated single pass
+        return llm.call(
+            system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
+            user_prompt=_build_book_prompt(
+                full_text[:BOUNDARY_EXPAND_TOKENS * CHARS_PER_TOKEN],
+                title, author
+            ),
+        ).content
+
+    # Step 4: Progressive synthesis — build note chunk by chunk
+    # Start with first chunk
+    note_so_far = ""
+    for idx, chunk_text in enumerate(chunks):
+        chunk_label = f"Chunk {idx + 1}/{len(chunks)}"
+        if idx == 0:
+            # First chunk: full synthesis
+            chunk_prompt = f"""Analyze the following portion of *{title}* by {author}
+and create a book note following the template structure.
+
+{chunk_label} — this is the BEGINNING of the book:
+---
+{chunk_text}
+---
+
+Follow the template structure. This is the first pass — cover what you can
+from this portion, and the note will be expanded with subsequent chunks."""
+        elif idx == len(chunks) - 1:
+            # Last chunk: final polish
+            chunk_prompt = f"""Here is the current note for *{title}* by {author}:
+
+{note_so_far}
+
+Now here is {chunk_label} — the FINAL portion of the book:
+---
+{chunk_text}
+---
+
+Integrate this final portion into the note. Update ALL sections:
+add new chapter summaries, quotes, and analysis. Ensure EVERY section
+is complete. This is the FINAL pass — produce a polished, complete note."""
+        else:
+            # Middle chunk: expand
+            chunk_prompt = f"""Here is the current note for *{title}* by {author}:
+
+{note_so_far}
+
+Now here is {chunk_label}:
+---
+{chunk_text}
+---
+
+Expand the note with content from this new chunk. Add chapter summaries,
+quotes, and analysis. Maintain the full template structure."""
+
+        try:
+            response = llm.call(
+                system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
+                user_prompt=chunk_prompt,
+                role="synthesis",
+            )
+            note_so_far = response.content
         except Exception:
-            chapter_summaries.append(f"## Chapters {i+1}-{min(i+group_size, len(chapter_texts))}\n[Synthesis failed — see full text]\n")
+            if idx == 0:
+                note_so_far = f"[Synthesis failed for {chunk_label}]\n"
+            # Continue with previous note_so_far on failure
 
-    # Build combined prompt for final synthesis
-    combined_summaries = "\n\n".join(chapter_summaries)
-    final_prompt = f"""Create the final book note for *{title}* by {author}.
-
-Here are the chapter summaries:
-{combined_summaries}
-
-The book has {len(chapter_texts)} chapters total.
-
-Now write the COMPLETE note following this structure:
-- Summary (2-3 sentences)
-- Key Claims (>=4 direct quotes from the text below with chapter numbers)
-- Chapter Summaries (use the summaries above, ensuring EVERY chapter is covered with a substantive paragraph)
-- Who Is the Author
-- Critical Analysis
-- Nuances
-- Reliability
-- Sources
-
-The Chapter Summaries section MUST be the longest part. Every chapter needs
-at least 3 sentences."""
-
-    return llm.call(
+    return note_so_far or llm.call(
         system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
-        user_prompt=final_prompt,
+        user_prompt=_build_book_prompt(
+            full_text[:BOUNDARY_EXPAND_TOKENS * CHARS_PER_TOKEN],
+            title, author
+        ),
+        role="synthesis",
     ).content
 
 

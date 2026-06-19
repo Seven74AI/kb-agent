@@ -452,7 +452,15 @@ class TestBookQualityGate:
             "A detailed author biography with credentials and background information. " * 5,
             "",
             "## Critical Analysis",
-            "This section evaluates the book critically but briefly. " * 5,
+            "### Methodological Issues",
+            "- The study design lacks a control group.",
+            "",
+            "### Factual Issues",
+            "- Claim X on page 42 contradicts research by Smith (2020).",
+            "- The historical timeline on page 88 is off by two years.",
+            "",
+            "### What Remains Interesting / Valid",
+            "- The core argument stands despite these issues.",
             "",
             "## Nuances",
             "Some nuanced points about where the book falls short.",
@@ -502,6 +510,60 @@ class TestBookQualityGate:
         from agent.exceptions import StepError
         with pytest.raises(StepError):
             step_book_quality_gate(book_task, config)
+
+    def test_quality_gate_fails_too_few_fact_checks(self, config, book_task):
+        """Quality gate fails when fact_check_count < 2."""
+        note_dir = config.vault_path / "Knowledge base" / "books"
+        note_dir.mkdir(parents=True, exist_ok=True)
+        note_path = note_dir / f"{book_task['slug']}.md"
+
+        # Build a valid note that passes everything EXCEPT fact_checks
+        chapters = []
+        for i in range(1, 11):
+            chapters.append(f"### Chapter {i}")
+            chapters.append(f"This is a detailed summary of chapter {i}. " * 10)
+
+        note_content = "\n".join([
+            "## Summary",
+            "This is a comprehensive book summary that captures the central thesis.",
+            "",
+            "## Key Claims",
+            '> "Direct quote one from the book" — Chapter 1',
+            '> "Direct quote two proving a key point" — Chapter 2',
+            '> "Direct quote three with evidence" — Chapter 5',
+            '> "Direct quote four with analysis" — Chapter 8',
+            "",
+            "## Chapter Summaries",
+            *chapters,
+            "",
+            "## Who Is the Author",
+            "A detailed author biography with credentials and background information. " * 5,
+            "",
+            "## Critical Analysis",
+            "### Methodological Issues",
+            "- The study design lacks a control group.",
+            "",
+            "### Factual Issues",
+            "Only one fact check — the author got the date wrong.",
+            "",
+            "### What Remains Interesting / Valid",
+            "- The core argument stands despite these issues.",
+            "",
+            "## Nuances",
+            "Some nuanced points about where the book falls short.",
+            "",
+            "## Reliability",
+            "plausible",
+            "",
+            "## Sources",
+            "Author. *Title* (2024)",
+        ])
+        note_path.write_text(note_content)
+
+        from agent.exceptions import StepError
+        with pytest.raises(StepError) as excinfo:
+            step_book_quality_gate(book_task, config)
+        assert "Too few fact checks" in str(excinfo.value)
 
 
 # ── Synthesis Prompt Tests ────────────────────────────────────────────────────

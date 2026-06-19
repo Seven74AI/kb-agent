@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -373,12 +374,25 @@ def step_diarize(task: dict, config: Config) -> str:
             step_name="diarize",
         )
 
+    # ── Progress logging ─────────────────────────────────────────────
+    logs_conn = task.get("_logs_conn")
+    task_id = task.get("_task_id", "")
+    step_name = task.get("_step_name", "diarize")
+    if logs_conn:
+        from agent.streaming import log_progress
+        log_progress(logs_conn, task_id, step_name,
+                     f"Starting pyannote diarization for {slug}")
+
     result = subprocess.run(
         ["python3", str(script_path), str(audio_8k), str(output_json)],
         capture_output=True, text=True, timeout=7200,
     )
 
     if result.returncode != 0:
+        if logs_conn:
+            log_progress(logs_conn, task_id, step_name,
+                         f"Diarization FAILED (rc={result.returncode})",
+                         stream="stderr")
         stderr = result.stderr.strip()
         if "401" in stderr or "403" in stderr:
             raise StepError(
@@ -399,6 +413,17 @@ def step_diarize(task: dict, config: Config) -> str:
             error_type=ErrorType.RETRY,
             step_name="diarize",
         )
+
+    # Log completion with segment count
+    if logs_conn:
+        segment_count = "?"
+        try:
+            data = json.loads(output_json.read_text())
+            segment_count = str(len(data.get("segments", [])))
+        except Exception:
+            pass
+        log_progress(logs_conn, task_id, step_name,
+                     f"Diarization complete: {segment_count} segments")
 
     return str(output_json)
 
@@ -440,12 +465,26 @@ def step_transcribe(task: dict, config: Config) -> str:
             step_name="transcribe",
         )
 
+    # ── Progress logging ─────────────────────────────────────────────
+    logs_conn = task.get("_logs_conn")
+    task_id = task.get("_task_id", "")
+    step_name = task.get("_step_name", "transcribe")
+    if logs_conn:
+        from agent.streaming import log_progress
+        dur_info = f" (~{float(duration_secs)/60:.0f}min)" if duration_secs != "0" else ""
+        log_progress(logs_conn, task_id, step_name,
+                     f"Starting faster-whisper transcription for {slug}{dur_info}")
+
     result = subprocess.run(
         ["python3", str(script_path), str(audio_16k), str(output_json), duration_secs],
         capture_output=True, text=True, timeout=7200,
     )
 
     if result.returncode != 0:
+        if logs_conn:
+            log_progress(logs_conn, task_id, step_name,
+                         f"Transcription FAILED (rc={result.returncode})",
+                         stream="stderr")
         raise StepError(
             f"Transcription failed: {result.stderr.strip()[:200]}",
             error_type=ErrorType.RETRY,
@@ -458,6 +497,17 @@ def step_transcribe(task: dict, config: Config) -> str:
             error_type=ErrorType.RETRY,
             step_name="transcribe",
         )
+
+    # Log completion
+    if logs_conn:
+        seg_count = "?"
+        try:
+            data = json.loads(output_json.read_text())
+            seg_count = str(len(data.get("segments", [])))
+        except Exception:
+            pass
+        log_progress(logs_conn, task_id, step_name,
+                     f"Transcription complete: {seg_count} segments")
 
     return str(output_json)
 
@@ -737,7 +787,9 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
     else:
         metadata = {}
 
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     # Build transcript text for the LLM (compact but complete)
     transcript_text = _format_transcript_for_llm(merged)
@@ -834,7 +886,7 @@ Respond with ONLY valid JSON:
         f"=== TRANSCRIPT ===\n{transcript}\n=== END ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     content = response.content.strip()
 
     # Extract JSON from response (may have markdown code fences)
@@ -973,7 +1025,7 @@ OUTPUT FORMAT:
         f"=== TRANSCRIPT ===\n{transcript}\n=== END ==="
     )
 
-    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt)
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     return response.content
 
 
@@ -1048,7 +1100,9 @@ def step_quality_gate(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
     # Run standard YouTube quality gates (concepts + key points)
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
 
     passed, rounds = quality_gate_retry_loop(
         note_path, config, quality_gate_youtube, llm, max_rounds=MAX_QUALITY_RETRIES,

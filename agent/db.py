@@ -75,7 +75,13 @@ def init_db(db_path: Path, schema: str) -> sqlite3.Connection:
         An open sqlite3.Connection in WAL mode.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    # check_same_thread=False enables cross-thread access (safe with WAL mode).
+    # Needed for step functions running in run_in_executor threads to write
+    # to logs.db via streaming.log_progress().
+    if db_path.name == "logs.db":
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    else:
+        conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(schema)

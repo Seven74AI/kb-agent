@@ -80,7 +80,7 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "ig_carousel_synthesize", "ig_quality_gate",
         "ig_minio_upload", "ig_git_push",
     ],
-    "threads": [
+    "threads_text": [
         "threads_detect", "threads_extract_text", "threads_text_synthesize",
         "threads_quality_gate", "threads_minio_upload", "threads_git_push",
     ],
@@ -173,7 +173,8 @@ def submit():
         # Create paused task
         conn = _get_agent_conn()
         slug = slugify(url)
-        steps = PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"])
+        subtype = detect_content_subtype(url, platform)
+        steps = PIPELINE_STEPS.get(subtype, PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"]))
         task_id = create_task(conn, url, platform, slug, steps, status="paused")
         # Set error reason on the paused task
         conn.execute(
@@ -192,7 +193,7 @@ def submit():
     subtype = detect_content_subtype(url, platform)
 
     # 5. Get pipeline steps for this content type
-    steps = PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"])
+    steps = PIPELINE_STEPS.get(subtype, PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"]))
 
     # 6. Create task in DB
     conn = _get_agent_conn()

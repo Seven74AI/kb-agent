@@ -400,6 +400,14 @@ class Consumer:
 
         fn, _ = entry
 
+        # Inject streaming context so steps can write progress to logs.db.
+        # _task_id, _step_name, _logs_conn are available in task dict.
+        # Steps import agent.streaming.log_progress() to write progress lines.
+        task_id = task["id"]
+        task["_task_id"] = task_id
+        task["_step_name"] = step_name
+        task["_logs_conn"] = self.logs_conn  # thread-safe: check_same_thread=False
+
         if inspect.iscoroutinefunction(fn):
             return await fn(task, self.config)
         else:
