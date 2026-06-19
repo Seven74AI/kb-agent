@@ -352,20 +352,45 @@ Analysis of claim two.
 This section introduces the topic with deep analysis and multiple paragraphs
 that demonstrate thorough understanding of the source material presented.
 The author makes several key points worth examining in detail here.
+The opening establishes the central thesis and provides necessary background
+for readers unfamiliar with the subject matter. This thorough introduction
+sets the stage for the more detailed analysis that follows in later sections.
 
 ### Section 2: Body
-The body covers the main arguments with substantial treatment.
+The body covers the main arguments with substantial treatment of each claim.
 This section is longer than any other section in the note to ensure
 the dominant section requirement is met with ample analysis and detail.
+Each argument is examined from multiple angles, with supporting evidence
+and counterarguments considered in turn. The analysis is comprehensive
+and leaves no major point unaddressed.
 
-### Section 3: Conclusion
-The conclusion wraps up with final thoughts.
+### Section 3: Evidence Review
+The evidence section examines the data supporting the main claims.
+Multiple studies are cited and their methodologies are evaluated.
+The strength of each piece of evidence is assessed independently,
+giving readers a clear picture of what is well-supported and what
+requires further investigation.
+
+### Section 4: Conclusion
+The conclusion wraps up with final thoughts and synthesizes the
+key takeaways from the analysis. It identifies open questions
+and suggests directions for future research or policy action.
 
 ## Context
 Written by experts in the field. Published in 2026.
 
 ## Critical Analysis
 Some critique but shorter than Section-by-Section.
+
+### Methodological Issues
+- The sample size could be larger.
+
+### Factual Issues
+- Claim X on page 2 contradicts research by Smith (2020).
+- The timeline on page 5 is off by two years.
+
+### What Remains Interesting / Valid
+- The core argument stands despite these issues.
 
 ## Nuances
 Some limitations noted.

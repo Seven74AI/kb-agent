@@ -12,6 +12,14 @@ import re
 def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) -> tuple[bool, list[str]]:
     """Run quality gates on a web article note.
 
+    Checks:
+    - quote_count >= config.article_min_quotes
+    - size >= config.article_min_size
+    - line_count >= 20
+    - fact_check_count >= config.article_min_fact_checks
+    - Section-by-Section > Critical Analysis (Tier 2 structural)
+    - No empty/placeholder sections
+
     Args:
         note_path: Path to the generated note file.
         config: Config dataclass with quality thresholds.
@@ -60,6 +68,16 @@ def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) ->
                 f"Critical Analysis ({critique_section_lines} lines) longer than "
                 f"Section-by-Section ({content_section_lines} lines) — unbalanced"
             )
+
+    # Fact-check count — count bullet points under \"### Factual Issues\"
+    # within \"## Critical Analysis\"
+    fact_check_count = _count_fact_checks(lines)
+    if fact_check_count < config.article_min_fact_checks:
+        failures.append(
+            f"Too few fact checks: {fact_check_count} < "
+            f"{config.article_min_fact_checks} required (under ## Critical Analysis"
+            f" → ### Factual Issues)"
+        )
 
     # Check for empty sections
     current_section = None
@@ -150,6 +168,16 @@ def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -
                 failures.append(
                     f"Too few chapter summaries: {chapter_headers} detected"
                 )
+
+    # Fact-check count — count bullet points under "### Factual Issues"
+    # within "## Critical Analysis"
+    fact_check_count = _count_fact_checks(lines)
+    if fact_check_count < config.book_min_fact_checks:
+        failures.append(
+            f"Too few fact checks: {fact_check_count} < "
+            f"{config.book_min_fact_checks} required (under ## Critical Analysis"
+            f" → ### Factual Issues)"
+        )
 
     # Critical Analysis size check — should not exceed Chapter Summaries + Key Claims
     critical_analysis_idx = _find_section(lines, "Critical Analysis")
@@ -265,6 +293,66 @@ def _find_section(lines: list[str], name: str) -> int | None:
         if line.startswith("## ") and name.lower() in line.lower():
             return i
     return None
+
+
+def _count_fact_checks(lines: list[str]) -> int:
+    """Count bullet-point entries under ### Factual Issues within ## Critical Analysis.
+
+    Counts lines starting with '- ' or '* ' inside the Factual Issues subsection.
+    If no bullet points are found, checks for non-empty paragraphs (counts as 1 each).
+    """
+    critical_analysis_idx = _find_section(lines, "Critical Analysis")
+    if critical_analysis_idx is None:
+        return 0
+
+    # Find "### Factual Issues" within Critical Analysis
+    factual_idx = None
+    in_critical = False
+    for i, line in enumerate(lines):
+        if i < critical_analysis_idx:
+            continue
+        if line.startswith("## ") and "Critical Analysis" in line:
+            in_critical = True
+            continue
+        if in_critical and line.startswith("## "):
+            break  # Left Critical Analysis section
+        if in_critical and line.startswith("### ") and "factual" in line.lower():
+            factual_idx = i
+            break
+
+    if factual_idx is None:
+        return 0
+
+    # Count bullet points from factual_idx to next section boundary
+    count = 0
+    for i, line in enumerate(lines):
+        if i <= factual_idx:
+            continue
+        # Stop at next section header (## or ###)
+        if line.startswith("## ") or line.startswith("### "):
+            break
+        stripped = line.strip()
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            count += 1
+
+    # Fallback: if no bullets, count non-empty paragraphs
+    if count == 0:
+        paragraph_count = 0
+        in_paragraph = False
+        for i, line in enumerate(lines):
+            if i <= factual_idx:
+                continue
+            if line.startswith("## ") or line.startswith("### "):
+                break
+            if line.strip():
+                if not in_paragraph:
+                    paragraph_count += 1
+                    in_paragraph = True
+            else:
+                in_paragraph = False
+        return paragraph_count
+
+    return count
 
 
 def _structural_review(note_content: str, llm) -> str:

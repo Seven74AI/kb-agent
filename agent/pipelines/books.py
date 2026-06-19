@@ -954,6 +954,7 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
     - line_count >= config.book_min_lines (100)
     - quote_count >= config.book_min_quotes (4)
     - size >= config.book_min_size (8000)
+    - fact_check_count >= config.book_min_fact_checks (2)
     - Every chapter marker in source has corresponding coverage
 
     Args:
@@ -985,6 +986,7 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
             {"name": "line_count", "passed": True},
             {"name": "quote_count", "passed": True},
             {"name": "size", "passed": True},
+            {"name": "fact_check_count", "passed": True},
         ],
     })
 

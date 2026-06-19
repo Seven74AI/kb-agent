@@ -434,6 +434,8 @@ QUALITY RULES (non-negotiable):
 - The Summary should capture the essential argument in 3-5 sentences.
 - Context must identify who wrote this, why now, and any conflicts of interest.
 - Critical Analysis must identify what's new vs restating, what's omitted.
+- Critical Analysis MUST include a \"### Factual Issues\" subsection with ≥2 specific factual problems
+  (e.g., \"Claim X on page Y contradicts Z\"). Use bullet points (-).
 - Nuances must address what the source exaggerates or distorts.
 
 OUTPUT FORMAT:
