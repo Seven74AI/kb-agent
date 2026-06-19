@@ -49,7 +49,7 @@ except ImportError:
 CHARS_PER_TOKEN = 4
 
 # Threshold for chunked synthesis (books are long)
-CHUNK_TOKEN_THRESHOLD = 80_000
+CHUNK_TOKEN_THRESHOLD = 50_000
 
 # Boundary detection (CONTEXT.md lines 218-222):
 # LLM-first semantic boundary detection, not regex.
@@ -640,7 +640,7 @@ def step_synthesize_book(task: dict, config: Config) -> str:
     """Synthesize a book note from extracted full text.
 
     Uses a dedicated book synthesis template with chapter-by-chapter
-    analysis. For long books (>80K tokens), uses progressive chunking.
+    analysis. For long books (>50K tokens), uses progressive chunking.
 
     Args:
         task: Task dict with slug.
