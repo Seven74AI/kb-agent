@@ -104,10 +104,13 @@ def _detect_threads_subtype(url: str) -> str:
 
 
 def _detect_substack_subtype(url: str) -> str:
-    """Check a Substack URL for content type via preloads JSON.
+    """Check a Substack URL for content type via preloads JSON + SSR HTML.
 
-    Falls back to SSR HTML if preloads unavailable.
-    Returns 'text', 'image', or 'video'.
+    Two-layer detection:
+    Layer 1: Parse preloads JSON for attachments type:video or type:image.
+    Layer 2: SSR HTML fallback — grep for Video player aria-label or image-post.
+
+    Returns 'substack_text', 'substack_video', or 'substack_image'.
     """
     try:
         result = subprocess.run(
@@ -115,14 +118,37 @@ def _detect_substack_subtype(url: str) -> str:
             capture_output=True, text=True, timeout=20,
         )
         html = result.stdout
+
+        # ── Layer 1: Preloads JSON ──
+        import json as _json
+        preloads_match = re.search(
+            r'window\.__preloads\s*=\s*(\{.+?\});\s*</script>',
+            html, re.DOTALL,
+        )
+        if preloads_match:
+            try:
+                preloads = _json.loads(preloads_match.group(1))
+                attachments = preloads.get("attachments", [])
+                for att in attachments:
+                    att_type = att.get("type", "")
+                    if att_type == "video":
+                        return "substack_video"
+                    elif att_type == "image":
+                        return "substack_image"
+            except (_json.JSONDecodeError, KeyError, TypeError):
+                pass  # Preloads parse failed — fall through to Layer 2
+
+        # ── Layer 2: SSR HTML fallback ──
         if "/api/v1/video/upload/" in html:
-            return "video"
-        # Look for SSR body tag hints
+            return "substack_video"
+        if 'aria-label="Video player"' in html:
+            return "substack_video"
+
         if '<body class="image-post' in html or 'image-gallery' in html.lower():
-            return "image"
+            return "substack_image"
     except Exception:
         pass
-    return "text"
+    return "substack_text"
 
 
 # ── Mega.nz Detection ────────────────────────────────────────────────────────

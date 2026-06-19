@@ -35,7 +35,8 @@ quality:
 llm_provider: deepseek       # deepseek or edgee
 llm_model: deepseek-v4-pro
 llm_base_url: https://api.deepseek.com/v1
-# llm_base_url: https://api.edgee.ai/v1   # Edgee alternative
+edgee_api_key: ""             # EDGEE_API_KEY from .env (separate from DEEPSEEK_API_KEY)
+# When llm_provider=edgee, set llm_base_url: https://api.edgee.ai/v1
 
 # MinIO
 minio_endpoint: http://localhost:9000

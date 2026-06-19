@@ -32,6 +32,169 @@ CHUNK_OVERLAP_TOKENS = 10_000
 MAX_QUALITY_RETRIES = 3
 
 
+# ── Substack-Specific Steps ────────────────────────────────────────────────────
+
+# Substack boilerplate patterns to remove from Firecrawl markdown
+SUBSTACK_BOILERPLATE = [
+    r'^Subscribe\s*$.*?(?=\n##|\n#|\Z)',
+    r'^Substack is the home for great culture.*$',
+    r'^\*This is .*? of .*?\.\*$',
+    r'^Thanks for reading .*?\!.*$',
+    r'^\*\*Subscribe\*\*.*$',
+    r'^\[Subscribe\].*$',
+    r'^### Subscribe to .*$',
+    r'^\n---\n\n_Subscribe to get.*$',
+    r'^Ready for more\?.*$',
+    r'^\nSubstack\s*\n© \d{4}.*$',
+    r'^\n\[Share\].*$',
+]
+
+
+def step_substack_cleanup(task: dict, config: Config) -> str:
+    """Remove Substack boilerplate from the raw Firecrawl markdown.
+
+    Strips subscribe CTAs, author avatar links, discussion/promo sections,
+    and footer cruft. Keeps the article content intact.
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        'cleaned' if successful.
+    """
+    slug = task.get("slug", task["id"][:8])
+    raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
+
+    if not raw_path.exists():
+        return "no raw file to clean"
+
+    content = raw_path.read_text(encoding="utf-8")
+
+    for pattern in SUBSTACK_BOILERPLATE:
+        content = re.sub(pattern, "", content, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+    # Remove consecutive blank lines (max 2)
+    content = re.sub(r'\n{3,}', '\n\n', content)
+
+    # Remove trailing whitespace on each line
+    content = '\n'.join(line.rstrip() for line in content.splitlines())
+
+    raw_path.write_text(content, encoding="utf-8")
+    return "cleaned"
+
+
+def step_substack_video_pause(task: dict, config: Config) -> str:
+    """Pause a Substack video task — video download is not yet implemented.
+
+    Per CONTEXT.md: Substack video download is NOT fully solved.
+    Mux CDN requires signed JWT token not available via the public API.
+
+    This step always raises StepError(PAUSE) so the consumer stores the
+    reason and the operator can handle it manually.
+
+    Raises:
+        StepError(PAUSE): Always — video download not implemented.
+    """
+    from agent.exceptions import StepError, ErrorType
+    raise StepError(
+        "Substack video download failed — Mux CDN requires signed JWT, "
+        "not available via public API. See CONTEXT.md.",
+        error_type=ErrorType.PAUSE,
+        step_name="substack_video_pause",
+    )
+
+
+def step_substack_image_extract(task: dict, config: Config) -> str:
+    """Download the lead image from a Substack image post and run Tesseract OCR.
+
+    Uses curl to fetch the page, extracts the image URL from preloads JSON
+    or og:image meta, downloads the image, and runs tesseract with
+    multi-language support (eng+fra+spa+deu+ara).
+
+    The OCR output is appended to the raw markdown file under an ## Image section.
+
+    Args:
+        task: Task dict with source_url, slug.
+        config: Config dataclass.
+
+    Returns:
+        'image_extracted: <ocr_chars> chars' if successful.
+    """
+    import json as _json
+
+    slug = task.get("slug", task["id"][:8])
+    url = task["source_url"]
+
+    # Fetch the page HTML
+    result = subprocess.run(
+        ["curl", "-s", "--max-time", "15", url],
+        capture_output=True, text=True, timeout=20,
+    )
+    html = result.stdout
+
+    image_url = None
+
+    # Try preloads JSON first
+    preloads_match = re.search(
+        r'window\.__preloads\s*=\s*(\{.+?\});\s*</script>',
+        html, re.DOTALL,
+    )
+    if preloads_match:
+        try:
+            preloads = _json.loads(preloads_match.group(1))
+            attachments = preloads.get("attachments", [])
+            for att in attachments:
+                if att.get("type") == "image":
+                    image_url = att.get("url") or att.get("src")
+                    if image_url:
+                        break
+        except (_json.JSONDecodeError, KeyError, TypeError):
+            pass
+
+    # Fallback: og:image meta tag
+    if not image_url:
+        og_match = re.search(
+            r'<meta\s+property="og:image"\s+content="([^"]+)"',
+            html, re.IGNORECASE,
+        )
+        if og_match:
+            image_url = og_match.group(1)
+
+    if not image_url:
+        return "no image found"
+
+    # Download the image
+    img_path = Path(config.temp_dir) / f"{slug}_image"
+    dl_result = subprocess.run(
+        ["curl", "-s", "-L", "--max-time", "30", "-o", str(img_path), image_url],
+        capture_output=True, text=True, timeout=35,
+    )
+
+    if dl_result.returncode != 0 or not img_path.exists() or img_path.stat().st_size < 100:
+        return f"image download failed: {dl_result.stderr[:100] if dl_result.stderr else 'empty file'}"
+
+    # Run Tesseract OCR
+    ocr_result = subprocess.run(
+        ["tesseract", str(img_path), "stdout",
+         "-l", "eng+fra+spa+deu+ara"],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    ocr_text = ocr_result.stdout.strip()
+    if not ocr_text:
+        return "image extracted but OCR produced no text"
+
+    # Append OCR output to raw markdown
+    raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
+    if raw_path.exists():
+        existing = raw_path.read_text(encoding="utf-8")
+        new_content = existing + f"\n\n## Image\n\nOCR from lead image:\n\n{ocr_text}\n"
+        raw_path.write_text(new_content, encoding="utf-8")
+
+    return f"image_extracted: {len(ocr_text)} chars OCR"
+
+
 # ── Firecrawl Extraction ─────────────────────────────────────────────────────
 
 def step_firecrawl_extract(task: dict, config: Config) -> str:
@@ -702,6 +865,42 @@ def step_git_push(task: dict, config: Config) -> str:
 
 register_pipeline("web", [
     Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
+    Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
+])
+
+# Substack pipelines — share the web article template
+register_pipeline("substack", [
+    Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
+    Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
+    Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
+])
+
+register_pipeline("substack_text", [
+    Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
+    Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
+    Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
+])
+
+register_pipeline("substack_video", [
+    Step(name="substack_video_pause", fn=step_substack_video_pause, on_error="fail"),
+])
+
+register_pipeline("substack_image", [
+    Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
+    Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
+    Step(name="substack_image_extract", fn=step_substack_image_extract, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),

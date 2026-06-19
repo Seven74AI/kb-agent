@@ -154,19 +154,24 @@ def get_llm_client(config) -> LLMClient:
     Raises:
         ValueError: If the configured llm_provider is unknown.
     """
+    import os
     provider = config.llm_provider
 
     if provider == "deepseek":
+        api_key = config.llm_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        base_url = config.llm_base_url or "https://api.deepseek.com/v1"
         return DeepSeekClient(
-            api_key=config.llm_api_key,
+            api_key=api_key,
             model=config.llm_model,
-            base_url=config.llm_base_url,
+            base_url=base_url,
         )
     elif provider == "edgee":
+        api_key = config.edgee_api_key or os.getenv("EDGEE_API_KEY", "")
+        base_url = config.llm_base_url or "https://api.edgee.ai/v1"
         return EdgeeClient(
-            api_key=config.llm_api_key,
+            api_key=api_key,
             model=config.llm_model,
-            base_url=config.llm_base_url,
+            base_url=base_url,
         )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
