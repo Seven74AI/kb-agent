@@ -228,6 +228,11 @@ class TestEpubExtraction:
     @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_basic(self, mock_bs, mock_epub, config, book_task):
         """Basic ePub extraction with mocked ebooklib."""
+        # Create a dummy epub file so the file-existence check passes
+        epub_path = Path(config.temp_dir) / "test_book.epub"
+        epub_path.parent.mkdir(parents=True, exist_ok=True)
+        epub_path.write_text("dummy epub content")
+        book_task["source_url"] = str(epub_path)
         # Mock the book
         mock_book = MagicMock()
         mock_epub.read_epub.return_value = mock_book
@@ -273,6 +278,11 @@ class TestEpubExtraction:
     @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_preserves_order(self, mock_bs, mock_epub, config, book_task):
         """ePub extraction preserves chapter order (not size-sorted)."""
+        # Create dummy epub file
+        epub_path = Path(config.temp_dir) / "test_book.epub"
+        epub_path.parent.mkdir(parents=True, exist_ok=True)
+        epub_path.write_text("dummy epub content")
+        book_task["source_url"] = str(epub_path)
         mock_book = MagicMock()
         mock_epub.read_epub.return_value = mock_book
         mock_epub.ITEM_DOCUMENT = 9
@@ -307,6 +317,11 @@ class TestEpubExtraction:
     @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_skips_tiny_fragments(self, mock_bs, mock_epub, config, book_task):
         """Tiny fragments (< 50 chars) are skipped."""
+        # Create dummy epub file
+        epub_path = Path(config.temp_dir) / "test_book.epub"
+        epub_path.parent.mkdir(parents=True, exist_ok=True)
+        epub_path.write_text("dummy epub content")
+        book_task["source_url"] = str(epub_path)
         mock_book = MagicMock()
         mock_epub.read_epub.return_value = mock_book
         mock_epub.ITEM_DOCUMENT = 9
@@ -341,6 +356,11 @@ class TestPdfExtraction:
     @patch("agent.pipelines.books.pymupdf")
     def test_extract_pdf_basic(self, mock_pymupdf, config, book_task):
         """Basic PDF extraction with mocked pymupdf."""
+        # Create dummy pdf file
+        pdf_path = Path(config.temp_dir) / "test_book.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_text("dummy pdf content")
+        book_task["source_url"] = str(pdf_path)
         mock_doc = MagicMock()
         mock_doc.page_count = 3
         mock_doc.__getitem__.return_value.get_text.return_value = (
@@ -362,6 +382,11 @@ class TestPdfExtraction:
     @patch("agent.pipelines.books.pymupdf")
     def test_extract_pdf_scanned_raises(self, mock_pymupdf, config, book_task):
         """Scanned PDF raises StepError."""
+        # Create dummy pdf file
+        pdf_path = Path(config.temp_dir) / "test_book.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_text("dummy pdf content")
+        book_task["source_url"] = str(pdf_path)
         mock_doc = MagicMock()
         mock_doc.page_count = 1
         mock_doc.__getitem__.return_value.get_text.return_value = ""  # 0 chars

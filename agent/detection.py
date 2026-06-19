@@ -213,7 +213,7 @@ def _classify_mega_filenames(filenames: list[str]) -> str:
 
     if total == 1 and book_count == 1:
         return "book"
-    elif book_count >= total * 0.5:
+    elif book_count > total * 0.5:
         return "book_batch"
 
     return "unknown"
