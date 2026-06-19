@@ -84,6 +84,7 @@ class Consumer:
         from agent.pipelines import youtube  # noqa: F401
         from agent.pipelines import threads  # noqa: F401
         from agent.pipelines import instagram  # noqa: F401
+        from agent.pipelines import books  # noqa: F401
         from agent.pipelines import PIPELINES
 
         for steps in PIPELINES.values():
