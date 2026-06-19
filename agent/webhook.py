@@ -97,6 +97,17 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "extract_text", "synthesize_note", "quality_gate",
         "minio_upload", "git_push",
     ],
+    "book_epub": [
+        "extract_text", "synthesize_note", "quality_gate",
+        "minio_upload", "git_push",
+    ],
+    "book_pdf": [
+        "extract_text", "synthesize_note", "quality_gate",
+        "minio_upload", "git_push",
+    ],
+    "book_batch": [
+        "megadl_download", "classify_content", "delegate",
+    ],
     "mega": [
         "megadl_download", "classify_content", "delegate",
     ],

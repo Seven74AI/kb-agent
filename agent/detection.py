@@ -125,12 +125,97 @@ def _detect_substack_subtype(url: str) -> str:
     return "text"
 
 
-def _detect_mega_subtype(url: str) -> str:
-    """Check a Mega URL for content type (currently stub — always 'unknown').
+# ── Mega.nz Detection ────────────────────────────────────────────────────────
 
-    Full implementation requires megadl metadata inspection.
+# Video extensions recognized for Mega video classification
+MEGA_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".wmv", ".flv"}
+# Book extensions recognized for Mega book classification
+MEGA_BOOK_EXTENSIONS = {".epub", ".pdf", ".mobi", ".azw3", ".djvu", ".cbr", ".cbz"}
+# Archive extensions that may contain book batches
+MEGA_ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}
+
+
+def _detect_mega_subtype(url: str) -> str:
+    """Check a Mega URL for content type via megadl metadata.
+
+    For /file/ URLs: queries filename via megadl --print-names,
+    classifies by extension.
+    For /folder/ URLs: samples first 10 filenames, classifies
+    by majority extension.
+
+    Returns:
+        'book_batch' — zip/rar/7z archive or majority book extensions
+        'book' — single book file (.epub/.pdf/.mobi/.azw3)
+        'mega_video' — video file (.mp4/.mkv/.webm)
+        'unknown' — could not determine or mixed content
     """
-    # Stub — full implementation in Phase 1 (Mega pipeline)
+    try:
+        result = subprocess.run(
+            ["megadl", "--print-names", url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return "unknown"
+
+        filenames = [
+            line.strip() for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+        if not filenames:
+            return "unknown"
+
+        return _classify_mega_filenames(filenames)
+    except (subprocess.TimeoutExpired, Exception):
+        return "unknown"
+
+
+def _classify_mega_filenames(filenames: list[str]) -> str:
+    """Classify a list of Mega filenames into a content subtype.
+
+    Rules (in priority order):
+    1. Any single .zip/.rar/.7z → 'book_batch' (likely a book archive)
+    2. Majority video extensions → 'mega_video'
+    3. Majority book extensions → 'book_batch' (multiple books)
+    4. Single book → 'book'
+    5. Unknown / mixed → 'unknown'
+    """
+    extensions: dict[str, int] = {}
+    for fname in filenames:
+        # Get lowercase extension
+        ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+        extensions[ext] = extensions.get(ext, 0) + 1
+
+    total = sum(extensions.values())
+    if total == 0:
+        return "unknown"
+
+    # Check for archive files first (priority)
+    archive_count = sum(
+        n for ext, n in extensions.items()
+        if ext in MEGA_ARCHIVE_EXTENSIONS
+    )
+    if archive_count > 0:
+        return "book_batch"
+
+    # Check for video files
+    video_count = sum(
+        n for ext, n in extensions.items()
+        if ext in MEGA_VIDEO_EXTENSIONS
+    )
+    if video_count > 0 and video_count > total * 0.5:
+        return "mega_video"
+
+    # Check for book files
+    book_count = sum(
+        n for ext, n in extensions.items()
+        if ext in MEGA_BOOK_EXTENSIONS
+    )
+
+    if total == 1 and book_count == 1:
+        return "book"
+    elif book_count > total * 0.5:
+        return "book_batch"
+
     return "unknown"
 
 

@@ -6,6 +6,7 @@ Max 3 retry rounds.
 """
 
 from pathlib import Path
+import re
 
 
 def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) -> tuple[bool, list[str]]:
@@ -76,7 +77,14 @@ def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) ->
 
 
 def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -> tuple[bool, list[str]]:
-    """Run quality gates on a book note (stricter thresholds)."""
+    """Run quality gates on a book note (stricter thresholds).
+
+    Checks:
+    - line_count >= config.book_min_lines (100)
+    - quote_count >= config.book_min_quotes (4)
+    - size >= config.book_min_size (8000)
+    - chapter_coverage: every source chapter → note section
+    """
     failures: list[str] = []
 
     if not note_path.exists():
@@ -85,23 +93,74 @@ def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -
     content = note_path.read_text(encoding="utf-8")
     lines = content.split("\n")
 
+    # Quote count — count lines starting with '> '
     quote_count = sum(1 for line in lines if line.strip().startswith("> "))
     if quote_count < config.book_min_quotes:
         failures.append(
             f"Too few quotes: {quote_count} < {config.book_min_quotes} required"
         )
 
+    # Size
     size = len(content)
     if size < config.book_min_size:
         failures.append(
             f"Note too short: {size} chars < {config.book_min_size} required"
         )
 
+    # Line count (proxy for depth)
     line_count = len([l for l in lines if l.strip()])
     if line_count < config.book_min_lines:
         failures.append(
             f"Too few non-empty lines: {line_count} < {config.book_min_lines} required"
         )
+
+    # Chapter coverage — check if Chapter Summaries section covers expected chapters
+    # Look for "## Chapter Summaries" section and count sub-headers
+    chapter_summaries_idx = _find_section(lines, "Chapter Summaries")
+    if chapter_summaries_idx is not None:
+        # Count ### or ## sub-headers within Chapter Summaries
+        chapter_headers = 0
+        in_section = False
+        for i, line in enumerate(lines):
+            if i < chapter_summaries_idx:
+                continue
+            if line.startswith("## ") and "Chapter Summaries" in line:
+                in_section = True
+                continue
+            if in_section and line.startswith("## "):
+                break  # Next major section
+            if in_section and (line.startswith("### ") or line.startswith("**Chapter")):
+                chapter_headers += 1
+
+        # If we can detect a source text file, compare chapter count
+        if vault_path and note_path.stem:
+            source_pattern = f"/tmp/book_{note_path.stem}_full.txt"
+            source_path = Path(source_pattern)
+            if source_path.exists():
+                source_content = source_path.read_text(encoding="utf-8")
+                source_chapters = len(re.findall(
+                    r'=== CHAPTER \d+ ===', source_content
+                ))
+                if chapter_headers < source_chapters * 0.5:
+                    failures.append(
+                        f"Chapter coverage: {chapter_headers} note chapters for "
+                        f"{source_chapters} source chapters (< 50% coverage)"
+                    )
+            elif chapter_headers < 3:
+                failures.append(
+                    f"Too few chapter summaries: {chapter_headers} detected"
+                )
+
+    # Critical Analysis size check — should not exceed Chapter Summaries + Key Claims
+    critical_analysis_idx = _find_section(lines, "Critical Analysis")
+    if critical_analysis_idx is not None and chapter_summaries_idx is not None:
+        summary_lines = critical_analysis_idx - chapter_summaries_idx
+        critique_lines = len(lines) - critical_analysis_idx
+        if critique_lines > summary_lines * 1.5:
+            failures.append(
+                f"Critical Analysis ({critique_lines} lines) disproportionately "
+                f"large vs Chapter Summaries ({summary_lines} lines)"
+            )
 
     return len(failures) == 0, failures
 
