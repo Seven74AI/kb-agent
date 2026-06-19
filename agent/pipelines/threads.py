@@ -239,24 +239,28 @@ def _is_login_wall(html: str) -> bool:
     Returns:
         True if the page appears to be a login wall.
     """
-    # Check for login redirect
+    # Check for explicit login redirect
     if '/login' in html[:500] and 'Threads' in html:
         return True
 
     # Check og:description for generic login-wall patterns
     og = _extract_og_description(html) or ""
-    login_wall_patterns = [
-        "Follow @" in og and "Threads" in og,
-        "Log in" in og and "Threads" in og,
-        "Sign up" in og and "Threads" in og,
-        og == "" and "class=\"_ab6c\"" not in html,  # No real content markers
-    ]
-    return any(login_wall_patterns)
+    if og:
+        # If og:description contains login-wall patterns
+        if "Follow @" in og and "Threads" in og:
+            return True
+        if ("Log in" in og or "Sign up" in og) and "Threads" in og:
+            return True
+    elif "class=\"_ab6c\"" not in html and "caption" not in html.lower():
+        # No og:description AND no real content markers AND no caption data
+        return True
+
+    return False
 
 
 def _slug_path(slug: str) -> str:
     """Convert slug to a filesystem-safe path segment."""
-    return re.sub(r'[<>:"/\\|?*]', '_', slug)[:80]
+    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)[:80]
 
 
 # ── Step 1: Detection ─────────────────────────────────────────────────────────

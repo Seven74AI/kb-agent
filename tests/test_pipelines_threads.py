@@ -78,6 +78,7 @@ def mock_threads_html_text():
 <html><head><meta property="og:description" content="Just sharing my thoughts on AI..."/></head>
 <body>
 <script>window.__INITIAL_STATE__={"caption":{"text":"Just sharing my thoughts on AI and the future of work. What do you think?"},"username":"testuser","is_reply":false}</script>
+<div class="_ab6c">Real content</div>
 </body></html>'''
 
 
@@ -88,6 +89,7 @@ def mock_threads_html_video():
 <html><head></head>
 <body>
 <script>window.__INITIAL_STATE__={"caption":{"text":"Check out this video!"},"username":"testuser","is_reply":false,"video_versions":[{"url":"https://video.cdn.threads.net/test.mp4","height":1080}]}</script>
+<div class="_ab6c">Video content</div>
 </body></html>'''
 
 
@@ -98,6 +100,7 @@ def mock_threads_html_reply():
 <html><head></head>
 <body>
 <script>window.__INITIAL_STATE__={"caption":{"text":"I completely agree with this take."},"username":"replier","is_reply":true,"parent_post":{"code":"XYZ789"}}</script>
+<div class="_ab6c">Reply content</div>
 </body></html>'''
 
 
@@ -193,7 +196,7 @@ class TestDetection:
 
     @patch("agent.pipelines.threads._curl_threads")
     def test_detect_text_post(self, mock_curl, config, task_dict):
-        html = '{"caption":{"text":"hello"},"username":"testuser"}'
+        html = '{"caption":{"text":"hello"},"username":"testuser"}<div class="_ab6c">x</div>'
         mock_curl.return_value = html
 
         result = step_threads_detect(task_dict, config)
@@ -203,7 +206,7 @@ class TestDetection:
 
     @patch("agent.pipelines.threads._curl_threads")
     def test_detect_video_post(self, mock_curl, config, task_dict):
-        html = '{"video_versions":[{"url":"x","height":720}],"caption":{"text":"video!"}}'
+        html = '{"video_versions":[{"url":"x","height":720}],"caption":{"text":"video!"}}<div class="_ab6c">x</div>'
         mock_curl.return_value = html
 
         result = step_threads_detect(task_dict, config)
@@ -266,22 +269,19 @@ class TestVideoExtraction:
     @patch("agent.pipelines.threads._curl_threads")
     @patch("subprocess.run")
     def test_extract_video_success(self, mock_run, mock_curl, config, task_dict):
-        html = '{"video_versions":[{"url":"https://v.cdn/v.mp4","height":1080}]}'
+        html = '{"video_versions":[{"url":"https://v.cdn/v.mp4","height":1080}],"caption":{"text":"x"},"username":"x"}<div class="_ab6c">x</div>'
         mock_curl.return_value = html
 
-        # Simulate successful curl download
+        # Simulate successful curl download — actually create the output file
         def fake_run(*args, **kwargs):
-            if args and args[0] and "curl" in str(args[0]):
-                # Create the output file
-                output_args = str(args[0])
-                import re
-                match = re.search(r'-o\s+(\S+)', output_args)
-                if match:
-                    Path(match.group(1)).write_text("fake video data")
             result = MagicMock()
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
+            # Create output file to satisfy existence check
+            safe_slug = "testuser_abc123"
+            output_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
+            output_path.write_text("fake video data" * 100)
             return result
         mock_run.side_effect = fake_run
 
@@ -291,7 +291,7 @@ class TestVideoExtraction:
 
     @patch("agent.pipelines.threads._curl_threads")
     def test_extract_video_no_video_in_page(self, mock_curl, config, task_dict):
-        html = '{"caption":{"text":"text only"}}'
+        html = '{"caption":{"text":"text only"},"username":"x"}<div class="_ab6c">x</div>'
         mock_curl.return_value = html
 
         with pytest.raises(StepError) as exc:
@@ -483,7 +483,7 @@ class TestQualityGate:
     def test_quality_gate_text_pass(self, config, task_dict):
         # Create a passing note
         note_path = Path(config.vault_path) / "Knowledge base" / "threads" / f"{task_dict['slug']}.md"
-        note_content = "## Summary\n> Quote 1\n> Quote 2\nSome analysis.\n" * 30  # 2000+
+        note_content = ("## Summary\n> Quote 1\n> Quote 2\nSome analysis text.\n" * 80)  # 2000+ chars with 2+ quotes
         note_path.write_text(note_content)
 
         result = step_threads_quality_gate(task_dict, config)

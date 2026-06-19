@@ -82,7 +82,7 @@ def _validate_ig_cookies() -> None:
 
 def _slug_path(slug: str) -> str:
     """Convert slug to a filesystem-safe path segment."""
-    return re.sub(r'[<>:"/\\|?*]', '_', slug)[:80]
+    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)[:80]
 
 
 def _is_music_only(transcript: dict) -> bool:

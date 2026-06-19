@@ -210,7 +210,7 @@ class TestReelMerge:
             {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
         ]}
         trans = {"segments": [
-            {"start": 0.0, "end": 5.0, "text": "Hello world, this is a real reel.", "speaker": "SPEAKER_00"},
+            {"start": 0.0, "end": 5.0, "text": "Hello world, this is a real reel with actual speech content that exceeds the music-only threshold of fifty characters.", "speaker": "SPEAKER_00"},
         ]}
 
         Path(config.temp_dir / "instagram.com_reel_ABC123_diarization.json").write_text(json.dumps(diar))
@@ -397,7 +397,7 @@ class TestQualityGate:
 
     def test_quality_gate_carousel_pass(self, config, post_task):
         note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{post_task['slug']}.md"
-        content = "## Slide-by-Slide Analysis\n" * 50  # 2000+ chars
+        content = ("## Slide-by-Slide Analysis\nSlide content goes here with analysis.\n" * 80)  # 2000+ chars
         note_path.write_text(content)
 
         result = step_ig_quality_gate(post_task, config)
