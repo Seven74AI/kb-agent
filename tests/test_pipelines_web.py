@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, "/root/kb-agent")
 
 from agent.config import Config
+from agent.exceptions import StepError
 from agent.llm import LLMResponse
 from agent.pipelines.web import (
     step_firecrawl_extract,
@@ -420,7 +421,7 @@ Content without any quotes at all.
         mock_llm.call.return_value = mock_response
         mock_get_llm.return_value = mock_llm
 
-        with pytest.raises(ValueError, match="Quality gate failed"):
+        with pytest.raises(StepError, match="Quality gate failed"):
             step_quality_gate(task_dict, config)
 
 

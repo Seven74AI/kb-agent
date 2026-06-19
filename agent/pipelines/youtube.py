@@ -1038,7 +1038,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
         'passed' if all gates pass.
 
     Raises:
-        ValueError: If quality gates fail after max retries.
+        StepError: If quality gates fail after max retries.
     """
     slug = task.get("slug", task["id"][:8])
     note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
@@ -1055,9 +1055,11 @@ def step_quality_gate(task: dict, config: Config) -> str:
 
     if not passed:
         content = note_path.read_text(encoding="utf-8")
-        raise ValueError(
+        raise StepError(
             f"Quality gate failed after {rounds} rounds. "
-            f"First line: {content.split(chr(10))[0]}"
+            f"First line: {content.split(chr(10))[0]}",
+            error_type=ErrorType.FAIL,
+            step_name="quality_gate",
         )
 
     # Additional check: density (chars/min)
