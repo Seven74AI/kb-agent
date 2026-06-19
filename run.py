@@ -182,15 +182,11 @@ def main():
         shutdown_flag["shutdown"] = True
         print(f"[run] Received signal {signum} — graceful shutdown")
 
-        # Stop Flask
-        from flask import request
-        # Use werkzeug shutdown
-        try:
-            func = request.environ.get("werkzeug.server.shutdown")
-            if func:
-                func()
-        except Exception:
-            pass
+        # Break app.run() blocking loop.
+        # Werkzeug dev server only handles SIGINT natively (KeyboardInterrupt).
+        # In production (gunicorn/waitress) the WSGI server handles SIGTERM,
+        # but with the dev server we must raise KeyboardInterrupt ourselves.
+        raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
