@@ -185,6 +185,10 @@ def _classify_mega_filenames(filenames: list[str]) -> str:
         ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
         extensions[ext] = extensions.get(ext, 0) + 1
 
+    total = sum(extensions.values())
+    if total == 0:
+        return "unknown"
+
     # Check for archive files first (priority)
     archive_count = sum(
         n for ext, n in extensions.items()
@@ -198,7 +202,7 @@ def _classify_mega_filenames(filenames: list[str]) -> str:
         n for ext, n in extensions.items()
         if ext in MEGA_VIDEO_EXTENSIONS
     )
-    if video_count > 0 and video_count >= sum(extensions.values()) * 0.5:
+    if video_count > 0 and video_count >= total * 0.5:
         return "mega_video"
 
     # Check for book files
@@ -206,7 +210,6 @@ def _classify_mega_filenames(filenames: list[str]) -> str:
         n for ext, n in extensions.items()
         if ext in MEGA_BOOK_EXTENSIONS
     )
-    total = sum(extensions.values())
 
     if total == 1 and book_count == 1:
         return "book"
