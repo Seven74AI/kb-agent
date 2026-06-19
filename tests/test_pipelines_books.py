@@ -291,10 +291,10 @@ class TestEpubExtraction:
         mock_epub.read_epub.return_value = mock_book
         mock_epub.ITEM_DOCUMENT = 9
 
-        # Chapter 1 is long, Chapter 2 is short
+        # Chapter 1 is long, Chapter 2 is shorter but >50 chars
         soups = []
         items = []
-        for body_text in ["A" * 500, "B"]:
+        for body_text in ["A" * 500, "B" * 60]:
             soup = MagicMock()
             soup.get_text.return_value = body_text
             soups.append(soup)
@@ -310,7 +310,7 @@ class TestEpubExtraction:
         result = step_extract_epub(book_task, config)
         full_text = Path(json.loads(result)["full_text_path"]).read_text()
 
-        # Chapter 0 (A) should come before Chapter 1 (B)
+        # Chapter 0 (A) should come before Chapter 1 (B*60)
         idx_a = full_text.index("CHAPTER 0")
         idx_b = full_text.index("CHAPTER 1")
         assert idx_a < idx_b, "Chapter order must be preserved"
