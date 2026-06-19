@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
 from agent.archival import step_minio_upload as archival_minio_upload
@@ -767,7 +768,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
     """Run quality gates on the synthesized note.
 
     Wraps quality.quality_gate_web with the retry loop.
-    Returns 'passed' or raises ValueError with failure details.
+    Returns 'passed' or raises StepError(FAIL) with failure details.
 
     Args:
         task: Task dict with slug.
@@ -777,7 +778,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
         'passed' if all gates pass.
 
     Raises:
-        ValueError: If quality gates fail after max retries.
+        StepError: If quality gates fail after max retries.
     """
     slug = task.get("slug", task["id"][:8])
     note_path = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
@@ -794,9 +795,11 @@ def step_quality_gate(task: dict, config: Config) -> str:
     if not passed:
         # Read the failure message written by the retry loop
         content = note_path.read_text(encoding="utf-8")
-        raise ValueError(
+        raise StepError(
             f"Quality gate failed after {rounds} rounds. "
-            f"First line: {content.split(chr(10))[0]}"
+            f"First line: {content.split(chr(10))[0]}",
+            error_type=ErrorType.FAIL,
+            step_name="quality_gate",
         )
 
     return "passed"

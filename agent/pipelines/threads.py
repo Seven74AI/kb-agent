@@ -962,7 +962,10 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         config: Config dataclass.
 
     Returns:
-        Status string: "passed" or description of failures.
+        Status string: "passed" or raises StepError on failure.
+
+    Raises:
+        StepError: If quality gates fail.
     """
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
@@ -979,7 +982,15 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         passed, rounds = quality_gate_retry_loop(
             note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
         )
-        return json.dumps({"passed": passed, "rounds": rounds})
+        if not passed:
+            content = note_path.read_text(encoding="utf-8")
+            raise StepError(
+                f"Threads video quality gate failed after {rounds} rounds. "
+                f"First line: {content.split(chr(10))[0]}",
+                error_type=ErrorType.FAIL,
+                step_name="threads_quality_gate",
+            )
+        return json.dumps({"passed": True, "rounds": rounds})
     else:
         # Text posts: simple size + quote check
         content = note_path.read_text(encoding="utf-8")
@@ -993,9 +1004,16 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         if size < 2000:
             failures.append(f"Note too short: {size} chars < 2000")
 
+        if not passed:
+            raise StepError(
+                f"Threads text quality gate failed: {'; '.join(failures)}",
+                error_type=ErrorType.FAIL,
+                step_name="threads_quality_gate",
+            )
+
         return json.dumps({
-            "passed": passed,
-            "failures": failures,
+            "passed": True,
+            "failures": [],
             "rounds": 1,
         })
 
