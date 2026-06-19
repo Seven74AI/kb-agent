@@ -17,16 +17,15 @@ from agent.pipelines.web import (
     step_firecrawl_extract,
     step_synthesize_web,
     step_quality_gate,
-    step_see_also,
     step_minio_upload,
     step_git_push,
     _estimate_tokens,
     _build_synthesis_prompt,
-    _extract_keywords,
     _equal_chunks,
     CHUNK_TOKEN_THRESHOLD,
     CHARS_PER_TOKEN,
 )
+from agent.pipelines.see_also import step_see_also, _extract_keywords
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -497,7 +496,7 @@ A note about AI and healthcare.
         model="test",
     )
 
-    with patch("agent.pipelines.web.get_llm_client") as mock_get_llm:
+    with patch("agent.pipelines.see_also.get_llm_client") as mock_get_llm:
         mock_llm = MagicMock()
         mock_llm.call.return_value = mock_response
         mock_get_llm.return_value = mock_llm
