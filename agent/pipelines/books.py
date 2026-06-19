@@ -22,6 +22,7 @@ from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
+from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_book
 
 # Optional dependencies — imported at module level for testability
@@ -983,6 +984,7 @@ register_pipeline("book", [
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 
@@ -994,6 +996,7 @@ register_pipeline("book_epub", [
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 
@@ -1002,6 +1005,7 @@ register_pipeline("book_pdf", [
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 

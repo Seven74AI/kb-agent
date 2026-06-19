@@ -874,7 +874,7 @@ def test_pipeline_registered():
     assert "youtube" in PIPELINES
     pipeline = get_pipeline("youtube")
     assert pipeline is not None
-    assert len(pipeline) == 11  # 11 steps
+    assert len(pipeline) == 12  # 12 steps (added see_also)
     step_names = [s.name for s in pipeline]
     assert "extract_metadata" in step_names
     assert "download_video" in step_names
@@ -886,6 +886,7 @@ def test_pipeline_registered():
     assert "synthesize_youtube" in step_names
     assert "quality_gate" in step_names
     assert "minio_upload" in step_names
+    assert "see_also" in step_names
     assert "git_push" in step_names
 
     # Check error strategies
