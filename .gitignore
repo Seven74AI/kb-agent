@@ -9,3 +9,4 @@ data/
 dist/
 .vscode/
 cookies/
+spawn_*.py
