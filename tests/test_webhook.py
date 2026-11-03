@@ -211,6 +211,9 @@ def test_post_submit_web_url(client, monkeypatch, tmp_path):
     # Ensure vault path doesn't exist (no dedup match)
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
 
+    # Mock preflight_health — Firecrawl not reachable in the test env
+    monkeypatch.setattr("agent.webhook.preflight_health", lambda p: (True, ""))
+
     resp = client.post("/submit", data={"url": "https://example.com/article"})
     assert resp.status_code == 201
     data = json.loads(resp.data)
