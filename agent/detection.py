@@ -23,6 +23,8 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
     (r"substack\.com/", "substack"),
     # Mega
     (r"mega\.nz/", "mega"),
+    # Wikispooks
+    (r"wikispooks\.org/", "wikispooks"),
     # Books (direct upload by file extension)
     (r"\.(epub|pdf|mobi|azw3)$", "book"),
 ]
@@ -39,7 +41,7 @@ def detect_platform(url: str) -> str:
 
     Returns:
         Platform string: youtube, threads, instagram_reel, instagram_post,
-        substack, mega, book, or web.
+        substack, mega, wikispooks, book, or web.
     """
     for pattern, platform in PLATFORM_PATTERNS:
         if re.search(pattern, url, re.IGNORECASE):
@@ -263,7 +265,7 @@ def preflight_health(platform: str) -> tuple[bool, str]:
         return _check_instagram()
     elif platform == "threads":
         return _check_threads()
-    elif platform in ("substack", "web"):
+    elif platform in ("substack", "web", "wikispooks"):
         return _check_firecrawl()
     elif platform == "mega":
         return _check_mega()
