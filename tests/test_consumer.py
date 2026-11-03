@@ -37,7 +37,7 @@ from agent.consumer import (
 def config():
     """Create a Config with temp paths for testing."""
     return Config(
-        kb_agent_dir=Path("/root/kb-agent"),
+        kb_agent_dir=Path(__file__).resolve().parents[1],
         vault_path=Path("/tmp/test-vault"),
         temp_dir=Path("/tmp"),
         cookie_dir=Path("/tmp/test-cookies"),

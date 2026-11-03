@@ -24,7 +24,7 @@ from agent.pipelines.web import (
 @pytest.fixture
 def config(tmp_path):
     return Config(
-        kb_agent_dir=Path("/root/kb-agent"),
+        kb_agent_dir=Path(__file__).resolve().parents[1],
         vault_path=tmp_path / "vault",
         temp_dir=tmp_path / "tmp",
         cookie_dir=tmp_path / "cookies",
