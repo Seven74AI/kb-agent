@@ -85,6 +85,7 @@ class Consumer:
         from agent.pipelines import instagram  # noqa: F401
         from agent.pipelines import books  # noqa: F401
         from agent.pipelines import bunny_stream  # noqa: F401
+        from agent.pipelines import wikispooks  # noqa: F401
         from agent.pipelines import PIPELINES
 
         for steps in PIPELINES.values():
