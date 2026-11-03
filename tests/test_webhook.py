@@ -10,7 +10,7 @@ import pytest
 
 # Add kb-agent to path
 import sys
-sys.path.insert(0, "/root/kb-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.webhook import app, _format_elapsed, _compute_staleness, slugify
 from agent.db import (
@@ -210,6 +210,9 @@ def test_post_submit_web_url(client, monkeypatch, tmp_path):
     monkeypatch.setattr("agent.webhook.config.vault_path", tmp_path / "vault")
     # Ensure vault path doesn't exist (no dedup match)
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
+
+    # Mock preflight_health — Firecrawl not reachable in the test env
+    monkeypatch.setattr("agent.webhook.preflight_health", lambda p: (True, ""))
 
     resp = client.post("/submit", data={"url": "https://example.com/article"})
     assert resp.status_code == 201

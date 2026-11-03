@@ -7,15 +7,18 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+# Repo root, derived from this file's location — works in CI and any clone.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 @dataclass
 class Config:
     """KB Agent configuration, loaded from config.yaml with .env overrides."""
 
     # ── Paths ──
-    kb_agent_dir: Path = Path("/root/kb-agent")
-    vault_path: Path = Path("/root/kb-agent-vault")
-    cookie_dir: Path = Path("/root/kb-agent/cookies")
+    kb_agent_dir: Path = REPO_ROOT
+    vault_path: Path = REPO_ROOT.parent / "kb-agent-vault"
+    cookie_dir: Path = REPO_ROOT / "cookies"
     temp_dir: Path = Path("/tmp")
 
     # ── Concurrency ──
@@ -86,17 +89,25 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         Config dataclass with all values resolved.
     """
     if config_path is None:
-        config_path = Path("/root/kb-agent/config.yaml")
+        config_path = REPO_ROOT / "config.yaml"
     if env_path is None:
-        env_path = Path("/root/kb-agent/.env")
+        env_path = REPO_ROOT / ".env"
 
     # Load .env if it exists
-    if env_path.exists():
+    try:
+        env_exists = env_path.exists()
+    except (PermissionError, OSError):
+        env_exists = False
+    if env_exists:
         load_dotenv(env_path)
 
     # Load YAML config
     raw: dict = {}
-    if config_path.exists():
+    try:
+        config_exists = config_path.exists()
+    except (PermissionError, OSError):
+        config_exists = False
+    if config_exists:
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
 
@@ -105,9 +116,9 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
 
     return Config(
         # Paths
-        kb_agent_dir=Path(raw.get("kb_agent_dir", "/root/kb-agent")),
-        vault_path=Path(raw.get("vault_path", "/root/kb-agent-vault")),
-        cookie_dir=Path(raw.get("cookie_dir", "/root/kb-agent/cookies")),
+        kb_agent_dir=Path(raw.get("kb_agent_dir", str(REPO_ROOT))),
+        vault_path=Path(raw.get("vault_path", str(REPO_ROOT.parent / "kb-agent-vault"))),
+        cookie_dir=Path(raw.get("cookie_dir", str(REPO_ROOT / "cookies"))),
         temp_dir=Path(raw.get("temp_dir", "/tmp")),
         # Concurrency
         video_semaphore=int(_env_or_default(raw.get("video_semaphore"), "KB_VIDEO_SEMAPHORE", 1)),
