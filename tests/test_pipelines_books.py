@@ -696,6 +696,28 @@ class TestPipelineRegistration:
         # Web pipeline has firecrawl_extract — book pipeline should not
         assert "firecrawl_extract" not in step_names
 
+    def test_mega_video_pipeline_registered(self):
+        """get_pipeline('mega_video') returns the video pipeline, not web fallback."""
+        from agent.pipelines import get_pipeline
+
+        pipeline = get_pipeline("mega_video")
+        web_pipeline = get_pipeline("web")
+        assert pipeline is not None
+        assert pipeline is not web_pipeline
+
+        step_names = [s.name for s in pipeline]
+        assert "firecrawl_extract" not in step_names
+        assert "download_video" in step_names
+        assert "extract_audio" in step_names
+        assert "diarize" in step_names
+        assert "transcribe" in step_names
+        assert "merge_and_identify" in step_names
+        assert "synthesize_youtube" in step_names
+        assert "quality_gate" in step_names
+        assert "minio_upload" in step_names
+        assert "see_also" in step_names
+        assert "git_push" in step_names
+
 
 # ── Book Constants Tests ──────────────────────────────────────────────────────
 

@@ -1135,3 +1135,6 @@ register_pipeline("book_batch", [
     # function once sub-task dispatch is implemented.
     Step(name="delegate", fn=step_classify_content, on_error="fail"),
 ])
+
+# Registers mega_video pipeline (Mega-hosted video files)
+import agent.pipelines.mega_video  # noqa: F401, E402
