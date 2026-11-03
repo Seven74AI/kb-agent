@@ -31,6 +31,7 @@ CONTENT_TYPE_FOLDERS: dict[str, str] = {
     "threads_video": "threads",
     "instagram_reel": "instagram",
     "instagram_post": "instagram",
+    "bunny_stream": "",
 }
 
 
@@ -85,7 +86,8 @@ def step_see_also(task: dict, config: Config) -> str:
 
     # Skip if See Also already has substantive links (3+ wikilinks)
     existing_links = re.findall(r'\[\[([^\]]+)\]\]', note_content)
-    if len(existing_links) >= 3 and "## See Also" in note_content:
+    see_also_header = "## Voir aussi" if content_type == "bunny_stream" else "## See Also"
+    if len(existing_links) >= 3 and see_also_header in note_content:
         return f"See Also already populated with {len(existing_links)} links for {slug}"
 
     # Extract keywords from the note for searching
@@ -105,18 +107,29 @@ def step_see_also(task: dict, config: Config) -> str:
         for p in candidate_paths[:10]
     )
 
-    see_also_prompt = (
-        "You are a knowledge base linker. Given a note and a list of candidate "
-        "related notes, select the 3-5 most relevant ones. A relevant note:\n"
-        "1. Covers overlapping topics or themes\n"
-        "2. Provides context that enriches the current note\n"
-        "3. Is NOT about a completely different subject\n\n"
-        "RESPOND with ONLY a ## See Also section with wikilinks, like:\n"
-        "## See Also\n"
-        "- [[note-slug-1]] — why it's related\n"
-        "- [[note-slug-2]] — why it's related\n\n"
-        "If none are truly related, respond with ## See Also\n_No related notes found._"
-    )
+    if content_type == "bunny_stream":
+        see_also_prompt = (
+            "Tu es un assistant de liaison pour une base de connaissances en français. "
+            "À partir de la note courante et d'une liste de notes candidates, "
+            "sélectionne les 3 à 5 plus pertinentes.\n\n"
+            "RÉPONDS avec UNIQUEMENT une section ## Voir aussi avec des wikilinks :\n"
+            "## Voir aussi\n"
+            "- [[slug-note]] — pourquoi c'est pertinent\n\n"
+            "Si aucune note n'est pertinente : ## Voir aussi\n_Aucune note connexe._"
+        )
+    else:
+        see_also_prompt = (
+            "You are a knowledge base linker. Given a note and a list of candidate "
+            "related notes, select the 3-5 most relevant ones. A relevant note:\n"
+            "1. Covers overlapping topics or themes\n"
+            "2. Provides context that enriches the current note\n"
+            "3. Is NOT about a completely different subject\n\n"
+            "RESPOND with ONLY a ## See Also section with wikilinks, like:\n"
+            "## See Also\n"
+            "- [[note-slug-1]] — why it's related\n"
+            "- [[note-slug-2]] — why it's related\n\n"
+            "If none are truly related, respond with ## See Also\n_No related notes found._"
+        )
 
     response = llm.call(
         system_prompt=see_also_prompt,
@@ -128,11 +141,16 @@ def step_see_also(task: dict, config: Config) -> str:
 
     # Replace or append the See Also section
     see_also_content = response.content.strip()
-    if "## See Also" not in see_also_content:
-        see_also_content = f"## See Also\n{see_also_content}"
+    if see_also_header not in see_also_content:
+        see_also_content = f"{see_also_header}\n{see_also_content}"
 
+    pattern = (
+        r'## Voir aussi.*?(?=\n## |\Z)'
+        if content_type == "bunny_stream"
+        else r'## See Also.*?(?=\n## |\Z)'
+    )
     updated = re.sub(
-        r'## See Also.*?(?=\n## |\Z)',
+        pattern,
         see_also_content,
         note_content,
         flags=re.DOTALL,
