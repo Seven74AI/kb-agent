@@ -23,6 +23,9 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
     (r"substack\.com/", "substack"),
     # Mega
     (r"mega\.nz/", "mega"),
+    # Bunny Stream (TDAH summit / terragrandir, mediadelivery.net)
+    (r"player\.mediadelivery\.net/", "bunny_stream"),
+    (r"terragrandir\.com/", "bunny_stream"),
     # Books (direct upload by file extension)
     (r"\.(epub|pdf|mobi|azw3)$", "book"),
 ]
