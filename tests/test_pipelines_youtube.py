@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, "/root/kb-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
 from agent.exceptions import StepError
@@ -53,7 +53,7 @@ def config(tmp_path):
     (vault_path / "Knowledge base" / "videos").mkdir(parents=True, exist_ok=True)
     
     return Config(
-        kb_agent_dir=Path("/root/kb-agent"),
+        kb_agent_dir=Path(__file__).resolve().parents[1],
         vault_path=vault_path,
         temp_dir=temp_dir,
         cookie_dir=tmp_path / "cookies",

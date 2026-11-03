@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Add kb-agent to path
-sys.path.insert(0, "/root/kb-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
 from agent.exceptions import StepError
@@ -34,7 +34,7 @@ from agent.pipelines.see_also import step_see_also, _extract_keywords
 def config(tmp_path):
     """Create a Config with temp paths for testing."""
     return Config(
-        kb_agent_dir=Path("/root/kb-agent"),
+        kb_agent_dir=Path(__file__).resolve().parents[1],
         vault_path=tmp_path / "vault",
         temp_dir=tmp_path / "tmp",
         cookie_dir=tmp_path / "cookies",
