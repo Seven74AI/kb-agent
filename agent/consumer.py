@@ -96,6 +96,19 @@ class Consumer:
         await self._recover_orphans()
 
         self._running = True
+        self._watch_task: asyncio.Task | None = None
+        if self.agent_conn is not None:
+            from agent.core.watch_source import default_fetch_html, run_watch_scheduler
+
+            self._watch_task = asyncio.create_task(
+                run_watch_scheduler(
+                    self.config,
+                    self.agent_conn,
+                    fetch_html=default_fetch_html,
+                    stopping=lambda: self._stopping,
+                ),
+                name="watch-source-scheduler",
+            )
 
     async def _recover_orphans(self):
         """Find in_progress tasks from a previous crash and resume them.
@@ -192,6 +205,14 @@ class Consumer:
         """
         self._stopping = True
         self._running = False
+
+        watch_task = getattr(self, "_watch_task", None)
+        if watch_task is not None and not watch_task.done():
+            watch_task.cancel()
+            try:
+                await watch_task
+            except asyncio.CancelledError:
+                pass
 
         if self._tasks:
             print(
