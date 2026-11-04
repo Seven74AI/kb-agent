@@ -28,6 +28,7 @@ def submit_hermes_kanban(
         "Write the note to the vault with correct source_url frontmatter. "
         "After the worker finishes, snapshot the note for comparison with kb-agent."
     )
+    title = f"KB A/B: {url}"
     cmd = [
         "hermes",
         "kanban",
@@ -42,6 +43,7 @@ def submit_hermes_kanban(
         str(max_runtime_seconds),
         "--body",
         body,
+        title,
     ]
     try:
         result = subprocess.run(
