@@ -4,6 +4,14 @@ No Flask or MCP imports in this package.
 """
 
 from agent.core.detect import detect_type
+from agent.core.diff import (
+    ContentChangeResult,
+    ContentChangeStatus,
+    check_content_change,
+    content_fingerprint,
+    normalize_etag,
+    normalize_source_content,
+)
 from agent.core.note import get_note
 from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
 from agent.core.resume import normalize_reason_pattern, resume_tasks, retry_task
@@ -15,14 +23,20 @@ from agent.core.submit import plan_submission, submit_plan, submit_url
 
 __all__ = [
     "PIPELINE_STEPS",
+    "ContentChangeResult",
+    "ContentChangeStatus",
+    "check_content_change",
     "compute_staleness",
+    "content_fingerprint",
     "detect_type",
     "format_elapsed",
     "get_note",
     "get_task",
     "list_tasks",
     "lookup_all_sources",
+    "normalize_etag",
     "normalize_reason_pattern",
+    "normalize_source_content",
     "plan_submission",
     "register_source",
     "resume_tasks",

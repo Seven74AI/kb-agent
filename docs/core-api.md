@@ -18,6 +18,7 @@ Pure domain layer for kb-agent (`core/` package). Adapters:
 | `core/notes.py` | `search_notes`, `get_note` | Vault grep search + note load |
 | `core/pipelines.py` | (internal) | Content-type → ordered pipeline step names |
 | `core/sources.py` | `watch_source` (foundation) | Register/lookup watched sources; persist last-seen + content hash |
+| `core/diff.py` | `watch_source` (foundation) | Pure content/ETag diff vs persisted hash (no state mutation) |
 | `core/util.py` | (internal) | `slugify` |
 | `core/types.py` | — | Dataclasses / enums returned to adapters |
 
@@ -92,6 +93,14 @@ All registered sources ordered by creation, each with `source_id`, `url`, `caden
 
 Persist the last-seen timestamp and content hash for a source; returns the updated row or `None` for an unknown id.
 
+### `check_content_change(*, last_content_hash, last_seen=None, content=None, etag=None) -> ContentChangeResult`
+
+Pure diff helper for watched sources. Computes a stable `sha256:` fingerprint from
+`normalize_source_content` when `content` is provided, or compares normalized HTTP
+ETags when only `etag` is available. Returns `NEW` when there is no prior hash or the
+fingerprint/etag differs; returns `UNCHANGED` on a match. Does not write SQLite state
+— callers persist via `update_source_state`.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -102,6 +111,7 @@ Persist the last-seen timestamp and content hash for a source; returns the updat
 | `preflight_health` | no | cookie files, curl, `which megadl` |
 | `dedup_check` | no | grep vault |
 | `slugify` | yes | — |
+| `check_content_change` / `content_fingerprint` | yes | — |
 | `resolve_pipeline_steps` | yes | — |
 | `submit_url` | orchestration | via `SubmitDependencies` |
 | `list_tasks` / `get_task` | no | SQLite |
