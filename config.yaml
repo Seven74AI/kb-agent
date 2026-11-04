@@ -10,6 +10,9 @@ temp_dir: /tmp
 video_semaphore: 1      # Only one video pipeline at a time (pyannote RAM)
 text_parallel: 3        # Parallel text pipelines
 
+# Watch sources
+watch_scheduler_enabled: true   # false = cron (scripts/watch_sources_poll.py) polls instead
+
 # Retry (exponential backoff)
 retry_delays: [5, 15, 60, 180]
 max_retries: 5

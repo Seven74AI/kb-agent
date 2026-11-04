@@ -214,20 +214,31 @@ def poll_watch_source(
             newly_seen.add(item)
 
     merged = merge_last_seen_after_poll(last_seen, frozenset(newly_seen))
+    failed = any(s.get("status") == "error" for s in submissions)
     polled_at = now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with conn:
-        conn.execute(
-            """UPDATE watch_sources
-               SET last_seen_json = ?, last_polled_at = ?
-               WHERE page_url = ?""",
-            (serialize_last_seen(merged), polled_at, page_url),
-        )
+        if failed:
+            # Hold last_polled_at so the next scheduler tick (60s) retries the
+            # failed items instead of waiting a full cadence. Successfully
+            # handled items are still marked seen so they aren't re-submitted.
+            conn.execute(
+                "UPDATE watch_sources SET last_seen_json = ? WHERE page_url = ?",
+                (serialize_last_seen(merged), page_url),
+            )
+        else:
+            conn.execute(
+                """UPDATE watch_sources
+                   SET last_seen_json = ?, last_polled_at = ?
+                   WHERE page_url = ?""",
+                (serialize_last_seen(merged), polled_at, page_url),
+            )
 
     return {
         "page_url": page_url,
         "new_items": new_items,
         "submissions": submissions,
         "last_seen_count": len(merged),
+        "retry_pending": failed,
     }
 
 

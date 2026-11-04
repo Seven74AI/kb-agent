@@ -3,6 +3,13 @@
 
 Example:
   python3 scripts/watch_sources_poll.py
+
+When cron drives polling, disable the consumer's in-process scheduler to avoid
+two pollers enqueuing duplicate tasks — set in config.yaml:
+
+  watch_scheduler_enabled: false
+
+(or export KB_WATCH_SCHEDULER_ENABLED=false for the consumer process).
 """
 from __future__ import annotations
 
@@ -34,7 +41,15 @@ def main() -> int:
             print(f"{r['page_url']}: ERROR {r['error']}", file=sys.stderr)
             continue
         new = r.get("new_items") or []
-        print(f"{r['page_url']}: submitted {len(new)} new item(s): {', '.join(new)}")
+        failed = [s for s in r.get("submissions", []) if s.get("status") == "error"]
+        if failed:
+            print(
+                f"{r['page_url']}: {len(new) - len(failed)}/{len(new)} submitted; "
+                f"{len(failed)} failed (retry next run)",
+                file=sys.stderr,
+            )
+        else:
+            print(f"{r['page_url']}: submitted {len(new)} new item(s): {', '.join(new)}")
     return 0
 
 

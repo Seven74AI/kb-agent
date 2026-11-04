@@ -573,3 +573,53 @@ def test_step_error_details():
         details="MinIO returned 503 Service Unavailable",
     )
     assert err.details == "MinIO returned 503 Service Unavailable"
+
+
+# ── Watch scheduler gating ────────────────────────────────────────────────────
+
+
+def test_watch_scheduler_enabled_default():
+    assert Config().watch_scheduler_enabled is True
+
+
+def test_watch_scheduler_enabled_env_override(monkeypatch, tmp_path):
+    from agent.config import load_config
+
+    monkeypatch.setenv("KB_WATCH_SCHEDULER_ENABLED", "false")
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("kb_agent_dir: /tmp\n")
+    cfg = load_config(config_path=cfg_path, env_path=tmp_path / ".env")
+    assert cfg.watch_scheduler_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_start_watch_scheduler_disabled_by_config(config, agent_db):
+    config.watch_scheduler_enabled = False
+    c = Consumer(config)
+    c.agent_conn = agent_db
+    c._stopping = False
+    assert c._start_watch_scheduler() is None
+
+
+@pytest.mark.asyncio
+async def test_start_watch_scheduler_enabled(config, agent_db, monkeypatch):
+    config.watch_scheduler_enabled = True
+
+    async def _fake_scheduler(*args, **kwargs):
+        return
+
+    monkeypatch.setattr("agent.core.watch_source.run_watch_scheduler", _fake_scheduler)
+
+    c = Consumer(config)
+    c.agent_conn = agent_db
+    c._stopping = False
+    task = c._start_watch_scheduler()
+    assert task is not None
+    await task  # fake scheduler returns immediately
+
+
+@pytest.mark.asyncio
+async def test_start_watch_scheduler_no_conn(config):
+    c = Consumer(config)
+    c.agent_conn = None
+    assert c._start_watch_scheduler() is None

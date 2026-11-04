@@ -96,18 +96,34 @@ class Consumer:
         await self._recover_orphans()
 
         self._running = True
-        self._watch_task: asyncio.Task | None = None
-        if self.agent_conn is not None:
-            from agent.core.watch_source import default_fetch_html, run_watch_scheduler
+        self._watch_task: asyncio.Task | None = self._start_watch_scheduler()
 
-            self._watch_task = asyncio.create_task(
-                run_watch_scheduler(
-                    self.config,
-                    fetch_html=default_fetch_html,
-                    stopping=lambda: self._stopping,
-                ),
-                name="watch-source-scheduler",
+    def _start_watch_scheduler(self) -> asyncio.Task | None:
+        """Start the in-process watch scheduler, unless disabled by config.
+
+        Returns the created task, or ``None`` when the scheduler is disabled
+        (e.g. cron drives polling via ``scripts/watch_sources_poll.py``, so the
+        consumer must not poll too — otherwise both would enqueue duplicate
+        tasks for the same URL).
+        """
+        if self.agent_conn is None:
+            return None
+        if not self.config.watch_scheduler_enabled:
+            print(
+                "[consumer] watch scheduler disabled (watch_scheduler_enabled=false); "
+                "cron polling via scripts/watch_sources_poll.py is assumed"
             )
+            return None
+        from agent.core.watch_source import default_fetch_html, run_watch_scheduler
+
+        return asyncio.create_task(
+            run_watch_scheduler(
+                self.config,
+                fetch_html=default_fetch_html,
+                stopping=lambda: self._stopping,
+            ),
+            name="watch-source-scheduler",
+        )
 
     async def _recover_orphans(self):
         """Find in_progress tasks from a previous crash and resume them.

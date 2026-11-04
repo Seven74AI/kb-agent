@@ -26,6 +26,9 @@ Bulk tools (`ingest_playlist`, `bulk_import`) will compose `submit_url` in later
 **`watch_source`** (`agent/core/watch_source.py`): register a listing page (URL + regex +
 `{item}` URL template + cadence), poll on a scheduler loop, diff against `last_seen_json`,
 and call `submit_url` for new items. Cron one-shot: `scripts/watch_sources_poll.py`.
+The consumer runs the in-process scheduler by default; set `watch_scheduler_enabled: false`
+(config.yaml / `KB_WATCH_SCHEDULER_ENABLED=false`) when cron drives polling instead, so the
+two pollers don't enqueue duplicate tasks.
 
 ## Functions
 

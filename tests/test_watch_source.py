@@ -381,6 +381,73 @@ def test_poll_watch_source_failed_submit_not_marked_seen(core_config, agent_conn
     assert result2["new_items"] == ["j3-panel"]
 
 
+def test_poll_watch_source_failed_submit_holds_last_polled(core_config, agent_conn, monkeypatch):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    old = "2026-06-01 00:00:00"
+    agent_conn.execute(
+        "UPDATE watch_sources SET last_polled_at = ? WHERE page_url = ?",
+        (old, TDAH_PAGE),
+    )
+    agent_conn.commit()
+
+    def failing_submit(url, config, conn):
+        return {"status": "error", "http_status": 500, "error": "boom"}
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=failing_submit,
+        now=now,
+    )
+    # Failed submission → last_polled_at held so the next tick retries fast.
+    assert result["retry_pending"] is True
+    row = agent_conn.execute(
+        "SELECT last_polled_at FROM watch_sources WHERE page_url = ?",
+        (TDAH_PAGE,),
+    ).fetchone()
+    assert row["last_polled_at"] == old
+
+
+def test_poll_watch_source_success_advances_last_polled(core_config, agent_conn, monkeypatch):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    def ok_submit(url, config, conn):
+        return {"status": "pending", "http_status": 201, "task_id": "t1", "platform": "web"}
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=ok_submit,
+        now=now,
+    )
+    assert result["retry_pending"] is False
+    row = agent_conn.execute(
+        "SELECT last_polled_at FROM watch_sources WHERE page_url = ?",
+        (TDAH_PAGE,),
+    ).fetchone()
+    assert row["last_polled_at"] == now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def test_poll_watch_source_submit_exception_isolated(core_config, agent_conn, monkeypatch):
     register_watch_source(
         agent_conn,
