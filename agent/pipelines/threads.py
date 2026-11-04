@@ -268,7 +268,7 @@ def _is_login_wall(html: str) -> bool:
 
 def _slug_path(slug: str) -> str:
     """Convert slug to a filesystem-safe path segment."""
-    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)[:80]
+    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)
 
 
 # ── Step 1: Detection ─────────────────────────────────────────────────────────

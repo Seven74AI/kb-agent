@@ -2,6 +2,11 @@
 
 import re
 
+# Single length cap for every slug-derived path segment (note filename, MinIO
+# object key, temp files). 128 chars: well under ext4's 255-byte component
+# limit, round power-of-two, enough headroom that long paths don't collide.
+SLUG_MAX_LEN = 128
+
 
 def slugify(url: str) -> str:
     """Derive a filesystem-safe slug from a URL.
@@ -15,4 +20,4 @@ def slugify(url: str) -> str:
     video_id = f"_v_{m.group(1)}" if m else ""
     slug = re.sub(r"[?#].*", "", slug)
     slug = re.sub(r"[^a-zA-Z0-9._-]", "_", slug)
-    return (slug + video_id)[:100]
+    return (slug + video_id)[:SLUG_MAX_LEN]

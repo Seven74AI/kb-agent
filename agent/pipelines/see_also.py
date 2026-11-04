@@ -46,7 +46,7 @@ def _slug_path(slug: str) -> str:
     Used by threads.py and instagram.py to sanitize slugs that may contain
     special characters from URLs.
     """
-    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)[:80]
+    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)
 
 
 # ── Main step ─────────────────────────────────────────────────────────────────
