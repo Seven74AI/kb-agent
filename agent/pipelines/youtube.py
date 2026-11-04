@@ -32,8 +32,8 @@ from agent.transcription import install_modal_outputs, is_modal_backend, transcr
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Fallback yt-dlp config path (system-wide preferred)
-YT_COOKIES_FILE = "/root/.hermes/cookies/yt_cookies.txt"
+# yt-dlp cookie file — config.cookie_dir (uploaded via the kba.sevend.io dashboard)
+YT_COOKIES_FILE = "/root/kb-agent/cookies/yt_cookies.txt"
 
 # yt-dlp rate limiting (per video-pipeline-global.md)
 YTDL_RATE_FLAGS = [
@@ -69,7 +69,7 @@ def _validate_cookies() -> None:
             f"YouTube cookies not found: {YT_COOKIES_FILE}",
             error_type=ErrorType.PAUSE,
             step_name="cookie_check",
-            details="Export cookies from Chrome Profile 5 to /root/.hermes/cookies/yt_cookies.txt",
+            details="Upload fresh cookies via the kba.sevend.io dashboard (saves to /root/kb-agent/cookies/yt_cookies.txt)",
         )
 
     cookies_text = cookie_path.read_text()

@@ -64,7 +64,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
     """
     if platform == "threads":
         try:
-            cookie_path = Path("/root/.hermes/cookies/threads_cookies.txt")
+            cookie_path = Path("/root/kb-agent/cookies/threads_cookies.txt")
             cmd = [
                 "curl", "-s", "--max-time", "15",
                 "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
@@ -147,7 +147,7 @@ def _detect_threads_subtype(url: str) -> str:
     regardless of outer media type.
     """
     try:
-        cookie_path = Path("/root/.hermes/cookies/threads_cookies.txt")
+        cookie_path = Path("/root/kb-agent/cookies/threads_cookies.txt")
         cmd = [
             "curl", "-s", "--max-time", "15",
             "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
