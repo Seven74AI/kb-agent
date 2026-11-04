@@ -8,11 +8,13 @@ import pytest
 
 from agent.config import Config
 from agent.core import (
+    bulk_import,
     compute_staleness,
     detect_type,
     format_elapsed,
     get_note,
     get_task,
+    ingest_playlist,
     list_tasks,
     normalize_reason_pattern,
     resume_tasks,
@@ -82,6 +84,35 @@ def test_submit_url_dedup_skips(core_config, agent_conn, monkeypatch):
     result = submit_url("https://example.com/dup", core_config, agent_conn)
     assert result["status"] == "skipped"
     assert result["http_status"] == 200
+
+
+def test_bulk_import_submits_each_url(core_config, agent_conn, monkeypatch):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    seen: list[str] = []
+
+    def track(url, config, conn):
+        seen.append(url)
+        return submit_url(url, config, conn)
+
+    result = bulk_import(
+        ["https://example.com/a", "https://example.com/b"],
+        core_config,
+        agent_conn,
+        submit_fn=track,
+    )
+    assert result["count"] == 2
+    assert len(seen) == 2
+
+
+def test_ingest_playlist_expands(monkeypatch, core_config, agent_conn):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    monkeypatch.setattr(
+        "agent.core.bulk.expand_youtube_playlist",
+        lambda _url: ["https://youtube.com/watch?v=1", "https://youtube.com/watch?v=2"],
+    )
+    result = ingest_playlist("https://youtube.com/playlist?list=PLx", core_config, agent_conn)
+    assert result["status"] == "ok"
+    assert result["count"] == 2
 
 
 def test_submit_url_health_pause(core_config, agent_conn, monkeypatch):

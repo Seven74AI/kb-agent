@@ -3,6 +3,7 @@
 No Flask or MCP imports in this package.
 """
 
+from agent.core.bulk import bulk_import, expand_youtube_playlist, ingest_playlist
 from agent.core.detect import detect_type
 from agent.core.note import get_note
 from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
@@ -53,4 +54,7 @@ __all__ = [
     "submit_plan",
     "submit_url",
     "update_source_state",
+    "bulk_import",
+    "expand_youtube_playlist",
+    "ingest_playlist",
 ]
