@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from agent.config import REPO_ROOT, load_config
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
 
@@ -56,6 +57,28 @@ def detect_platform(url: str) -> str:
 
 # ── Content Subtype Detection ────────────────────────────────────────────────
 
+def _resolve_threads_cookie_path() -> Path:
+    """Return path to threads_cookies.txt (config.cookie_dir, then legacy locations)."""
+    candidates: list[Path] = []
+    try:
+        candidates.append(load_config().cookie_dir / "threads_cookies.txt")
+    except Exception:
+        pass
+    candidates.extend([
+        REPO_ROOT / "cookies" / "threads_cookies.txt",
+        Path("/root/kb-agent/cookies/threads_cookies.txt"),
+        Path("/root/.hermes/cookies/threads_cookies.txt"),
+    ])
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def _fetch_content(url: str, platform: str) -> str | None:
     """Fetch the raw content signal Jev needs for subtype resolution.
 
@@ -64,7 +87,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
     """
     if platform == "threads":
         try:
-            cookie_path = Path("/root/kb-agent/cookies/threads_cookies.txt")
+            cookie_path = _resolve_threads_cookie_path()
             cmd = [
                 "curl", "-s", "--max-time", "15",
                 "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
@@ -147,7 +170,7 @@ def _detect_threads_subtype(url: str) -> str:
     regardless of outer media type.
     """
     try:
-        cookie_path = Path("/root/kb-agent/cookies/threads_cookies.txt")
+        cookie_path = _resolve_threads_cookie_path()
         cmd = [
             "curl", "-s", "--max-time", "15",
             "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
@@ -426,7 +449,7 @@ def dedup_check(url: str, vault_path: Path) -> bool:
     """
     try:
         result = subprocess.run(
-            ["grep", "-rl", f"source_url: {url}", str(vault_path / "Knowledge base")],
+            ["grep", "-F", "-rl", f"source_url: {url}", str(vault_path / "Knowledge base")],
             capture_output=True, text=True, timeout=30,
         )
         return bool(result.stdout.strip())
