@@ -113,6 +113,9 @@ def main():
         cmd += ["--initial-prompt", prompt]
     r = sh(cmd, cwd=MODAL, timeout=3600)
     print((r.stdout or r.stderr)[-1500:])
+    if r.returncode != 0:
+        print(f"[error] Modal run failed ({r.returncode}); aborting")
+        return r.returncode
 
     made = []
     for n in names:

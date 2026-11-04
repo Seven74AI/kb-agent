@@ -129,6 +129,14 @@ class TestHelpers:
         url = _extract_video_url(html)
         assert url == "https://v.cdn/v.mp4"  # Highest quality
 
+    def test_extract_video_url_nested_brackets_in_url(self):
+        html = (
+            '{"video_versions":[{"url":"https://v.cdn/v.mp4?token=[nested]","height":720},'
+            '{"url":"https://v.cdn/v_hd.mp4","height":1080}]}'
+        )
+        url = _extract_video_url(html)
+        assert url == "https://v.cdn/v_hd.mp4"
+
     def test_extract_video_url_none(self):
         html = '{"caption":{"text":"hello"}}'
         assert _extract_video_url(html) is None
@@ -136,8 +144,16 @@ class TestHelpers:
     def test_extract_all_captions(self):
         html = '{"caption":{"text":"First caption text."}} and {"text":"Second caption text."}'
         captions = _extract_all_captions(html)
-        assert len(captions) >= 1
-        assert any("First caption" in c or "Second caption" in c for c in captions)
+        assert captions == ["First caption text."]
+
+    def test_extract_all_captions_multiple_caption_objects(self):
+        html = (
+            '{"caption":{"text":"First caption."}}'
+            ',"thread_items":[{"post":{"caption":{"text":"Second caption."}}}]'
+        )
+        captions = _extract_all_captions(html)
+        assert "First caption." in captions
+        assert "Second caption." in captions
 
     def test_extract_all_captions_empty(self):
         html = '<html><body>Nothing here</body></html>'
@@ -520,24 +536,54 @@ class TestMinIO:
     """Tests for step_threads_minio_upload."""
 
     @patch("subprocess.run")
-    def test_minio_upload_success(self, mock_run, config, task_dict):
-        # Create note
-        note_path = Path(config.vault_path) / "Knowledge base" / "threads" / f"{task_dict['slug']}.md"
+    def test_minio_upload_text_note_archival(self, mock_run, config, task_dict):
+        slug = task_dict["slug"]
+        note_path = Path(config.vault_path) / "Knowledge base" / "threads" / f"{slug}.md"
         note_path.write_text("""---
 date: 2026-01-01
 source: threads.net
-minio: <filled by archival step>
+raw: <filled by archival step>
 ---
 # Content""")
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         result = step_threads_minio_upload(task_dict, config)
-        assert "http://vmi3304846.tail5c02a1.ts.net:9000/" in result
+        assert result.startswith("http://vmi3304846.tail5c02a1.ts.net:9000/")
 
-        # Verify frontmatter updated
         content = note_path.read_text()
-        assert "minio: http://vmi3304846.tail5c02a1.ts.net:9000/" in content
+        assert f"raw: {result}" in content
         assert "<filled by archival step>" not in content
+
+    @patch("subprocess.run")
+    def test_minio_upload_video_source_archival(self, mock_run, config):
+        video_task = {
+            "id": "test-threads-video-12345",
+            "source_url": "https://www.threads.net/@testuser/post/VID123",
+            "content_type": "threads_video",
+            "slug": "testuser_vid123",
+        }
+        slug = video_task["slug"]
+        note_path = Path(config.vault_path) / "Knowledge base" / "threads" / f"{slug}.md"
+        note_path.write_text("""---
+date: 2026-01-01
+source: threads.net
+source_files:
+  video: <filled by archival step>
+---
+# Content""")
+
+        Path(config.temp_dir / f"{slug}_threads_video.mp4").write_bytes(b"video")
+        Path(config.temp_dir / f"{slug}_merged.json").write_text("{}")
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        result = step_threads_minio_upload(video_task, config)
+        assert result.startswith("Uploaded:")
+        assert f"videos/{slug}.mp4" in result
+        assert f"transcripts/{slug}.json" in result
+
+        content = note_path.read_text()
+        assert "source_files:" in content
+        assert f"videos/{slug}.mp4" in content
 
 
 # ── Step Tests: Git Push ─────────────────────────────────────────────────────

@@ -165,7 +165,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     metadata = {
         "title": parts[0],
         "uploader": parts[1],
-        "duration": float(parts[2]),
+        "duration": float(parts[2]) if parts[2] not in ("NA", "None", "") else 0.0,
         "view_count": int(parts[3]) if parts[3] not in ("NA", "None", "") else 0,
         "upload_date": parts[4],
         "description": "",
@@ -1061,7 +1061,6 @@ OUTPUT FORMAT:
   confidence: plausible
   tags: [tag1, tag2, tag3]
 - Then the note sections as shown in the template.
-- Leave minio: field for later filling.
 - Leave See Also section empty."""
 
     # Truncate transcript if excessively long (keep ~50K chars for context window)
@@ -1260,6 +1259,8 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
     """Update note frontmatter with actual MinIO URLs."""
     note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
     if not note_path.exists():
+        return
+    if not uploaded:
         return
 
     tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"

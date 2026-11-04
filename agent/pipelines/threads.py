@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from agent.archival import append_note_tags
+from agent.archival import MINIO_TAILSCALE_BASE, append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -110,6 +110,39 @@ def _has_video_versions(html: str) -> bool:
     return 'video_versions' in html
 
 
+def _extract_json_array_after_key(html: str, key: str) -> str | None:
+    """Return a balanced JSON array literal that follows ``"key":`` in *html*."""
+    marker = f'"{key}"'
+    pos = html.find(marker)
+    if pos < 0:
+        return None
+    pos = html.find("[", pos + len(marker))
+    if pos < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    i = pos
+    while i < len(html):
+        ch = html[i]
+        if escape:
+            escape = False
+        elif ch == "\\" and in_string:
+            escape = True
+        elif ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return html[pos : i + 1]
+        i += 1
+    return None
+
+
 def _extract_video_url(html: str) -> str | None:
     """Extract the highest quality video URL from video_versions JSON.
 
@@ -122,13 +155,12 @@ def _extract_video_url(html: str) -> str | None:
     Returns:
         Video URL string or None if not found.
     """
-    # Look for video_versions in the JSON
-    match = re.search(r'"video_versions"\s*:\s*(\[.*?\])', html, re.DOTALL)
-    if not match:
+    array_text = _extract_json_array_after_key(html, "video_versions")
+    if not array_text:
         return None
 
     try:
-        versions = json.loads(match.group(1))
+        versions = json.loads(array_text)
         if not versions or not isinstance(versions, list):
             return None
 
@@ -154,19 +186,16 @@ def _extract_all_captions(html: str) -> list[str]:
     Returns:
         List of caption text strings (may be empty).
     """
-    # Find all text fields inside caption objects
-    # Pattern: "caption": { ... "text": "actual text" ... }
     captions = []
-    # Match text fields — look for patterns like "text":"content" within JSON
-    pattern = r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"'
-    for match in re.finditer(pattern, html):
-        # Unescape JSON string
+    # Caption objects on Threads payloads: "caption": { ... "text": "..." ... }
+    caption_block = r'"caption"\s*:\s*\{[^{}]*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"'
+    for match in re.finditer(caption_block, html):
         try:
-            text = json.loads(f'"{(match.group(1))}"')
-            if text and text.strip() and text not in captions:
-                captions.append(text.strip())
+            text = json.loads(f'"{match.group(1)}"')
         except (json.JSONDecodeError, ValueError):
-            pass
+            continue
+        if text and text.strip() and text.strip() not in captions:
+            captions.append(text.strip())
 
     return captions
 
@@ -775,8 +804,6 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     # Build prompt
     source_domain = urlparse(source_url).netloc or "threads.net"
     date_str = datetime.now().strftime("%Y-%m-%d")
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
-
     # Pre-compute reply context line
     if parent_context:
         reply_line = f"- REPLY CONTEXT: {parent_context[:500]}"
@@ -824,8 +851,8 @@ OUTPUT FORMAT:
   source: threads.net (@{author})
   source_url: {source_url}
   source_files:
-    video: {tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
-    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
+    video: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/videos/{safe_slug}.mp4
+    transcript: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/transcripts/{safe_slug}.json
   confidence: plausible
   tags: [threads, video]
 - Then the note sections as shown above.
@@ -1161,8 +1188,8 @@ register_pipeline("threads_video", [
     Step(name="threads_merge", fn=step_threads_merge, on_error="retry"),
     Step(name="threads_video_synthesize", fn=step_threads_video_synthesize, on_error="retry"),
     Step(name="threads_quality_gate", fn=step_threads_quality_gate, on_error="retry"),
-    Step(name="threads_cleanup", fn=step_threads_cleanup, on_error="fail"),
     Step(name="threads_minio_upload", fn=step_threads_minio_upload, on_error="retry"),
+    Step(name="threads_cleanup", fn=step_threads_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="threads_git_push", fn=step_threads_git_push, on_error="retry"),
 ])
