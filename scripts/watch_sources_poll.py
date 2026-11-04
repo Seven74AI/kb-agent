@@ -30,6 +30,9 @@ def main() -> int:
         return 0
 
     for r in results:
+        if "error" in r:
+            print(f"{r['page_url']}: ERROR {r['error']}", file=sys.stderr)
+            continue
         new = r.get("new_items") or []
         print(f"{r['page_url']}: submitted {len(new)} new item(s): {', '.join(new)}")
     return 0

@@ -18,8 +18,17 @@ FetchHtml = Callable[[str], str]
 
 
 def extract_items(html: str, item_pattern: str) -> frozenset[str]:
-    """Return unique capture-group values from *html* matching *item_pattern*."""
-    return frozenset(re.findall(item_pattern, html))
+    """Return unique captured values from *html* matching *item_pattern*.
+
+    Uses the first capture group when the pattern has one (the common ``{item}``
+    case), else the full match. ``re.findall`` would return tuples for patterns
+    with multiple capture groups, which breaks ``serialize_last_seen``
+    (``json.dumps`` rejects tuples) and ``items_to_urls``.
+    """
+    return frozenset(
+        m.group(1) if m.lastindex else m.group(0)
+        for m in re.finditer(item_pattern, html)
+    )
 
 
 def diff_items(current: frozenset[str], last_seen: frozenset[str]) -> list[str]:
@@ -104,6 +113,11 @@ def register_watch_source(
         re.compile(item_pattern)
     except re.error as exc:
         raise ValueError(f"item_pattern is not a valid regex: {exc}") from exc
+    if baseline and fetch_html is None:
+        raise ValueError(
+            "baseline=True requires fetch_html to seed last_seen_json "
+            "(pass a fetcher, or baseline=False)"
+        )
 
     existing = conn.execute(
         "SELECT id FROM watch_sources WHERE page_url = ?",

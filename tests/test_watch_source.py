@@ -66,6 +66,18 @@ def test_extract_items_from_html():
     assert items == frozenset({"j1-intro", "j2-keynote"})
 
 
+def test_extract_items_multi_group_uses_first_capture():
+    pattern = r"/tdah-adulte-(j\d+)-([a-z-]+)/"
+    items = extract_items(SAMPLE_HTML, pattern)
+    assert items == frozenset({"j1", "j2"})
+
+
+def test_extract_items_no_group_uses_full_match():
+    pattern = r"tdah-adulte-j\d+-[a-z0-9-]+"
+    items = extract_items(SAMPLE_HTML, pattern)
+    assert items == frozenset({"tdah-adulte-j1-intro", "tdah-adulte-j2-keynote"})
+
+
 def test_diff_items_returns_only_new():
     last = frozenset({"j1-intro", "j2-keynote"})
     current = frozenset({"j1-intro", "j2-keynote", "j3-panel"})
@@ -238,6 +250,18 @@ def test_register_watch_source_invalid_regex(agent_conn):
             item_pattern="(unclosed",
             item_url_template=TDAH_TEMPLATE,
             fetch_html=lambda url: SAMPLE_HTML,
+        )
+
+
+def test_register_watch_source_baseline_requires_fetcher(agent_conn):
+    with pytest.raises(ValueError, match="baseline=True requires fetch_html"):
+        register_watch_source(
+            agent_conn,
+            TDAH_PAGE,
+            item_pattern=TDAH_PATTERN,
+            item_url_template=TDAH_TEMPLATE,
+            baseline=True,
+            fetch_html=None,
         )
 
 
