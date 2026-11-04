@@ -5,6 +5,14 @@ No Flask or MCP imports in this package.
 
 from agent.core.bulk import bulk_import, expand_youtube_playlist, ingest_playlist
 from agent.core.detect import detect_type
+from agent.core.diff import (
+    ContentChangeResult,
+    ContentChangeStatus,
+    check_content_change,
+    content_fingerprint,
+    normalize_etag,
+    normalize_source_content,
+)
 from agent.core.note import get_note
 from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
 from agent.core.resume import normalize_reason_pattern, resume_tasks, retry_task
@@ -26,7 +34,11 @@ from agent.core.watch_source import (
 
 __all__ = [
     "PIPELINE_STEPS",
+    "ContentChangeResult",
+    "ContentChangeStatus",
+    "check_content_change",
     "compute_staleness",
+    "content_fingerprint",
     "diff_items",
     "detect_type",
     "extract_items",
@@ -37,7 +49,9 @@ __all__ = [
     "items_to_urls",
     "list_tasks",
     "list_watch_sources",
+    "normalize_etag",
     "normalize_reason_pattern",
+    "normalize_source_content",
     "plan_submission",
     "poll_all_due_sources",
     "poll_watch_source",
