@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Production Obsidian vault (Seven74AI/obsidian-vault) on the VPS.
-DEFAULT_VAULT_PATH = Path("/root/obsidian-vault")
+DEFAULT_VAULT_PATH = Path("/root/Documents/Obsidian Vault")
 # Retired kb-agent A/B comparison vault — must not receive new writes.
 RETIRED_AB_VAULT_PATH = Path("/root/kb-agent-vault")
 
