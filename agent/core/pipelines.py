@@ -9,7 +9,7 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "extract_metadata", "download_video", "extract_audio",
         "diarize", "transcribe", "merge_and_identify",
         "cleanup_temp", "synthesize_youtube",
-        "quality_gate", "minio_upload", "git_push",
+        "quality_gate", "minio_upload", "see_also", "git_push",
     ],
     "youtube_synthesize": [
         "fetch_transcript", "synthesize_youtube", "quality_gate",
@@ -28,8 +28,8 @@ PIPELINE_STEPS: dict[str, list[str]] = {
     "instagram_reel": [
         "ig_reel_validate", "ig_reel_download", "ig_reel_audio",
         "ig_reel_diarize", "ig_reel_transcribe", "ig_reel_merge",
-        "ig_reel_synthesize", "ig_quality_gate", "ig_cleanup",
-        "ig_minio_upload", "ig_git_push",
+        "ig_reel_synthesize", "ig_quality_gate", "ig_minio_upload",
+        "ig_cleanup", "see_also", "ig_git_push",
     ],
     "instagram_reel_synthesize": [
         "fetch_transcript", "ig_reel_synthesize", "ig_quality_gate",
@@ -38,17 +38,17 @@ PIPELINE_STEPS: dict[str, list[str]] = {
     "instagram_post": [
         "ig_reel_validate", "ig_carousel_metadata", "ig_carousel_extract",
         "ig_carousel_synthesize", "ig_quality_gate",
-        "ig_minio_upload", "ig_git_push",
+        "ig_minio_upload", "see_also", "ig_git_push",
     ],
     "threads_text": [
         "threads_detect", "threads_extract_text", "threads_text_synthesize",
-        "threads_quality_gate", "threads_minio_upload", "threads_git_push",
+        "threads_quality_gate", "threads_minio_upload", "see_also", "threads_git_push",
     ],
     "threads_video": [
         "threads_detect", "threads_extract_video", "threads_extract_audio",
         "threads_diarize", "threads_transcribe", "threads_merge",
-        "threads_video_synthesize", "threads_quality_gate", "threads_cleanup",
-        "threads_minio_upload", "threads_git_push",
+        "threads_video_synthesize", "threads_quality_gate", "threads_minio_upload",
+        "threads_cleanup", "see_also", "threads_git_push",
     ],
     "threads_video_synthesize": [
         "fetch_transcript", "threads_video_synthesize", "threads_quality_gate",
@@ -71,15 +71,15 @@ PIPELINE_STEPS: dict[str, list[str]] = {
     ],
     "book": [
         "extract_text", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
+        "minio_upload", "see_also", "git_push",
     ],
     "book_epub": [
         "extract_text", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
+        "minio_upload", "see_also", "git_push",
     ],
     "book_pdf": [
         "extract_text", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
+        "minio_upload", "see_also", "git_push",
     ],
     "book_batch": [
         "megadl_download", "classify_content", "delegate",

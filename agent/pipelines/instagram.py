@@ -1063,8 +1063,8 @@ register_pipeline("instagram_reel", [
     Step(name="ig_reel_merge", fn=step_ig_reel_merge, on_error="retry"),
     Step(name="ig_reel_synthesize", fn=step_ig_reel_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
-    Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])

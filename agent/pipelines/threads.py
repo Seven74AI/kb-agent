@@ -1161,8 +1161,8 @@ register_pipeline("threads_video", [
     Step(name="threads_merge", fn=step_threads_merge, on_error="retry"),
     Step(name="threads_video_synthesize", fn=step_threads_video_synthesize, on_error="retry"),
     Step(name="threads_quality_gate", fn=step_threads_quality_gate, on_error="retry"),
-    Step(name="threads_cleanup", fn=step_threads_cleanup, on_error="fail"),
     Step(name="threads_minio_upload", fn=step_threads_minio_upload, on_error="retry"),
+    Step(name="threads_cleanup", fn=step_threads_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="threads_git_push", fn=step_threads_git_push, on_error="retry"),
 ])
