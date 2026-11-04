@@ -10,6 +10,7 @@ from agent.core.resume import normalize_reason_pattern, resume_tasks, retry_task
 from agent.core.search import search_notes
 from agent.core.slugify import slugify
 from agent.core.status import compute_staleness, format_elapsed, get_task, list_tasks
+from agent.core.sources import lookup_all_sources, register_source, update_source_state
 from agent.core.submit import plan_submission, submit_plan, submit_url
 
 __all__ = [
@@ -20,8 +21,10 @@ __all__ = [
     "get_note",
     "get_task",
     "list_tasks",
+    "lookup_all_sources",
     "normalize_reason_pattern",
     "plan_submission",
+    "register_source",
     "resume_tasks",
     "retry_task",
     "search_notes",
@@ -29,4 +32,5 @@ __all__ = [
     "steps_for_content_type",
     "submit_plan",
     "submit_url",
+    "update_source_state",
 ]
