@@ -131,10 +131,10 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
 
     @mcp.tool
     def bulk_import(urls: list[str]) -> dict[str, Any]:
-        """Submit many URLs in one call (each routes through submit_url)."""
+        """Submit many URLs in one call (video → deferred batch, else immediate)."""
         conn = open_agent_conn(cfg)
         try:
-            return core_bulk_import(urls, cfg, conn)
+            return core_bulk_import(urls, cfg, conn, submit_fn=submit_routed)
         finally:
             conn.close()
 
