@@ -212,7 +212,7 @@ def test_post_submit_web_url(client, monkeypatch, tmp_path):
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
 
     # Mock preflight_health — Firecrawl not reachable in the test env
-    monkeypatch.setattr("agent.webhook.preflight_health", lambda p: (True, ""))
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
 
     resp = client.post("/submit", data={"url": "https://example.com/article"})
     assert resp.status_code == 201
@@ -233,7 +233,7 @@ def test_post_submit_youtube_no_cookies(client, monkeypatch, tmp_path):
         if platform == "youtube":
             return False, "cookies invalid — no yt_cookies.txt found"
         return True, ""
-    monkeypatch.setattr("agent.webhook.preflight_health", mock_preflight)
+    monkeypatch.setattr("agent.core.submit.preflight_health", mock_preflight)
 
     resp = client.post("/submit", data={"url": "https://youtube.com/watch?v=abc123"})
     assert resp.status_code == 200
@@ -249,7 +249,7 @@ def test_post_submit_with_cookies(client, monkeypatch, tmp_path):
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
 
     # Mock preflight_health to return healthy
-    monkeypatch.setattr("agent.webhook.preflight_health",
+    monkeypatch.setattr("agent.core.submit.preflight_health",
                         lambda p: (True, ""))
 
     resp = client.post("/submit", data={"url": "https://youtube.com/watch?v=abc123"})
