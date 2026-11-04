@@ -11,6 +11,10 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "cleanup_temp", "synthesize_youtube",
         "quality_gate", "minio_upload", "git_push",
     ],
+    "youtube_synthesize": [
+        "fetch_transcript", "synthesize_youtube", "quality_gate",
+        "see_also", "git_push",
+    ],
     "bunny_stream": [
         "extract_metadata", "download_video", "extract_audio",
         "diarize", "transcribe", "merge_and_identify",
@@ -27,6 +31,10 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "ig_reel_synthesize", "ig_quality_gate", "ig_cleanup",
         "ig_minio_upload", "ig_git_push",
     ],
+    "instagram_reel_synthesize": [
+        "fetch_transcript", "ig_reel_synthesize", "ig_quality_gate",
+        "see_also", "ig_git_push",
+    ],
     "instagram_post": [
         "ig_reel_validate", "ig_carousel_metadata", "ig_carousel_extract",
         "ig_carousel_synthesize", "ig_quality_gate",
@@ -41,6 +49,10 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "threads_diarize", "threads_transcribe", "threads_merge",
         "threads_video_synthesize", "threads_quality_gate", "threads_cleanup",
         "threads_minio_upload", "threads_git_push",
+    ],
+    "threads_video_synthesize": [
+        "fetch_transcript", "threads_video_synthesize", "threads_quality_gate",
+        "see_also", "threads_git_push",
     ],
     "substack": [
         "firecrawl_extract", "substack_cleanup", "synthesize_note", "quality_gate",

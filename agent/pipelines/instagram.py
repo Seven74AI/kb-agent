@@ -28,6 +28,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
+from agent.pipelines.video_common import step_fetch_transcript
 from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
 
@@ -1041,6 +1042,14 @@ register_pipeline("instagram_reel", [
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
     Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
+])
+
+register_pipeline("instagram_reel_synthesize", [
+    Step(name="fetch_transcript", fn=step_fetch_transcript, on_error="retry"),
+    Step(name="ig_reel_synthesize", fn=step_ig_reel_synthesize, on_error="retry"),
+    Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])

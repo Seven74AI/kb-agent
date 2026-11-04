@@ -24,6 +24,7 @@ from agent.pipelines.youtube import (
     MAX_QUALITY_RETRIES,
     YOUTUBE_DENSITY_MIN,
 )
+from agent.pipelines.video_common import step_fetch_transcript
 from agent.quality import quality_gate_retry_loop, quality_gate_youtube
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -304,26 +305,6 @@ FORMAT DE SORTIE :
 - Laisser la section Voir aussi vide (remplie par une étape ultérieure).
 
 NE TRADUIS JAMAIS vers l'anglais. Contenu et libellés de sections en français uniquement."""
-
-
-def step_fetch_transcript(task: dict, config: Config) -> str:
-    """Fetch the pre-uploaded merged transcript from MinIO (synthesize-only path)."""
-    slug = task.get("slug", task["id"][:8])
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
-    merged_path.parent.mkdir(parents=True, exist_ok=True)
-
-    dest = f"{config.minio_bucket}/transcripts/{slug}.json"
-    result = subprocess.run(
-        ["mc", "cp", f"minio/{dest}", str(merged_path)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result.returncode != 0:
-        raise StepError(
-            f"Transcript fetch failed: {result.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="fetch_transcript",
-        )
-    return str(merged_path)
 
 
 def step_synthesize_note(task: dict, config: Config) -> str:
