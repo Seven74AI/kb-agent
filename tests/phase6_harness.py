@@ -535,6 +535,7 @@ def test_5_ab_comparison():
     fixture_urls = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "urls.jsonl"
     kb_notes = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "kb_agent"
     hermes_notes = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "hermes"
+    benchmark_config = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "benchmark_config.yaml"
     if not (fixture_urls.is_file() and kb_notes.is_dir() and hermes_notes.is_dir()):
         record_result("Test 5: A/B Comparison", False,
                       "SKIP: note_quality_ab fixtures missing", skip=True)
@@ -544,16 +545,38 @@ def test_5_ab_comparison():
     cmd = (
         f"{sys.executable} {KB_AGENT_DIR / 'scripts' / 'note_quality_ab_benchmark.py'} "
         f"compare --urls {fixture_urls} --kb-agent-dir {kb_notes} "
-        f"--hermes-dir {hermes_notes} --output {report_dir}"
+        f"--hermes-dir {hermes_notes} --config {benchmark_config} --output {report_dir}"
     )
     code, out = run_cmd(cmd, timeout=60)
     review_html = report_dir / "review.html"
-    passed = code == 0 and review_html.is_file()
+    comparison_json = report_dir / "comparison.json"
+
+    summary_ok = False
+    summary_details = "summary=MISSING"
+    if comparison_json.is_file():
+        try:
+            summary = json.loads(comparison_json.read_text())["summary"]
+            # Relaxed thresholds: kb-agent article-a passes, article-b fails the
+            # structural "unbalanced" gate (both sides), both Hermes notes fail.
+            summary_ok = (
+                summary.get("url_count") == 2
+                and summary.get("kb_agent_pass") == 1
+                and summary.get("hermes_pass") == 0
+            )
+            summary_details = (
+                f"summary={summary.get('url_count')} urls, "
+                f"kb_pass={summary.get('kb_agent_pass')}, "
+                f"hermes_pass={summary.get('hermes_pass')}"
+            )
+        except (json.JSONDecodeError, KeyError) as exc:
+            summary_details = f"summary parse error: {exc}"
+
+    passed = code == 0 and review_html.is_file() and summary_ok
     record_result(
         "Test 5: A/B Comparison",
         passed,
         f"exit={code}, review_html={'OK' if review_html.is_file() else 'MISSING'}; "
-        f"{out[-200:] if out else ''}",
+        f"{summary_details}; {out[-200:] if out else ''}",
     )
 
 

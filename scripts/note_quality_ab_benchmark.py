@@ -16,11 +16,23 @@ Examples::
         --urls tests/fixtures/note_quality_ab/urls.jsonl \\
         --kb-agent-dir tests/fixtures/note_quality_ab/kb_agent \\
         --hermes-dir tests/fixtures/note_quality_ab/hermes \\
+        --config tests/fixtures/note_quality_ab/benchmark_config.yaml \\
         --output /tmp/note-quality-ab
 
     python scripts/note_quality_ab_benchmark.py run \\
         --urls urls.jsonl --output data/ab-run-001 \\
         --submit-hermes --submit-kb-agent --ignore-dedup
+
+Thresholds
+----------
+
+Quality gates read thresholds from ``config.yaml``. The repo default
+(``article_min_quotes: 4``, ``article_min_size: 5000``) is tuned for
+production notes; the small notes in ``tests/fixtures/note_quality_ab/``
+deliberately fall short of it, so a fixture compare with the default config
+reports ``kb_agent_pass: 0`` even though the harness is working. Pass
+``--config tests/fixtures/note_quality_ab/benchmark_config.yaml`` (relaxed
+thresholds) to see the intended pass/fail asymmetry on fixtures.
 """
 
 from __future__ import annotations
@@ -38,7 +50,6 @@ from agent.benchmark.hermes import hermes_cli_available, submit_hermes_kanban  #
 from agent.benchmark.note_quality import (  # noqa: E402
     compare_from_staging,
     compare_from_vaults,
-    default_hermes_vault,
     load_url_set,
     write_comparison_report,
 )
@@ -74,8 +85,22 @@ def cmd_compare(args: argparse.Namespace) -> int:
             config=config,
         )
     elif args.kb_vault or args.hermes_vault:
-        kb_vault = Path(args.kb_vault) if args.kb_vault else config.vault_path
-        hermes_vault = Path(args.hermes_vault) if args.hermes_vault else default_hermes_vault()
+        if not (args.kb_vault and args.hermes_vault):
+            print(
+                "compare: vault mode requires BOTH --kb-vault and --hermes-vault "
+                "(defaults could resolve to the same vault and make the A/B diff a no-op)",
+                file=sys.stderr,
+            )
+            return 2
+        kb_vault = Path(args.kb_vault)
+        hermes_vault = Path(args.hermes_vault)
+        if kb_vault.resolve() == hermes_vault.resolve():
+            print(
+                "compare: --kb-vault and --hermes-vault resolve to the same path; "
+                "the A/B diff would be a no-op",
+                file=sys.stderr,
+            )
+            return 2
         entries = compare_from_vaults(
             rows,
             kb_vault=kb_vault,

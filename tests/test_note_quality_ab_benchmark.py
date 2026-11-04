@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from agent.benchmark.note_quality import (
     build_review_html,
+    compare_from_vaults,
     compare_url_pair,
+    find_note_in_vault,
+    find_notes_in_vault,
     load_url_set,
     resolve_note_in_dir,
     write_comparison_report,
@@ -23,6 +28,8 @@ FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "note_quality_ab"
 FIXTURE_URLS = FIXTURE_ROOT / "urls.jsonl"
 KB_DIR = FIXTURE_ROOT / "kb_agent"
 HERMES_DIR = FIXTURE_ROOT / "hermes"
+RELAXED_CONFIG = FIXTURE_ROOT / "benchmark_config.yaml"
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "note_quality_ab_benchmark.py"
 
 
 @pytest.fixture
@@ -47,7 +54,6 @@ def test_resolve_note_in_dir_by_slug():
     path = resolve_note_in_dir(
         "https://example.com/benchmark-article-a",
         KB_DIR,
-        content_type="web",
     )
     assert path is not None
     assert path.name == "example.com_benchmark-article-a.md"
@@ -55,10 +61,10 @@ def test_resolve_note_in_dir_by_slug():
 
 def test_compare_url_pair_reports_quality_metrics(benchmark_config):
     kb_path = resolve_note_in_dir(
-        "https://example.com/benchmark-article-a", KB_DIR, content_type="web"
+        "https://example.com/benchmark-article-a", KB_DIR
     )
     hermes_path = resolve_note_in_dir(
-        "https://example.com/benchmark-article-a", HERMES_DIR, content_type="web"
+        "https://example.com/benchmark-article-a", HERMES_DIR
     )
     result = compare_url_pair(
         "https://example.com/benchmark-article-a",
@@ -76,10 +82,10 @@ def test_compare_url_pair_reports_quality_metrics(benchmark_config):
 
 def test_write_comparison_report_json_and_html(benchmark_config, tmp_path):
     kb_a = resolve_note_in_dir(
-        "https://example.com/benchmark-article-a", KB_DIR, content_type="web"
+        "https://example.com/benchmark-article-a", KB_DIR
     )
     hermes_a = resolve_note_in_dir(
-        "https://example.com/benchmark-article-a", HERMES_DIR, content_type="web"
+        "https://example.com/benchmark-article-a", HERMES_DIR
     )
     entries = [
         compare_url_pair(
@@ -164,3 +170,122 @@ def test_submit_url_ignore_dedup(benchmark_config, monkeypatch):
         assert result["status"] == "pending"
     finally:
         conn.close()
+
+
+# ── Vault resolution path ───────────────────────────────────────────────────────
+
+
+def _write_vault_note(vault: Path, url: str, name: str) -> Path:
+    knowledge = vault / "Knowledge base" / "articles"
+    knowledge.mkdir(parents=True, exist_ok=True)
+    note = knowledge / name
+    note.write_text(f"source_url: {url}\n\n## Summary\nBody text.\n", encoding="utf-8")
+    return note
+
+
+def test_find_note_in_vault_unique(tmp_path):
+    vault = tmp_path / "vault"
+    url = "https://example.com/vault-article"
+    expected = _write_vault_note(vault, url, "vault-article.md")
+
+    assert find_notes_in_vault(url, vault) == [expected]
+    assert find_note_in_vault(url, vault) == expected
+
+
+def test_find_note_in_vault_missing(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "Knowledge base" / "articles").mkdir(parents=True, exist_ok=True)
+
+    assert find_notes_in_vault("https://example.com/absent", vault) == []
+    assert find_note_in_vault("https://example.com/absent", vault) is None
+
+
+def test_find_note_in_vault_ambiguous_returns_none(tmp_path):
+    vault = tmp_path / "vault"
+    url = "https://example.com/ambiguous"
+    _write_vault_note(vault, url, "copy-a.md")
+    _write_vault_note(vault, url, "copy-b.md")
+
+    matches = find_notes_in_vault(url, vault)
+    assert len(matches) == 2
+    # Ambiguous matches must not be silently resolved to one file.
+    assert find_note_in_vault(url, vault) is None
+
+
+def test_compare_from_vaults_resolves_both_sides(benchmark_config, tmp_path):
+    kb_vault = tmp_path / "kb-vault"
+    hermes_vault = tmp_path / "hermes-vault"
+    url = "https://example.com/vault-pair"
+    _write_vault_note(kb_vault, url, "kb.md")
+    _write_vault_note(hermes_vault, url, "hermes.md")
+
+    entries = compare_from_vaults(
+        [{"url": url, "content_type": "web"}],
+        kb_vault=kb_vault,
+        hermes_vault=hermes_vault,
+        config=benchmark_config,
+    )
+    assert len(entries) == 1
+    assert entries[0]["kb_agent"]["note_path"] is not None
+    assert entries[0]["hermes"]["note_path"] is not None
+
+
+# ── CLI compare summary semantics + validation guards ───────────────────────────
+
+
+def _run_compare(*extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "compare",
+         "--urls", str(FIXTURE_URLS),
+         "--kb-agent-dir", str(KB_DIR),
+         "--hermes-dir", str(HERMES_DIR),
+         "--config", str(RELAXED_CONFIG),
+         *extra],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_cli_compare_summary_semantics(tmp_path):
+    out_dir = tmp_path / "report"
+    result = _run_compare("--output", str(out_dir))
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)["summary"]
+    # With relaxed thresholds: kb-agent article-a passes, article-b fails the
+    # structural "unbalanced" gate (both sides), and both Hermes notes fail.
+    assert summary == {
+        "url_count": 2,
+        "kb_agent_pass": 1,
+        "hermes_pass": 0,
+        "both_pass": 0,
+    }
+
+
+def test_cli_compare_requires_both_vaults(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "compare",
+         "--urls", str(FIXTURE_URLS),
+         "--config", str(RELAXED_CONFIG),
+         "--kb-vault", str(tmp_path / "kb"),
+         "--output", str(tmp_path / "report")],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "BOTH --kb-vault and --hermes-vault" in result.stderr
+
+
+def test_cli_compare_rejects_same_vault(tmp_path):
+    shared = tmp_path / "shared-vault"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "compare",
+         "--urls", str(FIXTURE_URLS),
+         "--config", str(RELAXED_CONFIG),
+         "--kb-vault", str(shared),
+         "--hermes-vault", str(shared),
+         "--output", str(tmp_path / "report")],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "same path" in result.stderr

@@ -12,6 +12,13 @@ from agent.detection import dedup_check, detect_content_subtype, detect_platform
 def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> dict:
     """Classify a URL and decide the submission outcome — no DB access.
 
+    Args:
+        url: The URL to classify.
+        config: Typed configuration (used for vault dedup path).
+        ignore_dedup: When True, skip the vault dedup check so an already-known
+            URL can be re-enqueued (used by the benchmark ``run`` CLI). Webhook
+            callers keep the default (False) and dedup as before.
+
     Returns either a terminal result (``error`` or ``skipped``) or a plan
     carrying everything needed to enqueue (``paused`` or ``pending``).
     Callers that need to touch the DB only for the enqueue step can run this

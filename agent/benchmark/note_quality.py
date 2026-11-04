@@ -12,7 +12,7 @@ from typing import Any
 from agent.config import Config, load_config
 from agent.core.slugify import slugify
 from agent.quality import (
-    _count_fact_checks,
+    count_fact_checks,
     quality_gate_book,
     quality_gate_web,
     quality_gate_youtube,
@@ -52,8 +52,6 @@ def _safe_slug(url: str) -> str:
 def resolve_note_in_dir(
     url: str,
     notes_dir: Path,
-    *,
-    content_type: str | None = None,
 ) -> Path | None:
     """Find a staged note file for a URL under ``notes_dir/{slug}.md``."""
     if not notes_dir.is_dir():
@@ -71,25 +69,44 @@ def resolve_note_in_dir(
     return None
 
 
-def find_note_in_vault(url: str, vault_path: Path) -> Path | None:
-    """Locate a vault note whose frontmatter contains ``source_url: {url}``."""
+def find_notes_in_vault(url: str, vault_path: Path) -> list[Path]:
+    """Return all vault note paths whose frontmatter contains ``source_url: {url}``.
+
+    Uses a fixed-string grep (``-F``) so URL regex metacharacters are matched
+    literally. Duplicate ``source_url`` entries yield multiple results, which
+    :func:`find_note_in_vault` treats as ambiguous.
+    """
     knowledge = vault_path / "Knowledge base"
     if not knowledge.is_dir():
-        return None
+        return []
     try:
         result = subprocess.run(
-            ["grep", "-rl", f"source_url: {url}", str(knowledge)],
+            ["grep", "-rlF", f"source_url: {url}", str(knowledge)],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return []
+    matches: list[Path] = []
     for line in result.stdout.strip().splitlines():
         path = Path(line.strip())
         if path.is_file():
-            return path
+            matches.append(path)
+    return matches
+
+
+def find_note_in_vault(url: str, vault_path: Path) -> Path | None:
+    """Locate the unique vault note for a URL, or ``None`` if missing/ambiguous.
+
+    If more than one note carries the same ``source_url`` the match is ambiguous
+    and this returns ``None`` rather than silently picking one — a benchmark
+    should flag ambiguity instead of comparing an arbitrary file.
+    """
+    matches = find_notes_in_vault(url, vault_path)
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
@@ -133,7 +150,7 @@ def _programmatic_metrics(note_path: Path, content_type: str, config: Config) ->
         metrics["concept_count"] = concept_count
         metrics["key_points_count"] = key_points
     else:
-        metrics["fact_check_count"] = _count_fact_checks(lines)
+        metrics["fact_check_count"] = count_fact_checks(lines)
     return metrics
 
 
@@ -195,8 +212,8 @@ def compare_from_staging(
     for row in url_rows:
         url = row["url"]
         content_type = row.get("content_type") or "web"
-        kb_path = resolve_note_in_dir(url, kb_agent_dir, content_type=content_type)
-        hermes_path = resolve_note_in_dir(url, hermes_dir, content_type=content_type)
+        kb_path = resolve_note_in_dir(url, kb_agent_dir)
+        hermes_path = resolve_note_in_dir(url, hermes_dir)
         entries.append(
             compare_url_pair(
                 url,

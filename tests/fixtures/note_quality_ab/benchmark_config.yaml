@@ -1,0 +1,14 @@
+# Relaxed quality thresholds for the note-quality A/B benchmark fixtures.
+#
+# The fixture notes under tests/fixtures/note_quality_ab/ are deliberately
+# small (3 quotes, ~2KB), far below the production thresholds in the repo
+# config.yaml (article_min_quotes: 4, article_min_size: 5000). Running
+# `compare` against fixtures with the default config reports kb_agent_pass: 0
+# even though the harness is correct. Pass this file via --config to see the
+# intended pass/fail asymmetry.
+kb_agent_dir: /root/kb-agent
+vault_path: /tmp/kb-agent-benchmark-vault
+quality:
+  article_min_quotes: 2
+  article_min_size: 100
+  article_min_fact_checks: 2
