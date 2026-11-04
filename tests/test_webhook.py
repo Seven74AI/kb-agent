@@ -212,7 +212,7 @@ def test_post_submit_web_url(client, monkeypatch, tmp_path):
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
 
     # Mock preflight_health — Firecrawl not reachable in the test env
-    monkeypatch.setattr("agent.webhook.preflight_health", lambda p: (True, ""))
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
 
     resp = client.post("/submit", data={"url": "https://example.com/article"})
     assert resp.status_code == 201
@@ -233,7 +233,7 @@ def test_post_submit_youtube_no_cookies(client, monkeypatch, tmp_path):
         if platform == "youtube":
             return False, "cookies invalid — no yt_cookies.txt found"
         return True, ""
-    monkeypatch.setattr("agent.webhook.preflight_health", mock_preflight)
+    monkeypatch.setattr("agent.core.submit.preflight_health", mock_preflight)
 
     resp = client.post("/submit", data={"url": "https://youtube.com/watch?v=abc123"})
     assert resp.status_code == 200
@@ -249,7 +249,7 @@ def test_post_submit_with_cookies(client, monkeypatch, tmp_path):
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
 
     # Mock preflight_health to return healthy
-    monkeypatch.setattr("agent.webhook.preflight_health",
+    monkeypatch.setattr("agent.core.submit.preflight_health",
                         lambda p: (True, ""))
 
     resp = client.post("/submit", data={"url": "https://youtube.com/watch?v=abc123"})
@@ -257,6 +257,65 @@ def test_post_submit_with_cookies(client, monkeypatch, tmp_path):
     data = json.loads(resp.data)
     assert data["status"] == "pending"
     assert data["platform"] == "youtube"
+
+
+def test_post_submit_dedup_skip_opens_no_connection(client, monkeypatch, tmp_path):
+    """Dedup skip must not open a DB connection (regression fix for PR #35)."""
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge base").mkdir(parents=True)
+    (vault / "Knowledge base" / "dup.md").write_text(
+        "---\nsource_url: https://example.com/dup\n---\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("agent.webhook.config.vault_path", vault)
+
+    def boom():
+        raise AssertionError("_get_agent_conn() must not be called on dedup skip")
+    monkeypatch.setattr("agent.webhook._get_agent_conn", boom)
+
+    resp = client.post("/submit", data={"url": "https://example.com/dup"})
+    assert resp.status_code == 200
+    data = json.loads(resp.data)
+    assert data["status"] == "skipped"
+    assert data["reason"] == "Already in vault"
+
+
+def test_post_submit_closes_connection(client, monkeypatch, tmp_path):
+    """/submit must close the agent connection it opens."""
+    import agent.webhook as webhook
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    monkeypatch.setattr("agent.webhook.config.vault_path", tmp_path / "vault")
+    (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    original_get_conn = webhook._get_agent_conn
+
+    class TrackingConn:
+        def __init__(self, real):
+            self._real = real
+            self.closed = False
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+        def close(self):
+            self.closed = True
+            self._real.close()
+
+    conns = []
+    def spy_get_conn():
+        conn = TrackingConn(original_get_conn())
+        conns.append(conn)
+        return conn
+    monkeypatch.setattr("agent.webhook._get_agent_conn", spy_get_conn)
+
+    resp = client.post("/submit", data={"url": "https://example.com/close-me"})
+    assert resp.status_code == 201
+    assert len(conns) == 1
+    assert conns[0].closed is True
 
 
 def test_post_resume_by_reason(client, monkeypatch, tmp_path):

@@ -1,6 +1,4 @@
-"""Pure helpers shared by core operations."""
-
-from __future__ import annotations
+"""URL slug derivation for task and note naming."""
 
 import re
 

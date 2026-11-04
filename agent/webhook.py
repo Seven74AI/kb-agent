@@ -13,12 +13,17 @@ from pathlib import Path
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
 from agent.config import Config, load_config
-from agent.db import (
-    AGENT_SCHEMA, LOGS_SCHEMA,
-    create_task, init_db, resume_tasks_by_reason,
-    get_task_steps, get_all_tasks, get_last_log_line,
+from agent.core import (
+    compute_staleness,
+    format_elapsed,
+    list_tasks,
+    plan_submission,
+    resume_tasks,
+    slugify,
+    submit_plan,
 )
-from agent.detection import dedup_check, detect_content_subtype, detect_platform, preflight_health
+from agent.core.resume import normalize_reason_pattern
+from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db
 
 app = Flask(__name__)
 config: Config = load_config()
@@ -56,83 +61,9 @@ def _logs_db_path() -> Path:
     return config.kb_agent_dir / "data" / "logs.db"
 
 
-# ── Pipeline step definitions per content type ────────────────────────────────
-
-PIPELINE_STEPS: dict[str, list[str]] = {
-    "web": [
-        "firecrawl_extract", "synthesize_note", "quality_gate",
-        "minio_upload", "see_also", "git_push",
-    ],
-    "youtube": [
-        "extract_metadata", "download_video", "extract_audio",
-        "diarize", "transcribe", "merge_and_identify",
-        "cleanup_temp", "synthesize_youtube",
-        "quality_gate", "minio_upload", "git_push",
-    ],
-    "instagram_reel": [
-        "ig_reel_validate", "ig_reel_download", "ig_reel_audio",
-        "ig_reel_diarize", "ig_reel_transcribe", "ig_reel_merge",
-        "ig_reel_synthesize", "ig_quality_gate", "ig_cleanup",
-        "ig_minio_upload", "ig_git_push",
-    ],
-    "instagram_post": [
-        "ig_reel_validate", "ig_carousel_metadata", "ig_carousel_extract",
-        "ig_carousel_synthesize", "ig_quality_gate",
-        "ig_minio_upload", "ig_git_push",
-    ],
-    "threads_text": [
-        "threads_detect", "threads_extract_text", "threads_text_synthesize",
-        "threads_quality_gate", "threads_minio_upload", "threads_git_push",
-    ],
-    "threads_video": [
-        "threads_detect", "threads_extract_video", "threads_extract_audio",
-        "threads_diarize", "threads_transcribe", "threads_merge",
-        "threads_video_synthesize", "threads_quality_gate", "threads_cleanup",
-        "threads_minio_upload", "threads_git_push",
-    ],
-    "substack": [
-        "firecrawl_extract", "substack_cleanup", "synthesize_note", "quality_gate",
-        "minio_upload", "see_also", "git_push",
-    ],
-    "substack_text": [
-        "firecrawl_extract", "substack_cleanup", "synthesize_note", "quality_gate",
-        "minio_upload", "see_also", "git_push",
-    ],
-    "substack_video": [
-        "substack_video_pause",
-    ],
-    "substack_image": [
-        "firecrawl_extract", "substack_image_extract", "synthesize_note", "quality_gate",
-        "minio_upload", "see_also", "git_push",
-    ],
-    "book": [
-        "extract_text", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
-    ],
-    "book_epub": [
-        "extract_text", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
-    ],
-    "book_pdf": [
-        "extract_text", "synthesize_note", "quality_gate",
-        "minio_upload", "git_push",
-    ],
-    "book_batch": [
-        "megadl_download", "classify_content", "delegate",
-    ],
-    "mega": [
-        "megadl_download", "classify_content", "delegate",
-    ],
-}
-
-
-def slugify(url: str) -> str:
-    """Derive a filesystem-safe slug from a URL."""
-    import re
-    slug = re.sub(r"^https?://", "", url)
-    slug = re.sub(r"[?#].*", "", slug)
-    slug = re.sub(r"[^a-zA-Z0-9._-]", "_", slug)
-    return slug[:100]
+# Re-export for tests that import private helpers from webhook.
+_format_elapsed = format_elapsed
+_compute_staleness = compute_staleness
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -156,57 +87,19 @@ def submit():
     if not url:
         return jsonify({"error": "url required"}), 400
 
-    # 1. Detect platform
-    platform = detect_platform(url)
-
-    # 2. Dedup check
-    if dedup_check(url, config.vault_path):
-        return jsonify({
-            "status": "skipped",
-            "reason": "Already in vault",
-            "platform": platform,
-        }), 200
-
-    # 3. Pre-flight health check
-    ok, reason = preflight_health(platform)
-    if not ok:
-        # Create paused task
+    plan = plan_submission(url, config)
+    if plan["status"] in ("error", "skipped"):
+        result = plan
+    else:
         conn = _get_agent_conn()
-        slug = slugify(url)
-        subtype = detect_content_subtype(url, platform)
-        steps = PIPELINE_STEPS.get(subtype, PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"]))
-        task_id = create_task(conn, url, platform, slug, steps, status="paused")
-        # Set error reason on the paused task
-        conn.execute(
-            "UPDATE tasks SET error = ? WHERE id = ?", (reason, task_id)
-        )
-        conn.commit()
-        conn.close()
-        return jsonify({
-            "status": "paused",
-            "reason": reason,
-            "platform": platform,
-            "task_id": task_id,
-        }), 200
+        try:
+            result = submit_plan(conn, plan)
+        finally:
+            conn.close()
 
-    # 4. Detect content subtype
-    subtype = detect_content_subtype(url, platform)
-
-    # 5. Get pipeline steps for this content type
-    steps = PIPELINE_STEPS.get(subtype, PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"]))
-
-    # 6. Create task in DB
-    conn = _get_agent_conn()
-    slug = slugify(url)
-    task_id = create_task(conn, url, platform, slug, steps)
-
-    return jsonify({
-        "status": "pending",
-        "task_id": task_id,
-        "platform": platform,
-        "content_type": subtype,
-        "slug": slug,
-    }), 201
+    body = {k: v for k, v in result.items() if k not in ("http_status", "status")}
+    body["status"] = result["status"]
+    return jsonify(body), result["http_status"]
 
 
 # ── Resume Endpoint ───────────────────────────────────────────────────────────
@@ -222,22 +115,17 @@ def resume():
     Returns:
         JSON with count of resumed tasks.
     """
-    reason_param = request.args.get("reason", "%").strip()
-    if not reason_param:
-        reason_param = "%"
-
-    # Convert simple keywords to LIKE patterns
-    if reason_param != "%" and "%" not in reason_param:
-        reason_param = f"%{reason_param}%"
+    reason_param = request.args.get("reason", "%")
+    reason_pattern = normalize_reason_pattern(reason_param)
 
     conn = _get_agent_conn()
-    count = resume_tasks_by_reason(conn, reason_param)
+    count = resume_tasks(conn, reason_param)
     conn.close()
 
     return jsonify({
         "status": "ok",
         "resumed": count,
-        "reason_pattern": reason_param,
+        "reason_pattern": reason_pattern,
     })
 
 
@@ -477,73 +365,6 @@ PAUSE_REASON_LABELS: list[tuple[str, str]] = [
 ]
 
 
-def _format_elapsed(created_at: str, now: datetime) -> str:
-    """Format elapsed time from ISO timestamp to human-readable."""
-    try:
-        if "T" in created_at:
-            created_dt = datetime.fromisoformat(created_at)
-        else:
-            created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-        delta = now - created_dt
-
-        if delta.total_seconds() < 0:
-            return "just now"
-
-        total_secs = int(delta.total_seconds())
-        if total_secs < 60:
-            return f"{total_secs}s"
-        elif total_secs < 3600:
-            return f"{total_secs // 60}m"
-        elif total_secs < 86400:
-            return f"{total_secs // 3600}h {int((total_secs % 3600) / 60)}m"
-        else:
-            return f"{total_secs // 86400}d {int((total_secs % 86400) / 3600)}h"
-    except (ValueError, TypeError):
-        return "?"
-
-
-def _compute_staleness(task: dict, logs_conn: sqlite3.Connection, now: datetime) -> tuple[str | None, bool]:
-    """Compute staleness string from the most recent log timestamp.
-
-    Returns (staleness_str, is_stale) where is_stale=True if >2h since last update.
-    """
-    if logs_conn is None:
-        return None, False
-
-    row = logs_conn.execute(
-        "SELECT logged_at FROM step_logs WHERE task_id = ? "
-        "ORDER BY logged_at DESC LIMIT 1",
-        (task["id"],),
-    ).fetchone()
-
-    if not row:
-        return None, False
-
-    try:
-        logged_at = row[0]
-        if "T" in logged_at:
-            log_dt = datetime.fromisoformat(logged_at)
-        else:
-            log_dt = datetime.strptime(logged_at, "%Y-%m-%d %H:%M:%S")
-        delta = now - log_dt
-        total_secs = int(delta.total_seconds())
-
-        if total_secs < 0:
-            return "just now", False
-        elif total_secs < 60:
-            return f"{total_secs}s ago", False
-        elif total_secs < 3600:
-            return f"{total_secs // 60}m ago", False
-        elif total_secs < 7200:
-            return f"{total_secs // 3600}h ago", False
-        elif total_secs < 86400:
-            return f"{total_secs // 3600}h ago", True
-        else:
-            return f"{total_secs // 86400}d ago", True
-    except (ValueError, TypeError):
-        return None, False
-
-
 @app.route("/dashboard")
 def dashboard():
     """Show task queue status with step detail, elapsed time, and logs."""
@@ -551,49 +372,15 @@ def dashboard():
     now_naive = now.replace(tzinfo=None)
 
     db_path = _agent_db_path()
-    tasks = []
+    tasks: list[dict] = []
     counts = {"pending": 0, "in_progress": 0, "done": 0, "paused": 0, "failed": 0, "total": 0}
 
     if db_path.exists():
         conn = _get_agent_conn()
         logs_conn = _get_logs_conn()
-
-        raw_tasks = get_all_tasks(conn, limit=100)
-        counts["total"] = len(raw_tasks)
-
-        for t in raw_tasks:
-            status = t["status"]
-            counts[status] = counts.get(status, 0) + 1
-
-            # Get steps for this task
-            steps = get_task_steps(conn, t["id"])
-
-            # Get last log line
-            last_log = get_last_log_line(logs_conn, t["id"])
-
-            # Compute elapsed
-            elapsed = _format_elapsed(t["created_at"], now_naive)
-
-            # Compute staleness
-            staleness_str, is_stale = _compute_staleness(t, logs_conn, now_naive)
-
-            tasks.append({
-                "id": t["id"],
-                "source_url": t["source_url"],
-                "content_type": t["content_type"],
-                "status": status,
-                "error": t["error"],
-                "slug": t.get("slug"),
-                "retries": t.get("retries", 0),
-                "created_at": t["created_at"],
-                "updated_at": t.get("updated_at"),
-                "steps": steps,
-                "elapsed": elapsed,
-                "staleness": staleness_str,
-                "is_stale": is_stale,
-                "last_log": last_log,
-            })
-
+        state = list_tasks(conn, logs_conn=logs_conn, limit=100, now=now_naive)
+        tasks = state["tasks"]
+        counts = state["counts"]
         conn.close()
         logs_conn.close()
 

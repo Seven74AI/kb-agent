@@ -1,9 +1,4 @@
-"""Pipeline step lists — content type → ordered mechanical + synthesis steps."""
-
-from __future__ import annotations
-
-# Canonical step lists (today duplicated from agent.webhook.PIPELINE_STEPS).
-# Adapters and the async consumer will converge on this module in a follow-up migration.
+"""Pipeline step name lists per content type (enqueue-time routing)."""
 
 PIPELINE_STEPS: dict[str, list[str]] = {
     "web": [
@@ -73,9 +68,9 @@ PIPELINE_STEPS: dict[str, list[str]] = {
 }
 
 
-def resolve_pipeline_steps(content_type: str, platform: str) -> list[str]:
-    """Return the ordered step names for a content type / platform pair."""
+def steps_for_content_type(subtype: str, platform: str) -> list[str]:
+    """Resolve pipeline step names for a content subtype or platform."""
     return PIPELINE_STEPS.get(
-        content_type,
+        subtype,
         PIPELINE_STEPS.get(platform, PIPELINE_STEPS["web"]),
     )
