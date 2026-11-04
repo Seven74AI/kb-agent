@@ -392,4 +392,4 @@ against yt-dlp overwrites) and re-validates paused tasks for that platform.
 
 **All 15 fuzzy spots resolved.** Ready for implementation planning.
 
-**Context7 MCP:** Configured. API key in .env. Server connected (2 tools).
+**Context7 MCP:** Configured (6 tools: query_docs, resolve_library_id, read_resource, list/get prompts + resources). GitHub MCP enabled (26 tools) for PR/issues/review.
