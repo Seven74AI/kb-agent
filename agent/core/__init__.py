@@ -43,8 +43,6 @@ __all__ = [
     "poll_watch_source",
     "register_watch_source",
     "lookup_all_sources",
-    "normalize_reason_pattern",
-    "plan_submission",
     "register_source",
     "resume_tasks",
     "run_watch_scheduler",

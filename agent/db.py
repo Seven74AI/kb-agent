@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS watch_sources (
     last_polled_at TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS sources (
     id TEXT PRIMARY KEY,
     url TEXT NOT NULL UNIQUE,
