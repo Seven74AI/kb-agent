@@ -17,6 +17,7 @@ Pure domain layer for kb-agent (`core/` package). Adapters:
 | `core/resume.py` | `resume_task`, `retry_task` | Bulk resume by pause reason; single-task retry |
 | `core/notes.py` | `search_notes`, `get_note` | Vault grep search + note load |
 | `core/pipelines.py` | (internal) | Content-type → ordered pipeline step names |
+| `core/sources.py` | `watch_source` (foundation) | Register/lookup watched sources; persist last-seen + content hash |
 | `core/util.py` | (internal) | `slugify` |
 | `core/types.py` | — | Dataclasses / enums returned to adapters |
 | `core/watch_source.py` | — | Register/list/poll recurring page watches; diff + auto-submit |
@@ -87,6 +88,18 @@ Grep under `{vault}/Knowledge base/**/*.md`.
 
 Resolve slug across standard KB folders or load by vault-relative path.
 
+### `register_source(conn, url, cadence) -> str`
+
+Register a watched source (HTTP(S) URL + positive-integer cadence). Returns the new `source_id`. Raises `ValueError` on invalid URL/cadence or a duplicate URL.
+
+### `lookup_all_sources(conn) -> list[dict]`
+
+All registered sources ordered by creation, each with `source_id`, `url`, `cadence`, `last_seen`, `last_content_hash`.
+
+### `update_source_state(conn, source_id, last_seen, last_content_hash) -> dict | None`
+
+Persist the last-seen timestamp and content hash for a source; returns the updated row or `None` for an unknown id.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -103,6 +116,7 @@ Resolve slug across standard KB folders or load by vault-relative path.
 | `format_elapsed` / `compute_staleness` | yes* | *needs timestamps from DB |
 | `resume_task` / `retry_task` | no | SQLite |
 | `search_notes` / `get_note` | no | grep / filesystem |
+| `register_source` / `lookup_all_sources` / `update_source_state` | no | SQLite |
 
 ## Consumer boundary
 

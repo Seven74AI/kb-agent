@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 # Repo root, derived from this file's location — works in CI and any clone.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Production Obsidian vault (Seven74AI/obsidian-vault) on the VPS.
+DEFAULT_VAULT_PATH = Path("/root/obsidian-vault")
+# Retired kb-agent A/B comparison vault — must not receive new writes.
+RETIRED_AB_VAULT_PATH = Path("/root/kb-agent-vault")
+
 
 @dataclass
 class Config:
@@ -17,7 +22,7 @@ class Config:
 
     # ── Paths ──
     kb_agent_dir: Path = REPO_ROOT
-    vault_path: Path = REPO_ROOT.parent / "kb-agent-vault"
+    vault_path: Path = DEFAULT_VAULT_PATH
     cookie_dir: Path = REPO_ROOT / "cookies"
     temp_dir: Path = Path("/tmp")
 
@@ -97,6 +102,27 @@ def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+def _resolve_vault_path(raw: dict) -> Path:
+    """Resolve vault_path from env, YAML, or default; block the retired A/B vault."""
+    env_path = os.getenv("KB_VAULT_PATH") or os.getenv("OBSIDIAN_VAULT_PATH")
+    if env_path is not None:
+        path = Path(env_path)
+    else:
+        path = Path(raw.get("vault_path", str(DEFAULT_VAULT_PATH)))
+
+    try:
+        resolved = path.resolve()
+        retired = RETIRED_AB_VAULT_PATH.resolve()
+    except (OSError, RuntimeError):
+        resolved = path
+        retired = RETIRED_AB_VAULT_PATH
+
+    if resolved == retired:
+        raise ValueError(
+            f"vault_path {path} is the retired A/B vault; point kb-agent at "
+            f"{DEFAULT_VAULT_PATH} (Seven74AI/obsidian-vault) instead"
+        )
+    return path
 
 
 def load_config(config_path: Path | None = None, env_path: Path | None = None) -> Config:
@@ -138,7 +164,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
     return Config(
         # Paths
         kb_agent_dir=Path(raw.get("kb_agent_dir", str(REPO_ROOT))),
-        vault_path=Path(raw.get("vault_path", str(REPO_ROOT.parent / "kb-agent-vault"))),
+        vault_path=_resolve_vault_path(raw),
         cookie_dir=Path(raw.get("cookie_dir", str(REPO_ROOT / "cookies"))),
         temp_dir=Path(raw.get("temp_dir", "/tmp")),
         # Concurrency

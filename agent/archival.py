@@ -7,6 +7,7 @@ Used by all pipelines (web, threads, instagram, books, youtube).
 import subprocess
 from pathlib import Path
 
+from agent.config import RETIRED_AB_VAULT_PATH
 from agent.exceptions import ErrorType, StepError
 
 
@@ -133,6 +134,16 @@ def step_git_push(
     slug = task.get("slug", task["id"][:8])
     content_type = task.get("content_type", "web")
     vault_path = config.vault_path
+
+    try:
+        if vault_path.resolve() == RETIRED_AB_VAULT_PATH.resolve():
+            raise StepError(
+                f"Refusing Git push to retired A/B vault {vault_path}",
+                error_type=ErrorType.FAIL,
+                step_name="git_push",
+            )
+    except OSError:
+        pass
 
     if vault_subfolder is None:
         vault_subfolder = CONTENT_TYPE_TO_VAULT_FOLDER.get(content_type, "articles")
