@@ -529,28 +529,32 @@ def test_4_crash_recovery(server_proc: subprocess.Popen | None):
 # ── Test 5: A/B Comparison ─────────────────────────────────────────────────────
 
 def test_5_ab_comparison():
-    """Compare KB Agent output vs Hermes KB pipeline output."""
+    """Compare KB Agent output vs Hermes KB pipeline output (fixture report)."""
     log("=== TEST 5: A/B Comparison ===")
 
-    # Check if Hermes KB pipeline is available
-    hermes_check = run_cmd("which hermes 2>&1")
-    if hermes_check[0] != 0:
+    fixture_urls = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "urls.jsonl"
+    kb_notes = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "kb_agent"
+    hermes_notes = KB_AGENT_DIR / "tests" / "fixtures" / "note_quality_ab" / "hermes"
+    if not (fixture_urls.is_file() and kb_notes.is_dir() and hermes_notes.is_dir()):
         record_result("Test 5: A/B Comparison", False,
-                      "SKIP: Hermes CLI not available", skip=True)
+                      "SKIP: note_quality_ab fixtures missing", skip=True)
         return
 
-    # Check if hermes knowledge-base skill is functional
-    skill_check = run_cmd("hermes skills list 2>&1 | grep knowledge-base")
-    if "knowledge-base" not in skill_check[1]:
-        record_result("Test 5: A/B Comparison", False,
-                      "SKIP: knowledge-base skill not available", skip=True)
-        return
-
-    # For now: note that A/B comparison requires Hermes KB running
-    # which is a separate system
-    record_result("Test 5: A/B Comparison", False,
-                  "SKIP: Hermes KB pipeline not running — requires manual comparison. "
-                  "KB Agent side: test 1 covers note quality validation.", skip=True)
+    report_dir = Path("/tmp/kb-agent-ab-comparison")
+    cmd = (
+        f"{sys.executable} {KB_AGENT_DIR / 'scripts' / 'note_quality_ab_benchmark.py'} "
+        f"compare --urls {fixture_urls} --kb-agent-dir {kb_notes} "
+        f"--hermes-dir {hermes_notes} --output {report_dir}"
+    )
+    code, out = run_cmd(cmd, timeout=60)
+    review_html = report_dir / "review.html"
+    passed = code == 0 and review_html.is_file()
+    record_result(
+        "Test 5: A/B Comparison",
+        passed,
+        f"exit={code}, review_html={'OK' if review_html.is_file() else 'MISSING'}; "
+        f"{out[-200:] if out else ''}",
+    )
 
 
 # ── Test 6: Dedup ───────────────────────────────────────────────────────────────
