@@ -1020,6 +1020,7 @@ def _pass2_build_note(
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     source_domain = urlparse(source_url).netloc or "youtube.com"
+    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
 
     system_prompt = f"""You are a knowledge base curator specializing in video content synthesis.
 Follow the deep treatment standard for YouTube videos.
@@ -1055,9 +1056,8 @@ OUTPUT FORMAT:
   source: {source_domain} ({metadata.get('uploader', 'Unknown')})
   source_url: {source_url}
   source_files:
-    video: minio://kb-agent-archive/videos/{slug}.webm
-    audio: minio://kb-agent-archive/videos/{slug}.mp3
-    transcript: minio://kb-agent-archive/videos/{slug}.json
+    video: {tailscale_base}/{config.minio_bucket}/videos/{slug}.webm
+    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{slug}.json
   confidence: plausible
   tags: [tag1, tag2, tag3]
 - Then the note sections as shown in the template.
@@ -1246,9 +1246,9 @@ def step_minio_upload(task: dict, config: Config) -> str:
     # 3. Upload merged transcript JSON
     merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
     if merged_path.exists():
-        dest = f"{bucket}/videos/{slug}.json"
+        dest = f"{bucket}/transcripts/{slug}.json"
         upload_file_to_minio(merged_path, dest, timeout=120)
-        uploaded.append(f"videos/{slug}.json")
+        uploaded.append(f"transcripts/{slug}.json")
 
     # 4. Update note frontmatter with MinIO URLs
     _update_note_minio_urls(slug, config, uploaded)

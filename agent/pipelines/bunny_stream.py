@@ -298,8 +298,8 @@ FORMAT DE SORTIE :
   source: "<Intervenant> — <Titre> (Sommet TDAH Adulte — Terr'à Grandir)"
   source_url: {source_url}
   source_files:
-    video: {tailscale_base}/knowledge-base/videos/{slug}.mp4
-    transcript: {tailscale_base}/knowledge-base/transcripts/{slug}.json
+    video: {tailscale_base}/{config.minio_bucket}/videos/{slug}.mp4
+    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{slug}.json
   confidence: plausible
   tags: [tdah, adhd, conference, sommet-tdah-2026]
 - Puis les sections dans l'ordre canonique du modèle (Métadonnées → … → Voir aussi).
