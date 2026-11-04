@@ -67,6 +67,10 @@ class Config:
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 5000
 
+    # ── Transcription ──
+    transcription_backend: str = "cpu"  # cpu | modal
+    modal_cli: str = "/root/modal/venv/bin/modal"
+
 
 def _env_or_default(raw_value, env_key: str, default, convert=None):
     """Merge env var into a config value — env takes priority."""
@@ -159,4 +163,9 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         # Webhook
         webhook_host=str(raw.get("webhook_host", "0.0.0.0")),
         webhook_port=int(_env_or_default(raw.get("webhook_port"), "KB_WEBHOOK_PORT", 5000)),
+        # Transcription
+        transcription_backend=str(
+            _env_or_default(raw.get("transcription_backend"), "KB_TRANSCRIPTION_BACKEND", "cpu")
+        ),
+        modal_cli=str(_env_or_default(raw.get("modal_cli"), "KB_MODAL_CLI", "/root/modal/venv/bin/modal")),
     )

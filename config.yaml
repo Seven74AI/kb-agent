@@ -48,3 +48,7 @@ firecrawl_url: http://localhost:3002/v2/scrape
 # Webhook
 webhook_host: 0.0.0.0
 webhook_port: 5000
+
+# Transcription (cpu = local pyannote + faster-whisper; modal = GPU on Modal A10)
+transcription_backend: cpu
+modal_cli: /root/modal/venv/bin/modal

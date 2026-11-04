@@ -15,6 +15,7 @@ Pitfalls handled:
 
 import json
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -28,6 +29,7 @@ from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_retry_loop, quality_gate_youtube
+from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -547,6 +549,14 @@ def step_threads_diarize(task: dict, config: Config) -> str:
     audio_8k = Path(config.temp_dir) / f"{safe_slug}_8k.wav"
     output_json = Path(config.temp_dir) / f"{safe_slug}_diarization.json"
 
+    if is_modal_backend(config):
+        audio_16k = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
+        if not audio_16k.exists():
+            raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
+        diar_modal, trans_modal = transcribe_modal(safe_slug, audio_16k, config)
+        install_modal_outputs(safe_slug, config, diar_modal, trans_modal)
+        return str(output_json)
+
     if not audio_8k.exists():
         raise FileNotFoundError(f"8kHz audio not found: {audio_8k}")
 
@@ -606,6 +616,14 @@ def step_threads_transcribe(task: dict, config: Config) -> str:
     safe_slug = _slug_path(slug)
     audio_16k = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
     output_json = Path(config.temp_dir) / f"{safe_slug}_transcript.json"
+
+    if is_modal_backend(config):
+        if not output_json.exists():
+            if not audio_16k.exists():
+                raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
+            _, trans_modal = transcribe_modal(safe_slug, audio_16k, config)
+            shutil.copy2(trans_modal, output_json)
+        return str(output_json)
 
     if not audio_16k.exists():
         raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
