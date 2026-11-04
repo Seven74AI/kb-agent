@@ -17,5 +17,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest pytest-asyncio pymupdf ebooklib beautifulsoup4
+      - name: Validate Cloudflare Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - run: |
+          terraform -chdir=infra/cloudflare init -backend=false
+          terraform -chdir=infra/cloudflare validate
       - name: Run tests
         run: pytest -q

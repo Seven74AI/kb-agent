@@ -1,0 +1,6 @@
+# One Cloudflare Access service token per consumer (revoke independently in Zero Trust).
+consumers:
+  cursor_cloud:
+    display_name: "KB MCP — Cursor Cloud"
+  mac_local:
+    display_name: "KB MCP — Mac (Cursor desktop)"
