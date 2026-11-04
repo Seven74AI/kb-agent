@@ -209,11 +209,84 @@ def test_poll_watch_source_no_duplicate_resubmit(core_config, agent_conn, monkey
         agent_conn, TDAH_PAGE, core_config,
         fetch_html=lambda url: SAMPLE_HTML_NEW, submit_fn=submit, now=now,
     )
+    # Force a second poll past cadence so the "not_due" gate cannot be what
+    # suppresses the resubmit — dedup via last_seen_json must be what does.
+    later = now + timedelta(days=1)
     poll_watch_source(
         agent_conn, TDAH_PAGE, core_config,
-        fetch_html=lambda url: SAMPLE_HTML_NEW, submit_fn=submit, now=now,
+        fetch_html=lambda url: SAMPLE_HTML_NEW, submit_fn=submit, now=later, force=True,
     )
     assert submit_count["n"] == 1
+
+
+@pytest.mark.parametrize("status", ["skipped", "paused"])
+def test_poll_watch_source_non_error_status_marks_seen(
+    core_config, agent_conn, monkeypatch, status
+):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    def non_error_submit(url, config, conn):
+        return {"status": status, "reason": "handled"}
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=non_error_submit,
+        now=now,
+    )
+    assert result["new_items"] == ["j3-panel"]
+    row = agent_conn.execute(
+        "SELECT last_seen_json FROM watch_sources WHERE page_url = ?",
+        (TDAH_PAGE,),
+    ).fetchone()
+    # Non-error outcome (skip/pause) marks the item seen — no retry next poll.
+    assert "j3-panel" in parse_last_seen(row["last_seen_json"])
+
+    later = now + timedelta(days=1)
+    result2 = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=non_error_submit,
+        now=later,
+        force=True,
+    )
+    assert result2["new_items"] == []
+
+
+def test_poll_watch_source_disabled_skips(core_config, agent_conn):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    agent_conn.execute(
+        "UPDATE watch_sources SET enabled = 0 WHERE page_url = ?",
+        (TDAH_PAGE,),
+    )
+    agent_conn.commit()
+
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        now=datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert result == {"page_url": TDAH_PAGE, "skipped": True, "reason": "disabled"}
 
 
 def test_poll_all_due_sources_skips_not_due(core_config, agent_conn, monkeypatch):

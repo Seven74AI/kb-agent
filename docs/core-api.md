@@ -19,6 +19,7 @@ Pure domain layer for kb-agent (`core/` package). Adapters:
 | `core/pipelines.py` | (internal) | Content-type → ordered pipeline step names |
 | `core/util.py` | (internal) | `slugify` |
 | `core/types.py` | — | Dataclasses / enums returned to adapters |
+| `core/watch_source.py` | — | Register/list/poll recurring page watches; diff + auto-submit |
 
 Bulk tools (`ingest_playlist`, `bulk_import`) will compose `submit_url` in later tickets.
 
