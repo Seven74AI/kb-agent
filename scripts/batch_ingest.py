@@ -4,8 +4,8 @@
 Reads the durable ingest_queue (status='queued'):
 - Non-video (web/books/substack/...) -> full pipeline task (submit_url).
 - Video -> runs each pipeline's download-phase steps, then ONE batch Modal
-  transcription run (scripts/batch_transcribe.py), uploads video + transcript
-  to MinIO, and dispatches a synthesize-only task.
+  transcription run per content type (scripts/batch_transcribe.py), uploads
+  video + transcript to MinIO, and dispatches a synthesize-only task.
 
 Runs as a --no-agent cron. Idempotent: a link is marked 'dispatched' only after
 its task is created; a crash re-runs cleanly next night.
@@ -37,6 +37,22 @@ VIDEO_DOWNLOAD_STEPS = {
 }
 
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
+
+# content_type -> extra batch_transcribe.py args (language + domain context).
+# bunny_stream is the French TDAH summit; other types auto-detect language.
+TRANSCRIBE_ARGS = {
+    "bunny_stream": [
+        "--language", "fr",
+        "--initial-prompt",
+        "Conférence en français sur le TDAH (trouble du déficit de l'attention avec ou sans "
+        "hyperactivité) chez l'adulte : diagnostic, dopamine, neurodéveloppement, hormones, sommeil.",
+        "--hotwords",
+        "TDAH,TDA,hyperactivité,impulsivité,inattention,neurodéveloppement,neuroatypie,"
+        "neurodivergence,dopamine,noradrénaline,méthylphénidate,Ritaline,diagnostic,comorbidité,"
+        "autisme,TSA,HPI,psychiatre,psychologue,neuropsychologie,attention,concentration,"
+        "sommeil,procrastination,hormones,œstrogène,progestérone,ménopause,émotions",
+    ],
+}
 
 
 def _download_video(q: dict, config) -> Path | None:
@@ -72,52 +88,56 @@ def _download_video(q: dict, config) -> Path | None:
 
 
 def _process_videos(video_links: list[dict], config, conn) -> None:
-    batch_dir = Path(config.temp_dir) / "batch_videos"
-    out_dir = Path(config.temp_dir) / "batch_out"
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base = Path(config.temp_dir)
 
-    # 1. download all videos (per-type download steps)
-    staged = []
+    # 1. download all videos, staged per content type
+    staged: dict[str, list[tuple[dict, Path]]] = {}
     for q in video_links:
         vp = _download_video(q, config)
         if vp is None:
             continue
-        dest = batch_dir / f"{q['slug']}{vp.suffix.lower()}"
+        ctype = q["content_type"]
+        bdir = base / "batch_videos" / ctype
+        bdir.mkdir(parents=True, exist_ok=True)
+        dest = bdir / f"{q['slug']}{vp.suffix.lower()}"
         shutil.copy(vp, dest)
-        staged.append((q, dest))
+        staged.setdefault(ctype, []).append((q, dest))
 
     if not staged:
         print("No videos downloaded; nothing to transcribe.")
         return
 
-    print(f"Batch-transcribing {len(staged)} video(s) in one Modal run...")
-    # 2. ONE batch Modal transcription
-    r = subprocess.run(
-        [sys.executable, "/root/kb-agent/scripts/batch_transcribe.py",
-         str(batch_dir), "--out-dir", str(out_dir)],
-        capture_output=True, text=True, timeout=7200,
-    )
-    print((r.stdout or r.stderr)[-1500:])
-
-    # 3. upload video + transcript, then dispatch synthesize-only
-    for q, vdest in staged:
-        merged = out_dir / f"{q['slug']}.json"
-        if not merged.exists():
-            print(f"  [warn] {q['slug']}: no merged transcript; leaving queued")
-            continue
-        try:
-            upload_file_to_minio(vdest, f"{config.minio_bucket}/videos/{q['slug']}{vdest.suffix.lower()}")
-            upload_file_to_minio(merged, f"{config.minio_bucket}/transcripts/{q['slug']}.json")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  [warn] {q['slug']}: upload failed ({exc}); leaving queued")
-            continue
-        rr = dispatch_synthesize(
-            q["url"], config, conn,
-            content_type=f"{q['content_type']}_synthesize", slug=q["slug"],
+    # 2. one Modal run per content type (per-type language/hotwords)
+    for ctype, items in staged.items():
+        bdir = base / "batch_videos" / ctype
+        out_dir = base / "batch_out" / ctype
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Batch-transcribing {len(items)} {ctype} video(s) in one Modal run...")
+        r = subprocess.run(
+            [sys.executable, "/root/kb-agent/scripts/batch_transcribe.py",
+             str(bdir), "--out-dir", str(out_dir)] + TRANSCRIBE_ARGS.get(ctype, []),
+            capture_output=True, text=True, timeout=7200,
         )
-        update_ingest_status(conn, q["id"], "dispatched")
-        print(f"  [dispatch] {q['slug']} -> {rr.get('task_id', rr.get('status'))}")
+        print((r.stdout or r.stderr)[-1500:])
+
+        # 3. upload video + transcript, then dispatch synthesize-only
+        for q, vdest in items:
+            merged = out_dir / f"{q['slug']}.json"
+            if not merged.exists():
+                print(f"  [warn] {q['slug']}: no merged transcript; leaving queued")
+                continue
+            try:
+                upload_file_to_minio(vdest, f"{config.minio_bucket}/videos/{q['slug']}{vdest.suffix.lower()}")
+                upload_file_to_minio(merged, f"{config.minio_bucket}/transcripts/{q['slug']}.json")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  [warn] {q['slug']}: upload failed ({exc}); leaving queued")
+                continue
+            rr = dispatch_synthesize(
+                q["url"], config, conn,
+                content_type=f"{q['content_type']}_synthesize", slug=q["slug"],
+            )
+            update_ingest_status(conn, q["id"], "dispatched")
+            print(f"  [dispatch] {q['slug']} -> {rr.get('task_id', rr.get('status'))}")
 
 
 def main() -> None:

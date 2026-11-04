@@ -114,12 +114,13 @@ class Consumer:
                 "cron polling via scripts/watch_sources_poll.py is assumed"
             )
             return None
-        from agent.core.watch_source import default_fetch_html, run_watch_scheduler
+        from agent.core.watch_source import default_fetch_html, run_watch_scheduler, submit_routed
 
         return asyncio.create_task(
             run_watch_scheduler(
                 self.config,
                 fetch_html=default_fetch_html,
+                submit_fn=submit_routed,
                 stopping=lambda: self._stopping,
             ),
             name="watch-source-scheduler",

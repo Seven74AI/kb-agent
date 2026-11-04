@@ -286,6 +286,26 @@ def default_fetch_html(url: str) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
+VIDEO_CONTENT_TYPES = {"youtube", "bunny_stream", "instagram_reel", "threads_video"}
+
+
+def submit_routed(url: str, config: Config, conn: sqlite3.Connection) -> dict:
+    """Submit a watch-discovered URL: video → deferred ingest, else immediate.
+
+    Video types go through ``submit_ingest`` so the nightly batch collector
+    downloads + batch-transcribes them (one Modal per type) instead of paying a
+    Modal cold-start per video. Non-video types submit immediately.
+    """
+    from agent.core.submit import submit_ingest, submit_url
+    from agent.detection import detect_content_subtype, detect_platform
+
+    platform = detect_platform(url)
+    subtype = detect_content_subtype(url, platform)
+    if subtype in VIDEO_CONTENT_TYPES:
+        return submit_ingest(url, config, conn, content_type=subtype)
+    return submit_url(url, config, conn)
+
+
 def _poll_due_sources_in_thread(
     config: Config,
     fetch_html: FetchHtml,
