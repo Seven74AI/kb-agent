@@ -29,15 +29,22 @@ def append_note_tags(note_path: Path, tags) -> None:
     text = note_path.read_text(encoding="utf-8")
 
     def _merge(match: re.Match) -> str:
-        inner = match.group(1).strip()
+        indent = match.group(1)
+        inner = match.group(2).strip()
         existing = [t.strip() for t in inner.split(",") if t.strip()]
         merged: list[str] = []
         for t in existing + tags:
             if t and t not in merged:
                 merged.append(t)
-        return f"tags: [{', '.join(merged)}]"
+        return f"{indent}tags: [{', '.join(merged)}]"
 
-    new_text = re.sub(r"^tags:\s*\[([^\]]*)\]", _merge, text, count=1, flags=re.MULTILINE)
+    new_text = re.sub(r"^([ \t]*)tags:\s*\[([^\]]*)\]", _merge, text, count=1, flags=re.MULTILINE)
+    if new_text != text:
+        note_path.write_text(new_text, encoding="utf-8")
+        return
+
+    # No tags: line — insert one right after the opening frontmatter fence.
+    new_text = re.sub(r"(^---\s*\n)", r"\1" + f"tags: [{', '.join(tags)}]\n", text, count=1)
     if new_text != text:
         note_path.write_text(new_text, encoding="utf-8")
 
@@ -62,10 +69,25 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
             "mp4": "video",
             "mp3": "audio",
             "m4a": "audio",
-        }.get(suffix, suffix)
+            "txt": "text",
+            "md": "raw",
+            "epub": "epub",
+            "pdf": "pdf",
+        }.get(suffix, "raw")
         lines.append(f"  {kind}: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/{u}")
     block = "\n".join(lines)
-    new = re.sub(r"source_files:.*?(?=\n\w|\Z)", block, content, count=1, flags=re.DOTALL)
+    new = re.sub(
+        r"source_files:.*?(?=\n---|\n[a-zA-Z_]+:|\Z)",
+        block, content, count=1, flags=re.DOTALL,
+    )
+    if new != content:
+        note_path.write_text(new, encoding="utf-8")
+        return
+
+    # No source_files: line — insert after source_url: (or the opening fence).
+    new = re.sub(r"(^[ \t]*source_url:.*\n)", r"\1" + block + "\n", content, count=1)
+    if new == content:
+        new = re.sub(r"(^---\s*\n)", r"\1" + block + "\n", content, count=1)
     if new != content:
         note_path.write_text(new, encoding="utf-8")
 
@@ -130,7 +152,7 @@ def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str
             step_name="minio_upload",
         )
 
-    tailscale_url = f"http://vmi3304846.tail5c02a1.ts.net:9000/{dest}"
+    tailscale_url = f"{MINIO_TAILSCALE_BASE}/{dest}"
     return tailscale_url
 
 
