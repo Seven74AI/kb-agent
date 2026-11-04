@@ -17,9 +17,11 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from agent.config import DEFAULT_VAULT_PATH
+
 # ── Configuration ───────────────────────────────────────────────────────────────
 KB_AGENT_DIR = Path("/root/kb-agent")
-VAULT_PATH = Path("/root/kb-agent-vault")
+VAULT_PATH = DEFAULT_VAULT_PATH
 COOKIE_SRC = Path("/root/.hermes/cookies")
 COOKIE_DST = KB_AGENT_DIR / "cookies"
 AGENT_DB = KB_AGENT_DIR / "data" / "agent.db"
