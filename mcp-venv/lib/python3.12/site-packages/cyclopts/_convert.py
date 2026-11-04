@@ -1,0 +1,1584 @@
+import collections.abc
+import inspect
+import operator
+import re
+import sys
+import typing
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import date, datetime, timedelta
+from enum import Enum, Flag
+from functools import partial, reduce
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+)
+
+from cyclopts.annotations import (
+    ITERABLE_TYPES,
+    NoneType,
+    get_annotated_discriminator,
+    get_hint_name,
+    is_annotated,
+    is_enum_flag,
+    is_nonetype,
+    is_union,
+    resolve,
+    resolve_new_type,
+    resolve_optional,
+)
+from cyclopts.exceptions import CoercionError, CycloptsError, ValidationError
+from cyclopts.field_info import FieldInfo, get_field_infos, is_structured_type
+from cyclopts.utils import UNSET, default_name_transform, grouper, is_builtin, is_class_and_subclass
+
+if sys.version_info >= (3, 12):  # pragma: no cover
+    from typing import TypeAliasType
+else:  # pragma: no cover
+    TypeAliasType = None
+
+if TYPE_CHECKING:
+    import json
+
+    from cyclopts.argument import Token
+
+
+T = TypeVar("T")
+E = TypeVar("E", bound=Enum)
+F = TypeVar("F", bound=Flag)
+
+# Mapping from bare concrete types to their default parameterized versions.
+# Used when type parameters are not specified (e.g., bare `list` becomes `list[str]`).
+# Types a config/JSON ``null`` converts into as ``None``.
+_NULLABLE_TYPES: tuple[Any, ...] = (NoneType, Any)
+
+_implicit_iterable_type_mapping: dict[type, type] = {
+    frozenset: frozenset[str],
+    list: list[str],
+    set: set[str],
+    tuple: tuple[str, ...],
+    dict: dict[str, str],
+}
+
+# Mapping from abstract collection types to their concrete implementations.
+# Used to convert abstract types like collections.abc.Set to concrete types like set.
+# ``Iterator``/``Generator`` are intentionally absent: ``list`` is not a valid
+# instance of either, so there is no concrete stand-in that satisfies the hint.
+_abstract_to_concrete_type_mapping: dict[type, type] = {
+    Iterable: list,
+    typing.Sequence: list,
+    Sequence: list,
+    collections.abc.Set: set,
+    collections.abc.MutableSet: set,
+    collections.abc.MutableSequence: list,
+    collections.abc.Collection: list,
+    collections.abc.Reversible: list,
+    collections.abc.Mapping: dict,
+    collections.abc.MutableMapping: dict,
+}
+
+NestedCliArgs = dict[str, Union[Sequence[str], "NestedCliArgs"]]
+
+
+def create_empty_instance(hint: Any) -> Any:
+    """Create an empty instance of ``hint``'s container type.
+
+    Abstract collections (e.g. ``collections.abc.Sequence[int]``) cannot be
+    instantiated, so they are first normalized to the same concrete type that
+    :func:`convert` would produce (e.g. ``list``).
+    """
+    type_ = get_origin(hint) or hint
+    if type_ in _abstract_to_concrete_type_mapping:
+        type_ = _abstract_to_concrete_type_mapping[type_]
+    return type_()
+
+
+def _bool(s: str) -> bool:
+    s = s.lower()
+    if s in {"no", "n", "0", "false", "f"}:
+        return False
+    elif s in {"yes", "y", "1", "true", "t"}:
+        return True
+    else:
+        # Cyclopts is a little bit conservative when coercing strings into boolean.
+        raise CoercionError(target_type=bool)
+
+
+def _none(s: str) -> None:
+    """Convert 'none' or 'null' strings (case-insensitive) to None."""
+    if s.lower() in {"none", "null"}:
+        return None
+    raise CoercionError(target_type=NoneType)
+
+
+def _int(s: str) -> int:
+    s = s.lower()
+    # Detect the base prefix past an optional leading sign; ``int(s, base)``
+    # handles the sign itself, so negative/explicitly-positive values like
+    # "-0xff" parse the same way "-255" already does.
+    unsigned = s[1:] if s[:1] in ("+", "-") else s
+    if unsigned.startswith("0x"):
+        return int(s, 16)
+    elif unsigned.startswith("0o"):
+        return int(s, 8)
+    elif unsigned.startswith("0b"):
+        return int(s, 2)
+    elif "." in s:
+        # Casting to a float first allows for things like "30.0"
+        # We handle this conditionally because very large integers can lose
+        # meaningful precision when cast to a float.
+        return int(round(float(s)))
+    else:
+        return int(s)
+
+
+def _bytes(s: str) -> bytes:
+    return bytes(s, encoding="utf8")
+
+
+def _bytearray(s: str) -> bytearray:
+    return bytearray(_bytes(s))
+
+
+def _date(s: str) -> date:
+    """Parse a date string.
+
+    Returns
+    -------
+    datetime.date
+    """
+    return date.fromisoformat(s)
+
+
+def _datetime(s: str) -> datetime:
+    """Parse a datetime string.
+
+    Returns
+    -------
+    datetime.datetime
+    """
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        # fromisoformat() rejects surrounding whitespace; strip it and normalize the
+        # date/time separator to 'T' before retrying.
+        return datetime.fromisoformat(s.strip().replace(" ", "T", 1))
+
+
+def _timedelta(s: str) -> timedelta:
+    """Parse a timedelta string."""
+    s = s.strip()
+    negative = False
+    if s.startswith("-"):
+        negative = True
+        s = s[1:]
+
+    matches = re.findall(r"((\d+\.\d+|\d+)([smhdwMy]))", s)
+
+    # Every character must belong to a "<number><unit>" token. Without this
+    # check, ``re.findall`` silently ignores stray characters, so a malformed
+    # duration like "5sfoo" would be accepted as 5s instead of raising.
+    if not matches or "".join(match[0] for match in matches) != s:
+        raise ValueError(f"Could not parse duration string: {s}")
+
+    seconds = 0
+    for _, value, unit in matches:
+        value = float(value)
+        if unit == "s":
+            seconds += value
+        elif unit == "m":
+            seconds += value * 60
+        elif unit == "h":
+            seconds += value * 3600
+        elif unit == "d":
+            seconds += value * 86400
+        elif unit == "w":
+            seconds += value * 604800
+        elif unit == "M":
+            # Approximation: 1 month = 30 days
+            seconds += value * 2592000
+        elif unit == "y":
+            # Approximation: 1 year = 365 days
+            seconds += value * 31536000
+
+    if negative:
+        seconds = -seconds
+    return timedelta(seconds=seconds)
+
+
+def _slice(s: str) -> slice:
+    """Parse a string in slice notation.
+
+    Examples: ``0:3``, ``:10``, ``0:100:5``, ``-10:``. Empty fields map to :obj:`None`.
+
+    Returns
+    -------
+    slice
+    """
+    parts = s.split(":")
+    if 2 <= len(parts) <= 3:
+        try:
+            return slice(*(int(part) if part.strip() else None for part in parts))
+        except ValueError:
+            pass
+    raise CoercionError(
+        target_type=slice,
+        msg=f'Unable to interpret "{s}" as a slice; expected "start:stop" or "start:stop:step" with integer or empty fields (e.g. "0:3", ":10", "0:100:5").',
+    )
+
+
+def get_enum_member(
+    type_: type[E],
+    token: Union["Token", str],
+    name_transform: Callable[[str], str],
+) -> E:
+    """Match a token's value to an enum's member.
+
+    Applies ``name_transform`` to both the value and the member.
+    """
+    from cyclopts.argument import Token
+
+    is_token = isinstance(token, Token)
+    value = token.value if is_token else token
+    value_transformed = name_transform(value)
+    for name, member in type_.__members__.items():
+        if name_transform(name) == value_transformed:
+            return member
+    raise CoercionError(
+        token=token if is_token else None,
+        target_type=type_,
+    )
+
+
+def convert_enum_flag(
+    enum_type: type[F],
+    tokens: Iterable[str] | Iterable["Token"],
+    name_transform: Callable[[str], str],
+) -> F:
+    """Convert tokens to a Flag enum value.
+
+    Parameters
+    ----------
+    enum_type : type[F]
+        The Flag enum type to convert to.
+    tokens : Iterable[str] | Iterable[Token]
+        The tokens to convert. Can be member names or :class:`Token` objects.
+    name_transform : Callable[[str], str] | None
+        Function to transform names for comparison.
+
+    Returns
+    -------
+    F
+        The combined flag value.
+
+    Raises
+    ------
+    CoercionError
+        If a token is not a valid flag member.
+    """
+    return reduce(
+        operator.or_,
+        (get_enum_member(enum_type, token, name_transform) for token in tokens),
+        enum_type(0),
+    )
+
+
+# For types that need more logic than just invoking their type
+_converters: dict[Any, Callable] = {
+    bool: _bool,
+    int: _int,
+    bytes: _bytes,
+    bytearray: _bytearray,
+    date: _date,
+    datetime: _datetime,
+    timedelta: _timedelta,
+    NoneType: _none,
+    slice: _slice,
+}
+
+
+def _convert_tuple(
+    type_: type[Any],
+    *tokens: "Token",
+    converter: Callable[[type, str], Any] | None,
+    name_transform: Callable[[str], str],
+    name: str | None = None,
+) -> tuple:
+    convert = partial(_convert, converter=converter, name_transform=name_transform, name=name)
+    inner_types = tuple(x for x in get_args(type_) if x is not ...)
+    inner_token_count, consume_all = token_count(type_)
+    # Elements like boolean-flags will have an inner_token_count of 0.
+    inner_token_count = max(inner_token_count, 1)
+    if consume_all:
+        # variable-length tuple (list-like)
+        remainder = len(tokens) % inner_token_count
+        if remainder:
+            raise CoercionError(
+                msg=f"Incorrect number of arguments: expected multiple of {inner_token_count} but got {len(tokens)}."
+            )
+        if len(inner_types) == 1:
+            inner_type = inner_types[0]
+        elif len(inner_types) == 0:
+            inner_type = str
+        else:
+            raise ValueError("A tuple must have 0 or 1 inner-types.")
+
+        return tuple(
+            convert(inner_type, chunk[0] if inner_token_count == 1 else chunk)
+            for chunk in grouper(tokens, inner_token_count)
+        )
+    else:
+        # Fixed-length tuple
+        if inner_token_count != len(tokens):
+            raise CoercionError(
+                msg=f"Incorrect number of arguments: expected {inner_token_count} but got {len(tokens)}."
+            )
+        args_per_convert = [token_count(x)[0] for x in inner_types]
+        it = iter(tokens)
+        batched = [[next(it) for _ in range(size)] for size in args_per_convert]
+        batched = [elem[0] if len(elem) == 1 else elem for elem in batched]
+        out = tuple(convert(inner_type, arg) for inner_type, arg in zip(inner_types, batched, strict=False))
+    return out
+
+
+def _validate_json_extra_keys(
+    data: dict,
+    type_: type,
+    token: "Token | None" = None,
+) -> None:
+    """Validate that JSON data doesn't contain extra keys not in the type's fields.
+
+    Parameters
+    ----------
+    data : dict
+        The JSON dictionary to validate.
+    type_ : type
+        The target type (dataclass, etc.) to validate against.
+    token : Token | None
+        Optional token for error context.
+
+    Raises
+    ------
+    CoercionError
+        If the data contains keys not present in the type's fields.
+    """
+    members = get_args(type_) if is_union(type_) else (type_,)
+    if any(dict in (member, get_origin(member)) for member in members):
+        return
+    field_infos = {k: v for member in members for k, v in get_field_infos(member).items()}
+    # Collect all valid names including aliases (e.g., Pydantic camelCase aliases)
+    valid_names: set[str] = set()
+    for field_name, field_info in field_infos.items():
+        valid_names.add(field_name)
+        valid_names.update(field_info.names)
+    extra_keys = set(data.keys()) - valid_names
+    if extra_keys:
+        extra_key = sorted(extra_keys)[0]  # Report first extra key alphabetically for determinism
+        valid_fields = ", ".join(sorted(field_infos.keys()))
+        raise CoercionError(
+            msg=f'Unknown field "{extra_key}" in JSON for {get_hint_name(type_)}. Valid fields: {valid_fields}',
+            target_type=type_,
+            token=token,
+        )
+
+
+def _convert_json_dict(type_: Any, token: "Token", name_transform: Callable[[str], str], name: str | None = None):
+    """Convert a JSON-object token into ``type_`` via the Argument machinery.
+
+    Building a throwaway :class:`ArgumentCollection` for ``type_`` reuses the same
+    key-matching, alias handling, nested-collection expansion, and pydantic
+    validation that a top-level structured parameter gets, so a model bound from a
+    JSON token behaves identically to one bound from ``--key.subkey`` options.
+
+    Parameters
+    ----------
+    type_ : Type
+        The structured type to create.
+    token : Token
+        Token whose value is a JSON object.
+    name_transform : Callable[[str], str]
+        Function to transform field names.
+    name : str | None
+        Option name of the owning parameter, used in error messages when the token
+        did not come from the CLI (e.g. a config file or environment variable).
+
+    Returns
+    -------
+    Instance of type_.
+    """
+    from cyclopts.argument import ArgumentCollection
+    from cyclopts.group import Group
+    from cyclopts.parameter import Parameter
+
+    # Reuse the originating option name so nested error messages read ``--outer.field``.
+    display_name = token.keyword if token.keyword and token.keyword.startswith("-") else (name or "--json")
+    field_info = FieldInfo(
+        names=(display_name.lstrip("-"),), kind=FieldInfo.POSITIONAL_OR_KEYWORD, annotation=type_, required=True
+    )
+    collection = ArgumentCollection._from_type(
+        field_info,
+        (),
+        Parameter(name=display_name, name_transform=name_transform),
+        group_lookup={},
+        group_arguments=Group.create_default_arguments(),
+        group_parameters=Group.create_default_parameters(),
+        parse_docstring=False,
+        _resolve_groups=False,
+    )
+    argument = collection[0]
+    assert not argument.keys
+    argument.append(token.evolve(keys=()))
+    return argument.convert_and_validate()
+
+
+def _create_json_decode_error_message(
+    token: "Token",
+    type_: Any,
+    error: "json.JSONDecodeError",
+) -> str:
+    """Create a helpful error message for JSON decode errors.
+
+    Parameters
+    ----------
+    token : Token
+        The token containing the invalid JSON.
+    type_ : Type
+        The target type we were trying to convert to.
+    error : json.JSONDecodeError
+        The JSON decode error that occurred.
+
+    Returns
+    -------
+    str
+        A formatted error message with context and hints.
+    """
+    value_str = token.value.strip()
+
+    # Try to provide context around the error
+    error_pos = error.pos if hasattr(error, "pos") else error.colno - 1 if hasattr(error, "colno") else 0
+
+    # Create a snippet showing the error location
+    snippet_start = max(0, error_pos - 20)
+    snippet_end = min(len(value_str), error_pos + 20)
+    snippet = value_str[snippet_start:snippet_end]
+
+    # Add markers if we truncated
+    if snippet_start > 0:
+        snippet = "..." + snippet
+    if snippet_end < len(value_str):
+        snippet = snippet + "..."
+
+    # Calculate where the error marker should point
+    marker_pos = error_pos - snippet_start
+    if snippet_start > 0:
+        marker_pos += 3  # Account for "..."
+
+    # Common error patterns with helpful hints
+    hint = ""
+    if re.search(r"\bTrue\b", value_str):
+        hint = "\n    Hint: Use lowercase 'true' instead of Python's True"
+    elif re.search(r"\bFalse\b", value_str):
+        hint = "\n    Hint: Use lowercase 'false' instead of Python's False"
+    elif re.search(r"\bNone\b", value_str):
+        hint = "\n    Hint: Use 'null' instead of Python's None"
+    elif "'" in value_str:
+        hint = "\n    Hint: JSON requires double quotes, not single quotes"
+
+    return f"Invalid JSON for {type_.__name__}:\n    {snippet}\n    {' ' * marker_pos}^ {error.msg}{hint}"
+
+
+def instantiate_from_dict(type_: type[T], data: dict[str, Any]) -> T:
+    """Instantiate a type with proper handling of parameter kinds.
+
+    Respects POSITIONAL_ONLY, KEYWORD_ONLY, and POSITIONAL_OR_KEYWORD parameter kinds
+    when constructing the object.
+
+    This function is necessary because `inspect.signature().bind(**data)` has the same
+    limitation we're solving: it cannot accept positional-only parameters as keyword
+    arguments. For example, `def __init__(self, a, /, b)` requires `a` to be passed
+    positionally, but when we have a dict `{"a": 1, "b": 2}`, we need to transform
+    this into the call `type_(1, b=2)`.
+
+    Parameters
+    ----------
+    type_ : type[T]
+        The type to instantiate.
+    data : dict[str, Any]
+        Dictionary mapping field names to values.
+
+    Returns
+    -------
+    T
+        Instance of type_ constructed from data.
+    """
+    field_infos = get_field_infos(type_)
+    if not field_infos:
+        return type_(**data)
+
+    pos_args = []
+    kwargs = {}
+
+    for field_name, value in data.items():
+        field_info = field_infos.get(field_name)
+        if field_info and field_info.kind == FieldInfo.POSITIONAL_ONLY:
+            pos_args.append((field_name, value))
+        else:
+            kwargs[field_name] = value
+
+    # Sort positional args by their order in field_infos
+    field_names_order = list(field_infos.keys())
+    pos_args.sort(key=lambda x: field_names_order.index(x[0]))
+
+    return type_(*(v for _, v in pos_args), **kwargs)
+
+
+def _convert_structured_type(
+    type_: type[T],
+    token: Sequence["Token"],
+    field_infos: dict[str, "FieldInfo"],
+    convert: Callable,
+) -> T:
+    """Convert tokens to a structured type with proper positional/keyword argument handling.
+
+    Respects the parameter kind of each field:
+    - POSITIONAL_ONLY: passed as positional argument
+    - KEYWORD_ONLY or POSITIONAL_OR_KEYWORD: passed as keyword argument
+
+    This correctly handles types with keyword-only fields (e.g., dataclasses with kw_only=True).
+
+    Parameters
+    ----------
+    type_ : type[T]
+        The target structured type to instantiate.
+    token : Sequence[Token]
+        The tokens to convert.
+    field_infos : dict[str, FieldInfo]
+        Field information for the structured type.
+    convert : Callable
+        Conversion function for nested types.
+
+    Returns
+    -------
+    T
+        Instance of type_ constructed from the tokens.
+    """
+    i = 0
+    data = {}
+    hint = type_
+
+    for field_name, field_info in field_infos.items():
+        hint = field_info.hint
+
+        # Convert the token(s) for this field
+        if is_class_and_subclass(hint, str):  # Avoids infinite recursion
+            value = token[i].value
+            i += 1
+            should_break = False
+        else:
+            tokens_per_element, consume_all = token_count(hint)
+            if tokens_per_element == 1:
+                value = convert(hint, token[i])
+                i += 1
+            else:
+                value = convert(hint, token[i : i + tokens_per_element])
+                i += tokens_per_element
+            should_break = consume_all
+
+        data[field_name] = value
+
+        # Handle consume_all or end of tokens
+        if should_break:
+            break
+        if i == len(token):
+            break
+
+    assert i == len(token)
+    return instantiate_from_dict(type_, data)
+
+
+def _convert(
+    type_: Any,
+    token: Union["Token", Sequence["Token"]],
+    *,
+    converter: Callable[[Any, str], Any] | None,
+    name_transform: Callable[[str], str],
+    name: str | None = None,
+):
+    """Inner recursive conversion function for public ``convert``.
+
+    Parameters
+    ----------
+    converter: Callable
+    name_transform: Callable
+    """
+    from cyclopts.argument import Token
+    from cyclopts.parameter import Parameter
+
+    # The flag travels with the converter so recursive calls (e.g. through a preserved
+    # ``Optional``/``Union`` member) keep passing the full ``Token`` rather than ``token.value``.
+    converter_needs_token = getattr(converter, "_cyclopts_needs_token", False)
+    # A ``NewType`` is an identity function at runtime; convert to its underlying type instead.
+    # The top-level type is already resolved, but a nested one (e.g. ``list[UserId]``) is not.
+    type_ = resolve_new_type(type_)
+    if is_annotated(type_):
+        from cyclopts.parameter import Parameter
+
+        type_, cparam = Parameter.from_annotation(type_)
+        if cparam.converter:
+            converter_needs_token = True
+
+            def converter_with_token(t_, value):
+                assert cparam.converter
+
+                resolved_converter = cparam.resolve_converter(t_)
+                assert resolved_converter  # For pyright: cparam.converter is truthy, so this won't be None
+
+                # Detect bound methods (classmethods/instance methods)
+                # Bound methods already have their first parameter bound
+                if inspect.ismethod(resolved_converter):
+                    # Call with just tokens - cls/self already bound
+                    return resolved_converter((value,))
+                else:
+                    # Regular function - pass type and tokens
+                    return resolved_converter(t_, (value,))
+
+            converter_with_token._cyclopts_needs_token = True  # pyright: ignore[reportFunctionMemberAccess]
+            converter = converter_with_token
+
+        if cparam.name_transform:
+            name_transform = cparam.name_transform
+    else:
+        cparam = None
+
+    convert = partial(_convert, converter=converter, name_transform=name_transform, name=name)
+    convert_tuple = partial(_convert_tuple, converter=converter, name_transform=name_transform, name=name)
+
+    origin_type = get_origin(type_)
+    # Normalize abstract origin types to concrete types early
+    # (e.g., collections.abc.Set -> set) so we only check ITERABLE_TYPES later
+    if origin_type in _abstract_to_concrete_type_mapping:
+        origin_type = _abstract_to_concrete_type_mapping[origin_type]
+    # Inner types **may** be ``Annotated``
+    inner_types = get_args(type_)
+
+    if type_ is dict:
+        out = convert(dict[str, str], token)
+    elif type_ in _implicit_iterable_type_mapping:
+        out = convert(_implicit_iterable_type_mapping[type_], token)
+    elif type_ in _abstract_to_concrete_type_mapping:
+        # Bare abstract type (e.g., collections.abc.Set with no [T])
+        # Convert to default parameterized concrete type
+        concrete_type = _abstract_to_concrete_type_mapping[type_]
+        default_param = _implicit_iterable_type_mapping.get(concrete_type, concrete_type)
+        out = convert(default_param, token)
+    elif TypeAliasType is not None and isinstance(type_, TypeAliasType):
+        out = convert(type_.__value__, token)
+    elif is_union(origin_type):
+        value_member = _sole_value_member(inner_types)
+        value_member_error = None
+        for t in inner_types:
+            try:
+                # When token is a sequence (e.g., list of Token objects), we may need
+                # to unpack it for single-token types. Decide per-member based on that
+                # member's token_count, not globally.
+                if isinstance(token, Sequence) and len(token) == 1:
+                    tc, consume_all = token_count(t)
+                    if consume_all or tc > 1:
+                        # This type wants multiple tokens or all tokens - pass full list
+                        out = convert(t, token)
+                    else:
+                        # Single-token type - unpack the sequence
+                        out = convert(t, token[0])
+                else:
+                    out = convert(t, token)
+                break
+            except ValidationError:
+                # ValidationError means coercion succeeded but the value failed validation.
+                # Propagate immediately since the input matched this type's structure.
+                raise
+            except Exception as e:
+                if t is value_member:
+                    value_member_error = e
+        else:
+            # A union with a single value member (``T | None``, ``bool | T``) surfaces
+            # that member's specific error (e.g. a nested missing field) instead of a generic one.
+            if isinstance(value_member_error, CycloptsError):
+                raise value_member_error
+            if isinstance(token, Sequence):
+                raise ValueError  # noqa: TRY004
+            raise CoercionError(token=token, target_type=type_)
+    elif origin_type is Literal:
+        # Try coercing the token into each allowed Literal value (left-to-right).
+        last_coercion_error = None
+        for choice in get_args(type_):
+            try:
+                res = convert(type(choice), token)
+            except CoercionError as e:
+                last_coercion_error = e
+                continue
+            if res == choice:
+                out = res
+                break
+        else:
+            if last_coercion_error:
+                last_coercion_error.target_type = type_
+                raise last_coercion_error
+            else:
+                raise CoercionError(token=token[0] if isinstance(token, Sequence) else token, target_type=type_)
+    elif origin_type is tuple:
+        if isinstance(token, Token):
+            # E.g. Tuple[str] (Annotation: tuple containing a single string)
+            out = convert_tuple(type_, token, converter=converter)
+        else:
+            out = convert_tuple(type_, *token, converter=converter)
+    elif origin_type in ITERABLE_TYPES:
+        # NOT including tuple; handled in ``origin_type is tuple`` body above.
+        # Note: origin_type has already been normalized from abstract to concrete
+        inner_type = inner_types[0]
+        if not isinstance(token, Sequence):
+            raise ValueError
+
+        if is_union(inner_type):
+            # Dynamic per-element parsing for unions with potentially different token counts.
+            # This enables list[tuple[int, int] | str] where elements can consume different
+            # numbers of tokens based on successful conversion.
+            result = []
+            remaining = list(token)
+            while remaining:
+                # Get dynamic token count based on upcoming tokens
+                tc, consume_all = token_count(inner_type, upcoming_tokens=remaining)
+                tc = max(1, tc)
+
+                if consume_all:
+                    # Element type consumes all remaining tokens (e.g., nested list)
+                    element_tokens = remaining
+                    remaining = []
+                else:
+                    element_tokens = remaining[:tc]
+                    remaining = remaining[tc:]
+
+                # Convert expects single Token for tc=1, list for tc>1
+                converted = convert(inner_type, element_tokens[0] if len(element_tokens) == 1 else element_tokens)
+                result.append(converted)
+
+                if consume_all:
+                    break
+
+            out = origin_type(result)
+        else:
+            # Static parsing for non-union element types
+            count, _ = token_count(inner_type)
+            # Check if tokens are JSON strings - each token is a complete JSON object
+            if (
+                count > 1
+                and any(isinstance(t, Token) and t.value.strip().startswith("{") for t in token)
+                and inner_type is not str
+            ):
+                # Each token is a complete JSON representation of the element type
+                gen = token
+            elif count > 1:
+                gen = zip(*[iter(token)] * count, strict=False)
+            else:
+                gen = token
+            try:
+                out = origin_type(convert(inner_type, e) for e in gen)
+            except TypeError as e:
+                # Python 3.14 rewords this to "cannot use 'X' as a set element (unhashable type: 'X')".
+                if origin_type in (set, frozenset) and "unhashable type" in str(e):
+                    raise CoercionError(
+                        msg=f"{get_hint_name(type_)} requires hashable elements, but {get_hint_name(inner_type)} is not "
+                        "hashable. Use a list instead, or make the element type hashable (e.g. a frozen dataclass).",
+                        token=token[0] if token and isinstance(token[0], Token) else None,
+                        target_type=type_,
+                    ) from e
+                raise
+    elif is_class_and_subclass(type_, Flag):
+        # TODO: this might never execute since enum.Flag is now handled in ``convert``.
+        out = convert_enum_flag(type_, token if isinstance(token, Sequence) else [token], name_transform)
+    elif is_class_and_subclass(type_, Enum):
+        if isinstance(token, Sequence):
+            raise ValueError
+
+        if converter is None:
+            out = get_enum_member(type_, token, name_transform)
+        else:
+            out = converter(type_, token.value)
+    else:
+        if isinstance(token, Token) and token.implicit_value is None and type_ not in _NULLABLE_TYPES:
+            # e.g. a config file's ``null`` for an ``int`` or a dataclass.
+            raise CoercionError(token=token.evolve(value="null"), target_type=type_)
+        field_infos = get_field_infos(type_)
+        # Hope that if there is no field_info, that it takes `*args` and would be happy with a single ``str`` input.
+        # This is common for many types, such as libraries that try to mimic pathlib.Path interface.
+        # TODO: This doesn't respect the type-annotation of ``*args``.
+        if is_builtin(type_) or not field_infos:
+            assert isinstance(token, Token)
+            try:
+                if token.implicit_value is not UNSET:
+                    out = token.implicit_value
+                elif converter is None:
+                    out = _converters.get(type_, type_)(token.value)  # pyright: ignore[reportOptionalCall]
+                elif converter_needs_token:
+                    out = converter(type_, token)  # pyright: ignore[reportArgumentType]
+                else:
+                    out = converter(type_, token.value)
+            except CoercionError as e:
+                if e.target_type is None:
+                    e.target_type = type_
+                if e.token is None:
+                    e.token = token
+                raise
+            except ValueError:
+                raise CoercionError(token=token, target_type=type_) from None
+        else:
+            # Convert it into a user-supplied class.
+            # A type whose fields consume all tokens (e.g. a sole ``list`` field) arrives as a
+            # one-element sequence; unwrap it so a JSON-object token is still recognized.
+            if isinstance(token, Sequence) and len(token) == 1 and isinstance(token[0], Token):
+                token = token[0]
+            if isinstance(token, Token) and token.value.strip().startswith("{") and type_ is not str:
+                import json
+
+                try:
+                    data = json.loads(token.value)
+                except json.JSONDecodeError as e:
+                    msg = _create_json_decode_error_message(token, type_, e)
+                    raise CoercionError(msg=msg, token=token, target_type=type_) from e
+                assert isinstance(data, dict)
+                out = _convert_json_dict(type_, token, name_transform, name)
+            else:
+                # Standard positional argument parsing
+                if not isinstance(token, Sequence):
+                    token = [token]
+                out = _convert_structured_type(type_, token, field_infos, convert)
+
+    if cparam:
+        # An inner type may have an independent Parameter annotation;
+        # e.g.:
+        #    Uint8 = Annotated[int, ...]
+        #    rgb: tuple[Uint8, Uint8, Uint8]
+        try:
+            for validator in cparam.validator:  # pyright: ignore
+                if isinstance(validator, str):
+                    validator = getattr(type_, validator)
+                if inspect.ismethod(validator):
+                    validator(out)
+                else:
+                    validator(type_, out)
+        except (AssertionError, ValueError, TypeError) as e:
+            raise ValidationError(exception_message=e.args[0] if e.args else "", value=out) from e
+
+    return out
+
+
+def convert(
+    type_: Any,
+    tokens: Sequence[str] | Sequence["Token"] | NestedCliArgs,
+    converter: Callable[[type, str], Any] | None = None,
+    name_transform: Callable[[str], str] | None = None,
+):
+    """Coerce variables into a specified type.
+
+    Internally used to coercing string CLI tokens into python builtin types.
+    Externally, may be useful in a custom converter.
+    See Cyclopt's automatic coercion rules :doc:`/rules`.
+
+    If ``type_`` **is not** iterable, then each element of ``tokens`` will be converted independently.
+    If there is more than one element, then the return type will be a ``Tuple[type_, ...]``.
+    If there is a single element, then the return type will be ``type_``.
+
+    If ``type_`` **is** iterable, then all elements of ``tokens`` will be collated.
+
+    Parameters
+    ----------
+    type_: Type
+        A type hint/annotation to coerce ``*args`` into.
+    tokens: Union[Sequence[str], NestedCliArgs]
+        String tokens to coerce.
+        Generally, either a list of strings, or a dictionary of list of strings (recursive).
+        Each leaf in the dictionary tree should be a list of strings.
+    converter: Optional[Callable[[Type, str], Any]]
+        An optional function to convert tokens to the inner-most types.
+        The converter should have signature:
+
+        .. code-block:: python
+
+            def converter(type_: type, value: str) -> Any:
+                "Perform conversion of string token."
+
+        This allows to use the :func:`convert` function to handle the the difficult task
+        of traversing lists/tuples/unions/etc, while leaving the final conversion logic to
+        the caller.
+    name_transform: Optional[Callable[[str], str]]
+        Currently only used for ``Enum`` type hints.
+        A function that transforms enum names and CLI values into a normalized format.
+
+        The function should have signature:
+
+        .. code-block:: python
+
+            def name_transform(s: str) -> str:
+                "Perform name transform."
+
+        where the returned value is the name to be used on the CLI.
+
+        If ``None``, defaults to ``cyclopts.default_name_transform``.
+
+    Returns
+    -------
+    Any
+        Coerced version of input ``*args``.
+    """
+    return _convert_entry(type_, tokens, converter, name_transform)
+
+
+def _convert_empty_container(type_: Any, token: "Token", convert: Callable, convert_tuple: Callable) -> Any:
+    """Convert an empty container from a config file, e.g. ``x = []`` or ``x = {k = {}}``.
+
+    ``{}`` for a class (or an iterable of them) builds an all-defaults instance. For a union, the
+    first member that can hold the container wins.
+    """
+    value = token.implicit_value
+    annotations = get_args(type_)[1:] if is_annotated(type_) else ()
+    resolved = resolve(type_, optional=False)
+    if resolved is Any:
+        return convert(type_, token)
+    if is_union(resolved):
+        value_member = _sole_value_member(get_args(resolved))
+        for member in get_args(resolved):
+            try:
+                return _convert_empty_container(
+                    Annotated[(member, *annotations)] if annotations else member, token, convert, convert_tuple
+                )
+            except ValidationError:
+                raise
+            except Exception as e:
+                # Like ``_convert``'s union probing: a lone value member's error (e.g. a missing field) is the useful one.
+                if member is value_member and isinstance(e, CycloptsError):
+                    raise
+    else:
+        origin = get_origin(resolved) or resolved
+        origin = _abstract_to_concrete_type_mapping.get(origin, origin)
+        is_iterable = origin in ITERABLE_TYPES
+        if isinstance(value, dict) and origin is dict:
+            return _apply_validators(type_, {})
+        if isinstance(value, list) and is_iterable:
+            # These shortcuts bypass ``convert``; apply the type's own validators.
+            return _apply_validators(type_, convert_tuple(resolved) if origin is tuple else origin())
+        element = next(iter(get_args(resolved)), str) if is_iterable else resolved
+        if isinstance(value, dict) and is_structured_type(element):
+            text = token.evolve(value="{}", implicit_value=UNSET)
+            return convert(type_, (text,) if is_iterable else text)
+    # Converted as text, ``[]``/``{}`` would bind into a ``str`` (or a class's first ``str`` field).
+    raise CoercionError(token=token.evolve(value="{}" if isinstance(value, dict) else "[]"), target_type=resolved)
+
+
+def _lone_token(tokens: Sequence[str] | Sequence["Token"] | NestedCliArgs) -> "Token | None":
+    """The only token of an unkeyed token sequence, e.g. from a config file's ``x = null`` or ``x = []``."""
+    from cyclopts.argument import Token
+
+    if not isinstance(tokens, dict) and len(tokens) == 1 and isinstance(tokens[0], Token):
+        return tokens[0]
+    return None
+
+
+def _json_object_tokens(token: "Token", type_: Any, value_type: Any) -> dict[str, Any]:
+    """Split a JSON-object token for a ``dict[...]`` type into per-key tokens, like a config file's."""
+    import json
+
+    try:
+        data = json.loads(token.value)
+    except json.JSONDecodeError as e:
+        raise CoercionError(token=token, target_type=type_, msg=str(e)) from e
+    if not isinstance(data, dict):
+        raise CoercionError(token=token, target_type=type_)
+
+    def to_token(key: str, index: int, value: Any) -> "Token":
+        child = token.evolve(keys=(*token.keys, key), index=index)
+        if token.keyword and token.keyword.startswith("-"):
+            child = child.evolve(keyword=f"{token.keyword}.{key}")
+        if value is None or (isinstance(value, dict | list) and not value):
+            return child.evolve(value="", implicit_value=value)
+        return child.evolve(value=value if isinstance(value, str) else json.dumps(value))
+
+    for key, value in data.items():
+        if value and (
+            (isinstance(value, list) and takes_scalar(value_type))
+            or (isinstance(value, dict) and takes_scalar(value_type) and not _takes_mapping(value_type))
+        ):
+            raise CoercionError(token=to_token(key, 0, value), target_type=value_type)
+
+    return {
+        key: [to_token(key, i, v) for i, v in enumerate(value)]
+        if isinstance(value, list) and value
+        else [to_token(key, 0, value)]
+        for key, value in data.items()
+    }
+
+
+def _takes_mapping(hint: Any) -> bool:
+    """Whether ``hint`` (or a union member) takes a mapping, e.g. a ``dict``, a dataclass or ``Any``."""
+    hint = resolve(hint)
+    if is_union(hint):
+        return any(_takes_mapping(member) for member in get_args(hint))
+    return hint is Any or is_structured_type(hint) or is_class_and_subclass(get_origin(hint) or hint, Mapping)
+
+
+def _call_value_converter(cparam: Any, type_: Any, tokens: Any) -> Any:
+    """Invoke a type's own ``Parameter`` converter over the value's tokens.
+
+    Mirrors how :class:`.Argument` invokes a parameter-level converter:
+    bound methods receive only the tokens; other callables receive ``(type, tokens)``.
+    """
+    resolved_converter = cparam.resolve_converter(type_)
+    assert resolved_converter is not None  # Caller checked that a converter is set.
+    if inspect.ismethod(resolved_converter):
+        return resolved_converter(tokens)
+    return resolved_converter(type_, tokens)
+
+
+def _apply_validators(type_: Any, value: Any) -> Any:
+    """Run the ``Parameter`` validators annotated on ``type_`` against an already-converted ``value``.
+
+    Some conversion paths in :func:`_convert_entry` (dictionary values, empty containers)
+    do not pass through :func:`_convert`, so they must apply a type's own validators
+    themselves; this mirrors the validator handling at the end of :func:`_convert`.
+    """
+    from cyclopts.parameter import Parameter
+
+    bare_type, cparam = Parameter.from_annotation(type_)
+    try:
+        for validator in cparam.validator:  # pyright: ignore
+            if isinstance(validator, str):
+                validator = getattr(bare_type, validator)
+            if inspect.ismethod(validator):
+                validator(value)
+            else:
+                validator(bare_type, value)
+    except (AssertionError, ValueError, TypeError) as e:
+        raise ValidationError(exception_message=e.args[0] if e.args else "", value=value) from e
+    return value
+
+
+def _convert_entry(
+    type_: Any,
+    tokens: Sequence[str] | Sequence["Token"] | NestedCliArgs,
+    converter: Callable[[type, str], Any] | None = None,
+    name_transform: Callable[[str], str] | None = None,
+    name: str | None = None,
+    *,
+    json_dict: bool = True,
+):
+    """:func:`convert`, plus ``name``: the owning parameter's name for errors inside JSON values.
+
+    ``json_dict=False`` (from :attr:`.Parameter.json_dict`) doesn't parse a JSON object for a ``dict``.
+    """
+    from cyclopts.argument import Token
+
+    if not tokens:
+        raise ValueError
+
+    if not isinstance(tokens, dict) and isinstance(tokens[0], str):
+        tokens = tuple(Token(value=str(x)) for x in tokens)
+
+    if name_transform is None:
+        name_transform = default_name_transform
+
+    convert_priv = partial(_convert, converter=converter, name_transform=name_transform, name=name)
+    convert_tuple = partial(_convert_tuple, converter=converter, name_transform=name_transform, name=name)
+
+    lone = _lone_token(tokens)
+    if lone and isinstance(lone.implicit_value, dict | list) and not lone.implicit_value:
+        return _convert_empty_container(type_, lone, convert_priv, convert_tuple)
+
+    # ``_convert`` applies a type's own ``Parameter`` metadata (converter/validator), but
+    # ``resolve`` discards it. Stash the metadata so it can be re-attached to the
+    # *normalized* type for the scalar dispatch below; this is what lets a container's
+    # value type carry its own ``Parameter``, e.g. ``dict[str, PositiveInt]``.
+    annotations_ = get_args(type_)[1:] if is_annotated(type_) else ()
+    type_ = resolve(type_, optional=False)
+
+    if type_ is Any:
+        if lone and lone.implicit_value is None:
+            # ``Any`` admits a config ``null``; anything else converts like ``str``.
+            return convert_priv(Annotated[(Any, *annotations_)] if annotations_ else Any, lone)
+        type_ = str
+
+    untyped = not get_args(type_)  # A bare ``dict`` takes any value, though it converts like ``dict[str, str]``.
+    type_ = _implicit_iterable_type_mapping.get(type_, type_)
+
+    # Handle bare abstract types (e.g., collections.abc.Set without [T])
+    # Convert to their default parameterized concrete versions
+    if type_ in _abstract_to_concrete_type_mapping:
+        concrete_type = _abstract_to_concrete_type_mapping[type_]
+        type_ = _implicit_iterable_type_mapping.get(concrete_type, concrete_type)
+
+    origin_type = get_origin(type_)
+    # Normalize abstract origin types to concrete types early
+    if origin_type in _abstract_to_concrete_type_mapping:
+        origin_type = _abstract_to_concrete_type_mapping[origin_type]
+
+    # For dispatch purposes, resolve Optional-like Unions (T | None) to T.
+    # This allows the if/elif chain below to handle the token sequence correctly
+    # (e.g., unpacking single tokens), while _convert handles the union iteration.
+    dispatch_type = type_
+    dispatch_origin = origin_type or type_
+
+    if is_union(origin_type):
+        resolved = resolve_optional(type_)
+        if resolved is not type_:
+            # Optional pattern (T | None): dispatch based on T's requirements
+            dispatch_type = resolved
+            dispatch_origin = get_origin(resolved) or resolved
+
+    if (
+        json_dict
+        and _abstract_to_concrete_type_mapping.get(dispatch_origin, dispatch_origin) is dict
+        and lone
+        and lone.implicit_value is UNSET
+        and lone.value.strip().startswith("{")
+    ):
+        args = get_args(dispatch_type)
+        tokens = _json_object_tokens(lone, dispatch_type, Any if untyped or len(args) != 2 else args[1])
+
+    # The stashed metadata, combined into a single ``Parameter`` (if any was stashed).
+    cparam = None
+    if annotations_:
+        from cyclopts.parameter import Parameter
+
+        _, cparam = Parameter.from_annotation(Annotated[(type_, *annotations_)])
+
+    if origin_type is tuple:
+        if cparam is not None and cparam.converter is not None:
+            converted = _call_value_converter(cparam, type_, tokens)
+            return _apply_validators(Annotated[(type_, *annotations_)], converted)
+        out = convert_tuple(type_, *tokens)  # pyright: ignore
+        if annotations_:
+            out = _apply_validators(Annotated[(type_, *annotations_)], out)
+        return out
+    elif dispatch_origin in ITERABLE_TYPES:
+        if cparam is not None and cparam.converter is not None:
+            # Like a parameter-level converter, a container's own converter replaces
+            # conversion of the whole value, receiving all of its tokens.
+            converted = _call_value_converter(cparam, dispatch_type, tokens)
+            return _apply_validators(Annotated[(type_, *annotations_)], converted)
+        # Re-attach the stashed metadata so that a container's own ``Parameter``
+        # validators are honored; e.g. the value type of
+        # ``dict[str, Annotated[list[int], Parameter(...)]]``.
+        annotated_type_ = Annotated[(type_, *annotations_)] if annotations_ else type_
+        return convert_priv(annotated_type_, tokens)  # pyright: ignore
+    elif dispatch_origin is dict:
+        if not isinstance(tokens, dict):
+            raise ValueError  # Programming error
+        if cparam is not None and cparam.converter is not None:
+            converted = _call_value_converter(cparam, dispatch_type, tokens)
+            return _apply_validators(Annotated[(type_, *annotations_)], converted)
+        try:
+            value_type = get_args(dispatch_type)[1]
+        except IndexError:
+            value_type = str
+        dict_converted = {
+            k: _convert_entry(
+                value_type, v, converter, name_transform, f"{name}.{k}" if name else None, json_dict=json_dict
+            )
+            for k, v in tokens.items()
+        }
+        out = dict(**dict_converted)
+        if annotations_:
+            # ``resolve`` above stripped this dict's own ``Parameter`` metadata,
+            # and the recursion does not pass through :func:`_convert`, so this
+            # dict's validators must be applied here.
+            out = _apply_validators(Annotated[(type_, *annotations_)], out)
+        return out
+    elif isinstance(tokens, dict):
+        raise ValueError(f"Dictionary of tokens provided for unknown {type_!r}.")  # Programming error
+    elif is_enum_flag(dispatch_origin):
+        # Unlike other types that can accept multiple tokens, the result is not a sequence, it's a single
+        # enum.Flag object.
+        return convert_enum_flag(dispatch_origin, tokens, name_transform)
+    else:
+        # Structural pre-check (no upcoming_tokens): a union containing a consume_all
+        # member (e.g. ``str | list[int]``) must convert ALL accumulated tokens together;
+        # token-aware probing below resolves the union per-first-token and would
+        # otherwise convert element-wise, producing a value outside the union.
+        tokens_per_element, consume_all = token_count(type_)
+        annotated_type_ = Annotated[(type_, *annotations_)] if annotations_ else type_
+        if consume_all:
+            return convert_priv(annotated_type_, tokens)  # pyright: ignore
+        elif len(tokens) == 1:
+            return convert_priv(annotated_type_, tokens[0])  # pyright: ignore
+        # Pass Token objects to token_count for consistent union type resolution
+        # tokens is Sequence[Token] at this point (strings were converted to Tokens earlier in this function)
+        tokens_per_element, consume_all = token_count(type_, upcoming_tokens=tokens)  # pyright: ignore[reportArgumentType]
+        if consume_all:
+            # For consume_all types (like list[T] in unions), process all tokens together
+            return convert_priv(annotated_type_, tokens)  # pyright: ignore
+        elif tokens_per_element == 1:
+            return [convert_priv(annotated_type_, item) for item in tokens]  # pyright: ignore
+        elif len(tokens) == tokens_per_element:
+            return convert_priv(annotated_type_, tokens)  # pyright: ignore
+        else:
+            raise NotImplementedError("Unreachable?")
+
+
+def _resolve_effective_converter(
+    type_: Any,
+    fallback_converter: Callable | None = None,
+    fallback_name_transform: Callable[[str], str] = default_name_transform,
+) -> tuple[Callable | None, Callable[[str], str]]:
+    """Resolve effective converter and name_transform for a type.
+
+    Examines the type's Parameter annotations (from both Annotated and
+    __cyclopts__ attributes) and resolves string converters to callables.
+
+    Parameters
+    ----------
+    type_
+        The type to resolve converter for.
+    fallback_converter
+        Converter to use if type has no converter specified.
+    fallback_name_transform
+        Name transform to use if type has no name_transform specified.
+
+    Returns
+    -------
+    tuple[Callable | None, Callable[[str], str]]
+        (converter, name_transform) - the effective converter and name_transform.
+    """
+    from cyclopts.parameter import get_parameters
+
+    converter = fallback_converter
+    name_transform = fallback_name_transform
+
+    _, parameters = get_parameters(type_)
+    for param in parameters:
+        if param.converter is not None:
+            converter = param.resolve_converter(type_)
+        if param._name_transform is not None:
+            name_transform = param._name_transform
+
+    return converter, name_transform
+
+
+def _sole_value_member(union_args: tuple[Any, ...]) -> Any:
+    """The union's only member that takes a value, ignoring ``None`` and a ``bool`` flag; else ``None``.
+
+    For ``bool | list[str]``, ``bool`` is the flag form, so a value that no member
+    converts was meant for ``list[str]``. ``bool | None`` has no flag form, so its value member is ``bool``.
+    """
+    members = [t for t in union_args if not is_nonetype(t)]
+    if len(members) > 1:
+        members = [t for t in members if resolve(t) is not bool]
+    return members[0] if len(members) == 1 else None
+
+
+def _takes_first_token(type_: Any, token: "Token") -> bool:
+    """Whether ``type_`` accepts ``token`` as its first token.
+
+    Descends through container elements and structured-class fields to the single-token
+    type that would consume it, e.g. ``int`` for ``list[tuple[int, int]]``.
+    """
+    while token_count(type_) != (1, False):
+        resolved = resolve(type_)
+        if args := get_args(resolved):
+            type_ = args[0]
+        elif field_infos := get_field_infos(resolved):
+            type_ = next(iter(field_infos.values())).hint
+        else:
+            return False
+    try:
+        _convert(type_, token, converter=None, name_transform=default_name_transform)
+    except ValidationError:
+        return True
+    except Exception:
+        return False
+    return True
+
+
+def _unmatched_union_token_count(union_args: tuple[Any, ...], upcoming_tokens: "Sequence[Token]") -> tuple[int, bool]:
+    """Token count for a union that no member could convert ``upcoming_tokens`` into.
+
+    A leading bool word (``--x true pos``) is the ``bool`` flag's value, unless the value
+    member takes it as its first token (``"1"`` for ``bool | tuple[int, int]``); otherwise
+    the value member's count reports the bad or missing value like the plain type does.
+    """
+    value_member = _sole_value_member(union_args)
+    if value_member is None:
+        return 1, False
+    token = upcoming_tokens[0]
+    try:
+        _bool(token.value)
+    except CoercionError:
+        pass
+    else:
+        if not _takes_first_token(value_member, token):
+            return 1, False
+    return token_count(value_member)
+
+
+def _union_conversion(
+    union_args: tuple[Any, ...],
+    upcoming_tokens: "Sequence[Token]",
+    name_transform: Callable[[str], str] = default_name_transform,
+    converter: Callable | None = None,
+) -> tuple[Any, int, bool]:
+    """Convert tokens using a union type by attempting each member left-to-right.
+
+    Iterates through union args, attempting conversion with the upcoming tokens.
+    Returns the converted value and token count for the first type that successfully
+    converts.
+
+    Parameters
+    ----------
+    union_args
+        The type arguments of the union (from get_args()).
+    upcoming_tokens
+        Sequence of upcoming CLI Token objects to try converting.
+    name_transform
+        Name transform function for conversion (fallback for union members).
+    converter
+        Optional custom converter function from Parameter annotation (fallback).
+
+    Returns
+    -------
+    tuple[Any, int, bool]
+        (converted_value, token_count, consume_all) for the first matching type.
+
+    Raises
+    ------
+    CoercionError
+        If no union member could convert the tokens.
+    """
+    for arg in union_args:
+        # Resolve the effective converter and name_transform for this union member.
+        # This handles @Parameter decorated classes with string converters.
+        effective_converter, effective_name_transform = _resolve_effective_converter(arg, converter, name_transform)
+        # Pass upcoming_tokens for nested unions
+        tc, consume_all = token_count(arg, upcoming_tokens=upcoming_tokens)
+
+        # Determine tokens to try for conversion
+        if consume_all:
+            tokens_to_try = upcoming_tokens
+        else:
+            if tc > len(upcoming_tokens):
+                continue  # Not enough tokens for this type
+            tokens_to_try = upcoming_tokens[:tc]
+
+        if not tokens_to_try:
+            continue
+
+        # Use the Token objects directly - they were created upfront in bind.py
+        # This enables identity-based caching since the same Token objects
+        # will be used for both probing and actual conversion.
+        # consume_all (and multi-token) types like ``list[T]`` always expect a
+        # sequence; only unpack when the member takes a single, scalar token
+        # (the remaining case is exactly ``tc == 1`` with one token).
+        token_input = list(tokens_to_try) if (consume_all or tc > 1) else tokens_to_try[0]
+
+        try:
+            result = _convert(arg, token_input, converter=effective_converter, name_transform=effective_name_transform)
+            return result, tc, consume_all
+        except ValidationError:
+            # ValidationError means coercion succeeded but validation failed.
+            # Return this type's token count - the actual conversion (with proper
+            # argument context) will raise the error with full details.
+            # Return None for result since caller (token_count) only uses tc/consume_all.
+            return None, tc, consume_all
+        except Exception:
+            continue
+
+    # No union member could convert the tokens
+    token = upcoming_tokens[0] if upcoming_tokens else None
+    raise CoercionError(token=token, target_type=Union[union_args])  # pyright: ignore  # noqa: UP007
+
+
+def takes_scalar(hint: Any) -> bool:
+    """Whether ``hint`` only takes a single value, so an array (e.g. from a config file) can't bind to it."""
+    count, consume_all = token_count(hint)  # Before ``resolve``, which drops ``Parameter(n_tokens=...)``.
+    if count > 1 or consume_all:
+        return False
+    hint = resolve(hint)
+    if is_union(hint):
+        return all(takes_scalar(member) for member in get_args(hint) if not is_nonetype(member))
+    return not (hint is Any or is_structured_type(hint) or (get_origin(hint) or hint) is tuple)
+
+
+def token_count(
+    type_: Any,
+    skip_converter_params: bool = False,
+    upcoming_tokens: "Sequence[Token] | None" = None,
+) -> tuple[int, bool]:
+    """The number of tokens after a keyword the parameter should consume.
+
+    Parameters
+    ----------
+    type_: Type
+        A type hint/annotation to infer token_count from if not explicitly specified.
+    skip_converter_params: bool
+        If True, don't extract converter parameters from __cyclopts__.
+        Used to prevent infinite recursion when determining consume_all behavior.
+    upcoming_tokens: Sequence[Token] | None
+        Optional sequence of upcoming CLI Token objects. If provided, enables
+        token-aware parsing for union types by attempting conversion.
+
+    Returns
+    -------
+    int
+        Number of tokens to consume.
+    bool
+        If this is ``True`` and positional, consume all remaining tokens.
+        The returned number of tokens constitutes a single element of the iterable-to-be-parsed.
+    """
+    from cyclopts.parameter import get_parameters
+
+    # Discriminated unions (e.g. Annotated[Cat | Dog, pydantic.Field(discriminator="type")])
+    # consume a single JSON string token regardless of member field counts.
+    # Check before get_parameters strips the Annotated metadata.
+    if get_annotated_discriminator(resolve_optional(type_)) is not None:
+        return 1, False
+
+    # Token-aware union handling MUST happen before get_parameters() because
+    # get_parameters() strips None from Optional unions via resolve_optional().
+    # For Annotated unions, we handle them in the later is_union() block.
+    if upcoming_tokens and is_union(type_):
+        args = get_args(type_)
+        try:
+            _, tc, consume_all = _union_conversion(args, upcoming_tokens)
+            return tc, consume_all
+        except CoercionError:
+            # No union member matched. For Optional types (Union with exactly one
+            # non-None type), fall through to structural analysis so "not enough tokens"
+            # errors are raised properly. For other unions, return (1, False) since
+            # it's a value mismatch, not a structural mismatch.
+            non_none_types = [t for t in args if not is_nonetype(t)]
+            if len(non_none_types) != 1:
+                # Not an Optional - it's a real union with multiple non-None types
+                return _unmatched_union_token_count(args, upcoming_tokens)
+            # Optional type - fall through to structural analysis of the non-None type
+
+    # Check for explicit n_tokens in Parameter annotation before resolving
+    # This handles nested cases like tuple[Annotated[str, Parameter(n_tokens=2)], int]
+
+    resolved_type, parameters = get_parameters(type_, skip_converter_params=skip_converter_params)
+    for param in parameters:
+        if param.n_tokens is not None:
+            if param.n_tokens == -1:
+                return 1, True
+            else:
+                # We still need to determine if we should consume_all or not.
+                #
+                # Recursively determine consume_all from the type's natural structure.
+                # Only recurse if the type has changed (e.g., Annotated wrapper was removed).
+                # If resolved_type is the same as type_, recursing would cause infinite loop.
+                if resolved_type is not type_:
+                    # Skip converter params to avoid infinite recursion when converter is decorated
+                    # with @Parameter(n_tokens=...) and attached to a class via @Parameter(converter=...).
+                    _, consume_all_from_type = token_count(resolved_type, skip_converter_params=True)
+                else:
+                    # Type didn't change (e.g., class decorated with @Parameter(n_tokens=...))
+                    # Can't determine natural consume_all by recursing on same type
+                    consume_all_from_type = False
+                return param.n_tokens, consume_all_from_type
+
+    type_ = resolved_type
+    origin_type = get_origin(type_)
+    # Normalize abstract origin types to concrete types early
+    if origin_type in _abstract_to_concrete_type_mapping:
+        origin_type = _abstract_to_concrete_type_mapping[origin_type]
+
+    # Handle bare abstract types like bare concrete types
+    if type_ in _abstract_to_concrete_type_mapping:
+        concrete_type = _abstract_to_concrete_type_mapping[type_]
+        type_ = _implicit_iterable_type_mapping.get(concrete_type, concrete_type)
+        origin_type = get_origin(type_)
+
+    if (origin_type or type_) is tuple:
+        args = get_args(type_)
+        if args:
+            return sum(token_count(x)[0] for x in args if x is not ...), ... in args
+        else:
+            return 1, True
+    elif (origin_type or type_) is bool:
+        return 0, False
+    elif type_ in ITERABLE_TYPES or (origin_type in ITERABLE_TYPES and len(get_args(type_)) == 0):
+        return 1, True
+    elif is_enum_flag(type_):
+        return 1, True
+    elif origin_type in ITERABLE_TYPES and len(get_args(type_)):
+        inner_type = get_args(type_)[0]
+        # For union element types, return (1, True) to let conversion handle
+        # dynamic per-element parsing. This supports unions with varying token counts.
+        if is_union(inner_type):
+            return 1, True
+        return token_count(inner_type)[0], True
+    elif TypeAliasType is not None and isinstance(type_, TypeAliasType):
+        return token_count(type_.__value__)
+    elif is_union(type_):
+        args = get_args(type_)
+
+        # If we have upcoming tokens, try conversion-based token counting.
+        if upcoming_tokens:
+            # Extract name_transform and converter from parent parameters
+            name_transform = default_name_transform
+            converter = None
+            for param in parameters:
+                if param.name_transform is not None:
+                    name_transform = param.name_transform
+                # Only use callable converters; string converters are method names
+                # that need to be resolved against a specific type, which doesn't
+                # make sense when probing individual union members.
+                if param.converter is not None and callable(param.converter):
+                    converter = param.converter
+
+            try:
+                _, tc, consume_all = _union_conversion(args, upcoming_tokens, name_transform, converter)
+                return tc, consume_all
+            except CoercionError:
+                # No union member matched. For Optional types (Union with exactly one
+                # non-None type), fall through to structural analysis so "not enough tokens"
+                # errors are raised properly. For other unions, return (1, False) since
+                # it's a value mismatch, not a structural mismatch.
+                non_none_types = [t for t in args if not is_nonetype(t)]
+                if len(non_none_types) != 1:
+                    # Not an Optional - it's a real union with multiple non-None types
+                    return _unmatched_union_token_count(args, upcoming_tokens)
+                # Optional type - fall through to structural analysis
+
+        # Fallback: use structural analysis.
+        # First multi-token type (tc > 1) determines token count.
+        for arg in args:
+            tc, consume_all = token_count(arg)
+            if tc > 1:
+                return tc, consume_all
+        # Second pass: check for consume_all types
+        for arg in args:
+            tc, consume_all = token_count(arg)
+            if consume_all:
+                return tc, consume_all
+        # All types are single-token, non-consume_all
+        return 1, False
+    elif is_builtin(type_):
+        # Many builtins actually take in VAR_POSITIONAL when we really just want 1 argument.
+        return 1, False
+    else:
+        # This is usually/always a custom user-defined class.
+        field_infos = get_field_infos(type_)
+        count, consume_all = 0, False
+        for value in field_infos.values():
+            if value.kind is value.VAR_POSITIONAL:
+                consume_all = True
+            elif not value.required:
+                continue
+            elem_count, elem_consume_all = token_count(value.hint)
+            count += elem_count
+            consume_all |= elem_consume_all
+
+        # classes like ``enum.Enum`` can slip through here with a 0 count.
+        if not count:
+            return 1, False
+
+        return count, consume_all

@@ -43,16 +43,6 @@ CREATE TABLE IF NOT EXISTS watch_sources (
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 );
-
-CREATE TABLE IF NOT EXISTS sources (
-    id TEXT PRIMARY KEY,
-    url TEXT NOT NULL UNIQUE,
-    cadence INTEGER NOT NULL,
-    last_seen TEXT,
-    last_content_hash TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-);
 """
 
 LOGS_SCHEMA = """
