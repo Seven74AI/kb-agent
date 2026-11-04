@@ -76,12 +76,6 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
             step_name="fetch_transcript",
         )
     segs = data.get("segments", [])
-    if not segs:
-        raise StepError(
-            "Transcript has no segments",
-            error_type=ErrorType.RETRY,
-            step_name="fetch_transcript",
-        )
     for i, seg in enumerate(segs):
         if isinstance(seg, dict) and "time" in seg and "start" not in seg:
             seg["start"] = seg.pop("time")
