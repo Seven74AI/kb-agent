@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import os
 import sqlite3
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from agent.db import (
     init_db, pause_task, update_step,
 )
 from agent.exceptions import ErrorType, StepError
+from agent.streaming import log_progress
 
 # ── Pipeline step registry ───────────────────────────────────────────────────
 
@@ -293,6 +295,15 @@ class Consumer:
 
     # ── Task execution ────────────────────────────────────────────────────
 
+    def _log_error(self, task_id: str, step_name: str, message: str) -> None:
+        """Persist an error to step_logs (stream='stderr') for dashboard/debug visibility."""
+        if self.logs_conn is None:
+            return
+        try:
+            log_progress(self.logs_conn, task_id, step_name, message, stream="stderr")
+        except Exception:  # noqa: BLE001 — logging must never break error handling
+            pass
+
     async def _execute_task(self, task: dict):
         """Execute all steps for a single task.
 
@@ -329,6 +340,7 @@ class Consumer:
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
                 error_msg = str(e)
+                self._log_error(task_id, step_name, f"StepError({error_type}): {error_msg}")
 
                 if error_type == "fail":
                     print(f"[consumer] Step '{step_name}' FAILED: {error_msg}")
@@ -365,7 +377,10 @@ class Consumer:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                # Unclassified exception — fall back to step's on_error setting
+                # Unclassified exception — capture the full traceback for debugging.
+                tb = traceback.format_exc()
+                self._log_error(task_id, step_name, f"Unhandled exception:\n{tb}")
+                # Fall back to step's on_error setting
                 _, default_on_error = STEP_REGISTRY.get(step_name, (None, "retry"))
                 error_msg = f"{type(e).__name__}: {e}"
 
