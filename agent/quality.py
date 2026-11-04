@@ -240,6 +240,46 @@ def quality_gate_youtube(note_path: Path, config, vault_path: Path | None = None
     return len(failures) == 0, failures
 
 
+def _resynthesize(note_path: Path, config, llm, failures: list[str]) -> bool:
+    """Re-synthesize the note from source + failure feedback (best-effort).
+
+    Reads the raw source for the note's slug, then asks the LLM to rewrite the
+    note fixing every failure. Returns True if a new note was written.
+    """
+    slug = note_path.stem
+    source_path = Path(config.temp_dir) / f"{slug}_raw.md"
+    if not source_path.exists():
+        return False
+
+    source = source_path.read_text(encoding="utf-8")
+    current_note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
+
+    system_prompt = (
+        "You are a knowledge base curator. A note you wrote failed quality checks. "
+        "Rewrite it ENTIRELY, fixing every listed failure. Keep the same depth and "
+        "structure. Output only the complete note."
+    )
+    user_prompt = (
+        "=== FAILURES TO FIX ===\n" + "\n".join(f"- {f}" for f in failures) +
+        "\n\n=== CURRENT NOTE ===\n" + current_note +
+        "\n\n=== SOURCE ===\n" + source +
+        "\n\nRewrite the full note, fixing every failure. Output the complete note only."
+    )
+
+    try:
+        response = llm.call(
+            system_prompt=system_prompt, user_prompt=user_prompt, role="resynthesize",
+        )
+    except Exception:
+        return False
+
+    new_note = response.content.strip()
+    if new_note and not new_note.startswith("QUALITY GATE FAILED"):
+        note_path.write_text(new_note, encoding="utf-8")
+        return True
+    return False
+
+
 def quality_gate_retry_loop(note_path: Path, config,
                             gate_fn, llm, max_rounds: int = 3) -> tuple[bool, int]:
     """Run quality gates with LLM retry on failure.
@@ -272,15 +312,10 @@ def quality_gate_retry_loop(note_path: Path, config,
         if round_num >= max_rounds:
             return False, round_num
 
-        # Tell the LLM what failed so it can re-read and fix
-        # (The orchestrator handles the actual re-synthesis call;
-        #  this just signals the need to retry.)
-        note_path.write_text(
-            f"# QUALITY GATE FAILED (round {round_num}/{max_rounds})\n"
-            f"Failures:\n" + "\n".join(f"- {f}" for f in failures) + "\n\n"
-            f"Re-read source and rewrite.\n",
-            encoding="utf-8",
-        )
+        # Re-synthesize: re-read source + rewrite with failure feedback
+        if not _resynthesize(note_path, config, llm, failures):
+            # No source available to re-synthesize from — stop
+            return False, round_num
 
     return False, max_rounds
 
