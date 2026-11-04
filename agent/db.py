@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS watch_sources (
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS ingest_queue (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    content_type TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    dispatched_at TEXT
+);
 """
 
 LOGS_SCHEMA = """
@@ -129,6 +140,54 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
                 (task_id, i, step_name),
             )
     return task_id
+
+
+def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
+                 status: str = "queued") -> tuple[str, bool]:
+    """Insert a link into the ingest queue (dedup by URL).
+
+    Returns ``(ingest_id, created_new)``. A URL already in the queue returns its
+    existing id with ``created_new=False`` — never a duplicate row.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT id, status FROM ingest_queue WHERE url = ?", (url,)
+    ).fetchone()
+    if row:
+        return row["id"], False
+    import uuid
+    ingest_id = str(uuid.uuid4())
+    with conn:
+        conn.execute(
+            "INSERT INTO ingest_queue (id, url, content_type, slug, status) VALUES (?, ?, ?, ?, ?)",
+            (ingest_id, url, content_type, slug, status),
+        )
+    return ingest_id, True
+
+
+def list_ingest_by_status(conn: sqlite3.Connection, status: str) -> list[dict]:
+    """List ingest-queue rows in a given status, oldest first."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM ingest_queue WHERE status = ? ORDER BY created_at", (status,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
+                         error: str | None = None) -> None:
+    """Transition an ingest-queue row to a new status."""
+    with conn:
+        if status == "dispatched":
+            conn.execute(
+                "UPDATE ingest_queue SET status = ?, error = ?, dispatched_at = datetime('now') WHERE id = ?",
+                (status, error, ingest_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE ingest_queue SET status = ?, error = ? WHERE id = ?",
+                (status, error, ingest_id),
+            )
 
 
 def claim_task(conn: sqlite3.Connection) -> dict | None:

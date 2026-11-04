@@ -5,7 +5,7 @@ import sqlite3
 from agent.config import Config
 from agent.core.pipelines import steps_for_content_type
 from agent.core.slugify import slugify
-from agent.db import create_task
+from agent.db import create_task, queue_ingest
 from agent.detection import dedup_check, detect_content_subtype, detect_platform, preflight_health
 
 
@@ -105,3 +105,59 @@ def submit_url(
     if plan["status"] in ("error", "skipped"):
         return plan
     return submit_plan(agent_conn, plan)
+
+
+def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
+                  content_type: str | None = None) -> dict:
+    """Queue a URL for deferred batch processing (durable ingest inbox).
+
+    Detects the content type, stores the link durably, and returns. Nothing is
+    processed yet — a nightly batch collector dispatches it to ``tasks`` with the
+    content-type-appropriate pipeline (including the synthesize-only variant for
+    batch-transcribed video).
+    """
+    url = (url or "").strip()
+    if not url:
+        return {"status": "error", "http_status": 400, "error": "url required"}
+
+    platform = detect_platform(url)
+    subtype = content_type or detect_content_subtype(url, platform)
+    slug = slugify(url)
+
+    ingest_id, created = queue_ingest(agent_conn, url, subtype, slug)
+
+    return {
+        "status": "queued",
+        "http_status": 202,
+        "ingest_id": ingest_id,
+        "platform": platform,
+        "content_type": subtype,
+        "slug": slug,
+        "duplicate": not created,
+    }
+
+
+def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection, *,
+                        content_type: str, slug: str) -> dict:
+    """Dispatch a synthesize-only task with an explicit content type + slug.
+
+    Used by batch collectors that have already downloaded, transcribed, and
+    archived the source (video + transcript in MinIO). The task starts at the
+    synthesize step, using the content type to select the right note template.
+    """
+    url = (url or "").strip()
+    if not url:
+        return {"status": "error", "http_status": 400, "error": "url required"}
+
+    platform = detect_platform(url)
+    steps = steps_for_content_type(content_type, platform)
+    task_id = create_task(agent_conn, url, content_type, slug, steps)
+
+    return {
+        "status": "pending",
+        "http_status": 201,
+        "task_id": task_id,
+        "platform": platform,
+        "content_type": content_type,
+        "slug": slug,
+    }

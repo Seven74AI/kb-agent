@@ -306,6 +306,26 @@ FORMAT DE SORTIE :
 NE TRADUIS JAMAIS vers l'anglais. Contenu et libellés de sections en français uniquement."""
 
 
+def step_fetch_transcript(task: dict, config: Config) -> str:
+    """Fetch the pre-uploaded merged transcript from MinIO (synthesize-only path)."""
+    slug = task.get("slug", task["id"][:8])
+    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path.parent.mkdir(parents=True, exist_ok=True)
+
+    dest = f"{config.minio_bucket}/transcripts/{slug}.json"
+    result = subprocess.run(
+        ["mc", "cp", f"minio/{dest}", str(merged_path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise StepError(
+            f"Transcript fetch failed: {result.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="fetch_transcript",
+        )
+    return str(merged_path)
+
+
 def step_synthesize_note(task: dict, config: Config) -> str:
     """LLM synthesis for Bunny Stream / TDAH summit talks (French note)."""
     slug = task.get("slug", task["id"][:8])
@@ -500,6 +520,14 @@ register_pipeline("bunny_stream", [
     Step(name="synthesize_note", fn=step_synthesize_note, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
+])
+
+register_pipeline("bunny_stream_synthesize", [
+    Step(name="fetch_transcript", fn=step_fetch_transcript, on_error="retry"),
+    Step(name="synthesize_note", fn=step_synthesize_note, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])

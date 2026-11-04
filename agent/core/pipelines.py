@@ -11,6 +11,16 @@ PIPELINE_STEPS: dict[str, list[str]] = {
         "cleanup_temp", "synthesize_youtube",
         "quality_gate", "minio_upload", "git_push",
     ],
+    "bunny_stream": [
+        "extract_metadata", "download_video", "extract_audio",
+        "diarize", "transcribe", "merge_and_identify",
+        "cleanup_temp", "synthesize_note", "quality_gate",
+        "minio_upload", "see_also", "git_push",
+    ],
+    "bunny_stream_synthesize": [
+        "fetch_transcript", "synthesize_note", "quality_gate",
+        "see_also", "git_push",
+    ],
     "instagram_reel": [
         "ig_reel_validate", "ig_reel_download", "ig_reel_audio",
         "ig_reel_diarize", "ig_reel_transcribe", "ig_reel_merge",
