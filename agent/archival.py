@@ -42,6 +42,34 @@ def append_note_tags(note_path: Path, tags) -> None:
         note_path.write_text(new_text, encoding="utf-8")
 
 
+MINIO_TAILSCALE_BASE = "http://vmi3304846.tail5c02a1.ts.net:9000"
+
+
+def write_source_files_block(note_path: Path, uploaded: list[str], config) -> None:
+    """Rewrite a note's ``source_files:`` frontmatter from uploaded MinIO object paths."""
+    if not uploaded:
+        return
+    note_path = Path(note_path)
+    if not note_path.exists():
+        return
+    content = note_path.read_text(encoding="utf-8")
+    lines = ["source_files:"]
+    for u in uploaded:
+        suffix = Path(u).suffix.lower().lstrip(".")
+        kind = {
+            "json": "transcript",
+            "webm": "video",
+            "mp4": "video",
+            "mp3": "audio",
+            "m4a": "audio",
+        }.get(suffix, suffix)
+        lines.append(f"  {kind}: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/{u}")
+    block = "\n".join(lines)
+    new = re.sub(r"source_files:.*?(?=\n\w|\Z)", block, content, count=1, flags=re.DOTALL)
+    if new != content:
+        note_path.write_text(new, encoding="utf-8")
+
+
 # ── MinIO helpers ─────────────────────────────────────────────────────────────
 
 # Mapping from content-type to MinIO bucket folder

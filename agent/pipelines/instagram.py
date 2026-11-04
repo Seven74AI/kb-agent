@@ -498,6 +498,7 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     transcript_text = _format_transcript_for_llm(merged)
     source_domain = urlparse(source_url).netloc or "instagram.com"
     date_str = datetime.now().strftime("%Y-%m-%d")
+    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
 
     if music_only:
         # Music-only reel: use caption as primary content
@@ -547,7 +548,8 @@ OUTPUT FORMAT:
   source: instagram.com
   source_url: {source_url}
   source_files:
-    raw: <filled by archival step>
+    video: {tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
+    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
   confidence: plausible
   tags: [instagram, reel]
 - Then sections as above."""
@@ -967,16 +969,34 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
     Returns:
         MinIO URL of the uploaded note.
     """
-    from agent.archival import upload_file_to_minio
+    from agent.archival import upload_file_to_minio, write_source_files_block
 
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
-
+    content_type = task.get("content_type", "instagram_post")
+    bucket = config.minio_bucket
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
-    note_key = f"instagram/{safe_slug}.md"
-    dest = f"{config.minio_bucket}/{note_key}"
 
-    minio_url = upload_file_to_minio(note_path, dest)
+    if content_type == "instagram_reel":
+        # Source-archival: video + transcript (matches the batch collector).
+        uploaded = []
+        for name in (f"{safe_slug}_reel.mp4", f"{safe_slug}_reel.webm"):
+            p = Path(config.temp_dir) / name
+            if p.exists():
+                ext = p.suffix.lower().lstrip(".")
+                upload_file_to_minio(p, f"{bucket}/videos/{safe_slug}.{ext}", timeout=120)
+                uploaded.append(f"videos/{safe_slug}.{ext}")
+                break
+        merged = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+        if merged.exists():
+            upload_file_to_minio(merged, f"{bucket}/transcripts/{safe_slug}.json", timeout=120)
+            uploaded.append(f"transcripts/{safe_slug}.json")
+        write_source_files_block(note_path, uploaded, config)
+        return f"Uploaded: {', '.join(uploaded)}"
+
+    # Note-archival: post/carousel.
+    note_key = f"instagram/{safe_slug}.md"
+    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}")
 
     # Update note frontmatter with minio URL
     content = note_path.read_text(encoding="utf-8")

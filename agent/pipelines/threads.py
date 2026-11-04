@@ -775,6 +775,7 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     # Build prompt
     source_domain = urlparse(source_url).netloc or "threads.net"
     date_str = datetime.now().strftime("%Y-%m-%d")
+    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
 
     # Pre-compute reply context line
     if parent_context:
@@ -823,7 +824,8 @@ OUTPUT FORMAT:
   source: threads.net (@{author})
   source_url: {source_url}
   source_files:
-    raw: <filled by archival step>
+    video: {tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
+    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
   confidence: plausible
   tags: [threads, video]
 - Then the note sections as shown above.
@@ -1065,19 +1067,34 @@ def step_threads_minio_upload(task: dict, config: Config) -> str:
     Returns:
         MinIO URL of the uploaded note.
     """
-    from agent.archival import upload_file_to_minio
+    from agent.archival import upload_file_to_minio, write_source_files_block
 
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
-
+    content_type = task.get("content_type", "threads_text")
+    bucket = config.minio_bucket
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
+
+    if content_type == "threads_video":
+        # Source-archival: video + transcript (matches the batch collector).
+        uploaded = []
+        video_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
+        if video_path.exists():
+            upload_file_to_minio(video_path, f"{bucket}/videos/{safe_slug}.mp4", timeout=120)
+            uploaded.append(f"videos/{safe_slug}.mp4")
+        merged = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+        if merged.exists():
+            upload_file_to_minio(merged, f"{bucket}/transcripts/{safe_slug}.json", timeout=120)
+            uploaded.append(f"transcripts/{safe_slug}.json")
+        write_source_files_block(note_path, uploaded, config)
+        return f"Uploaded: {', '.join(uploaded)}"
+
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found: {note_path}")
 
+    # Note-archival: text post.
     note_key = f"threads/{safe_slug}.md"
-    dest = f"{config.minio_bucket}/{note_key}"
-
-    minio_url = upload_file_to_minio(note_path, dest)
+    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}")
 
     # Update note frontmatter with minio URL
     content = note_path.read_text(encoding="utf-8")
