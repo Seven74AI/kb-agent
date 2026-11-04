@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,21 @@ from agent.db import list_ingest_by_status
 from agent.mcp.db import open_agent_conn, open_logs_conn
 
 
+def _safe_tool(fn):
+    """Wrap a tool so unexpected exceptions return a uniform error envelope."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — uniform error shape for the caller
+            return {
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
+    return wrapper
+
+
 def build_mcp_server(config: Config | None = None) -> FastMCP:
     """Create a FastMCP server exposing the full kb-agent tool surface."""
     cfg = config or load_config()
@@ -40,11 +57,13 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
     )
 
     @mcp.tool
+    @_safe_tool
     def detect_type(url: str) -> dict[str, str]:
         """Detect platform and content subtype for a URL (no side effects)."""
         return core_detect_type(url)
 
     @mcp.tool
+    @_safe_tool
     def submit_url(url: str, tags: str = "") -> dict[str, Any]:
         """Enqueue a URL for pipeline processing. `tags` (comma-separated) are added to the note."""
         conn = open_agent_conn(cfg)
@@ -54,6 +73,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def ingest(url: str, tags: str = "") -> dict[str, Any]:
         """Queue a URL for deferred batch processing. `tags` (comma-separated) are added to the note."""
         conn = open_agent_conn(cfg)
@@ -63,6 +83,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def list_tasks(limit: int = 100) -> dict[str, Any]:
         """List tasks in the SQLite queue with step detail and status counts."""
         conn = open_agent_conn(cfg)
@@ -74,6 +95,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def get_task(task_id: str) -> dict[str, Any]:
         """Get one task by id, or an error payload if not found."""
         conn = open_agent_conn(cfg)
@@ -88,6 +110,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def resume_task(reason: str = "") -> dict[str, Any]:
         """Resume all paused tasks whose error message matches reason (SQL LIKE)."""
         conn = open_agent_conn(cfg)
@@ -98,6 +121,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def retry_task(task_id: str) -> dict[str, Any]:
         """Re-queue a single failed or paused task."""
         conn = open_agent_conn(cfg)
@@ -108,11 +132,13 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def search_notes(query: str, limit: int = 50) -> list[dict[str, str]]:
         """Search markdown notes under the vault Knowledge base."""
         return core_search_notes(query, cfg.vault_path, limit=limit)
 
     @mcp.tool
+    @_safe_tool
     def get_note(slug: str, content_type: str | None = None) -> dict[str, Any]:
         """Load a vault note by slug; optional content_type narrows folder lookup."""
         note = core_get_note(slug, cfg.vault_path, content_type=content_type)
@@ -121,6 +147,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         return {"found": True, "note": note}
 
     @mcp.tool
+    @_safe_tool
     def ingest_playlist(playlist_url: str, tags: str = "") -> dict[str, Any]:
         """Expand a YouTube playlist and queue each video (deferred batch). `tags` (comma-separated) added to each note."""
         conn = open_agent_conn(cfg)
@@ -133,6 +160,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def bulk_import(urls: list[str], tags: str = "") -> dict[str, Any]:
         """Submit many URLs in one call (video → deferred batch, else immediate). `tags` (comma-separated) added to each note."""
         conn = open_agent_conn(cfg)
@@ -145,6 +173,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def watch_source(
         page_url: str,
         item_pattern: str,
@@ -168,6 +197,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             conn.close()
 
     @mcp.tool
+    @_safe_tool
     def run_batch() -> dict[str, Any]:
         """Trigger the batch collector now: download + batch-transcribe + dispatch queued links.
 
