@@ -66,7 +66,7 @@ class Config:
 
     # ── MinIO ──
     minio_endpoint: str = "http://localhost:9000"
-    minio_bucket: str = "kb-agent-archive"
+    minio_bucket: str = "knowledge-base"
     minio_access_key: str = ""
     minio_secret_key: str = ""
 
@@ -202,7 +202,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         edgee_api_key=str(_env_or_default(raw.get("edgee_api_key"), "EDGEE_API_KEY", "")),
         # MinIO
         minio_endpoint=str(_env_or_default(raw.get("minio_endpoint"), "MINIO_ENDPOINT", "http://localhost:9000")),
-        minio_bucket=str(_env_or_default(raw.get("minio_bucket"), "MINIO_BUCKET", "kb-agent-archive")),
+        minio_bucket=str(_env_or_default(raw.get("minio_bucket"), "MINIO_BUCKET", "knowledge-base")),
         minio_access_key=str(_env_or_default(raw.get("minio_access_key"), "MINIO_ACCESS_KEY", "")),
         minio_secret_key=str(_env_or_default(raw.get("minio_secret_key"), "MINIO_SECRET_KEY", "")),
         # Firecrawl
