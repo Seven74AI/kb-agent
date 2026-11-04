@@ -54,7 +54,7 @@ webhook_port: 5000
 
 # MCP tracer (stateless streamable HTTP)
 mcp_host: 0.0.0.0
-mcp_port: 8000
+mcp_port: 8002
 mcp_path: /mcp
 
 # Transcription (cpu = local pyannote + faster-whisper; modal = GPU on Modal A10)
