@@ -13,28 +13,22 @@ from typing import Any
 from agent.config import Config
 from agent.core.submit import submit_url
 
-# Appended to AGENT_SCHEMA in agent/db.py (also exported for tests that build schema).
-WATCH_SOURCES_SCHEMA = """
-CREATE TABLE IF NOT EXISTS watch_sources (
-    id TEXT PRIMARY KEY,
-    page_url TEXT NOT NULL UNIQUE,
-    item_pattern TEXT NOT NULL,
-    item_url_template TEXT NOT NULL,
-    cadence_seconds INTEGER NOT NULL DEFAULT 86400,
-    last_seen_json TEXT NOT NULL DEFAULT '[]',
-    last_polled_at TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-"""
-
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
 FetchHtml = Callable[[str], str]
 
 
 def extract_items(html: str, item_pattern: str) -> frozenset[str]:
-    """Return unique capture-group values from *html* matching *item_pattern*."""
-    return frozenset(re.findall(item_pattern, html))
+    """Return unique captured values from *html* matching *item_pattern*.
+
+    Uses the first capture group when the pattern has one (the common ``{item}``
+    case), else the full match. ``re.findall`` would return tuples for patterns
+    with multiple capture groups, which breaks ``serialize_last_seen``
+    (``json.dumps`` rejects tuples) and ``items_to_urls``.
+    """
+    return frozenset(
+        m.group(1) if m.lastindex else m.group(0)
+        for m in re.finditer(item_pattern, html)
+    )
 
 
 def diff_items(current: frozenset[str], last_seen: frozenset[str]) -> list[str]:
@@ -65,11 +59,14 @@ def serialize_last_seen(items: frozenset[str]) -> str:
 
 def merge_last_seen_after_poll(
     last_seen: frozenset[str],
-    current: frozenset[str],
-    newly_submitted: frozenset[str],
+    newly_seen: frozenset[str],
 ) -> frozenset[str]:
-    """Union prior last-seen, everything on the page now, and items we attempted."""
-    return last_seen | current | newly_submitted
+    """Union prior last-seen with items successfully handled this poll.
+
+    Items whose submission failed are left out of ``newly_seen`` so the next
+    poll retries them instead of dropping them permanently.
+    """
+    return last_seen | newly_seen
 
 
 def is_poll_due(
@@ -112,6 +109,15 @@ def register_watch_source(
         raise ValueError("cadence_seconds must be >= 1")
     if "{item}" not in item_url_template:
         raise ValueError("item_url_template must contain {item}")
+    try:
+        re.compile(item_pattern)
+    except re.error as exc:
+        raise ValueError(f"item_pattern is not a valid regex: {exc}") from exc
+    if baseline and fetch_html is None:
+        raise ValueError(
+            "baseline=True requires fetch_html to seed last_seen_json "
+            "(pass a fetcher, or baseline=False)"
+        )
 
     existing = conn.execute(
         "SELECT id FROM watch_sources WHERE page_url = ?",
@@ -194,24 +200,45 @@ def poll_watch_source(
     urls = items_to_urls(new_items, row["item_url_template"])
 
     submissions: list[dict[str, Any]] = []
-    for url in urls:
-        submissions.append(submit(url, config, conn))
+    newly_seen: set[str] = set()
+    for item, url in zip(new_items, urls):
+        try:
+            result = submit(url, config, conn)
+        except Exception as exc:  # isolate per-item failures so one bad item doesn't abort the poll
+            result = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+        submissions.append(result)
+        # Only mark an item as seen when it was actually enqueued, paused, or
+        # already in the vault. Failed submissions stay unseen so the next poll
+        # retries them instead of dropping them permanently.
+        if result.get("status") != "error":
+            newly_seen.add(item)
 
-    merged = merge_last_seen_after_poll(last_seen, current, frozenset(new_items))
+    merged = merge_last_seen_after_poll(last_seen, frozenset(newly_seen))
+    failed = any(s.get("status") == "error" for s in submissions)
     polled_at = now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with conn:
-        conn.execute(
-            """UPDATE watch_sources
-               SET last_seen_json = ?, last_polled_at = ?
-               WHERE page_url = ?""",
-            (serialize_last_seen(merged), polled_at, page_url),
-        )
+        if failed:
+            # Hold last_polled_at so the next scheduler tick (60s) retries the
+            # failed items instead of waiting a full cadence. Successfully
+            # handled items are still marked seen so they aren't re-submitted.
+            conn.execute(
+                "UPDATE watch_sources SET last_seen_json = ? WHERE page_url = ?",
+                (serialize_last_seen(merged), page_url),
+            )
+        else:
+            conn.execute(
+                """UPDATE watch_sources
+                   SET last_seen_json = ?, last_polled_at = ?
+                   WHERE page_url = ?""",
+                (serialize_last_seen(merged), polled_at, page_url),
+            )
 
     return {
         "page_url": page_url,
         "new_items": new_items,
         "submissions": submissions,
         "last_seen_count": len(merged),
+        "retry_pending": failed,
     }
 
 
@@ -223,18 +250,28 @@ def poll_all_due_sources(
     now: datetime | None = None,
     submit_fn: SubmitFn | None = None,
 ) -> list[dict[str, Any]]:
-    """Poll every enabled source whose cadence has elapsed."""
+    """Poll every enabled source whose cadence has elapsed.
+
+    A failure on one source is captured as an error entry and does not abort
+    polling of the remaining sources.
+    """
     now = now or datetime.now(timezone.utc)
     results: list[dict[str, Any]] = []
     for source in list_watch_sources(conn, enabled_only=True):
-        outcome = poll_watch_source(
-            conn,
-            source["page_url"],
-            config,
-            fetch_html=fetch_html,
-            now=now,
-            submit_fn=submit_fn,
-        )
+        try:
+            outcome = poll_watch_source(
+                conn,
+                source["page_url"],
+                config,
+                fetch_html=fetch_html,
+                now=now,
+                submit_fn=submit_fn,
+            )
+        except Exception as exc:  # isolate per-source failures
+            results.append(
+                {"page_url": source["page_url"], "error": f"{type(exc).__name__}: {exc}"}
+            )
+            continue
         if not outcome.get("skipped"):
             results.append(outcome)
     return results
@@ -249,16 +286,36 @@ def default_fetch_html(url: str) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
+def _poll_due_sources_in_thread(
+    config: Config,
+    fetch_html: FetchHtml,
+    submit_fn: SubmitFn | None,
+) -> list[dict[str, Any]]:
+    """Poll all due sources on a dedicated connection (runs off the event loop)."""
+    from agent.db import AGENT_SCHEMA, init_db
+
+    db_path = config.kb_agent_dir / "data" / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    try:
+        return poll_all_due_sources(conn, config, fetch_html=fetch_html, submit_fn=submit_fn)
+    finally:
+        conn.close()
+
+
 async def run_watch_scheduler(
     config: Config,
-    agent_conn: sqlite3.Connection,
     *,
     poll_interval_seconds: float = 60.0,
     fetch_html: FetchHtml | None = None,
     submit_fn: SubmitFn | None = None,
     stopping: Callable[[], bool] | None = None,
 ) -> None:
-    """Background loop: poll due watch sources every *poll_interval_seconds*."""
+    """Background loop: poll due watch sources every *poll_interval_seconds*.
+
+    Each tick does blocking HTTP fetch + SQLite writes, so it is offloaded to a
+    worker thread (``asyncio.to_thread``) to avoid stalling the consumer's event
+    loop and delaying task claiming.
+    """
     import asyncio
 
     fetch = fetch_html or default_fetch_html
@@ -266,12 +323,7 @@ async def run_watch_scheduler(
 
     while not is_stopping():
         try:
-            poll_all_due_sources(
-                agent_conn,
-                config,
-                fetch_html=fetch,
-                submit_fn=submit_fn,
-            )
+            await asyncio.to_thread(_poll_due_sources_in_thread, config, fetch, submit_fn)
         except Exception as exc:
             print(f"[watch_source] poll error: {exc}", flush=True)
         await asyncio.sleep(poll_interval_seconds)

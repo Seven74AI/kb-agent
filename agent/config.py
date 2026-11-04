@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 # Repo root, derived from this file's location — works in CI and any clone.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Production Obsidian vault (Seven74AI/obsidian-vault) on the VPS.
+DEFAULT_VAULT_PATH = Path("/root/obsidian-vault")
+# Retired kb-agent A/B comparison vault — must not receive new writes.
+RETIRED_AB_VAULT_PATH = Path("/root/kb-agent-vault")
+
 
 @dataclass
 class Config:
@@ -17,13 +22,18 @@ class Config:
 
     # ── Paths ──
     kb_agent_dir: Path = REPO_ROOT
-    vault_path: Path = REPO_ROOT.parent / "kb-agent-vault"
+    vault_path: Path = DEFAULT_VAULT_PATH
     cookie_dir: Path = REPO_ROOT / "cookies"
     temp_dir: Path = Path("/tmp")
 
     # ── Concurrency ──
     video_semaphore: int = 1
     text_parallel: int = 3
+
+    # ── Watch sources ──
+    # In-process background scheduler for recurring page watches. Disable when
+    # cron drives polling (scripts/watch_sources_poll.py) to avoid dual pollers.
+    watch_scheduler_enabled: bool = True
 
     # ── Retry ──
     retry_delays: list[int] = field(default_factory=lambda: [5, 15, 60, 180])
@@ -87,6 +97,34 @@ def _env_or_default(raw_value, env_key: str, default, convert=None):
     return raw_value if raw_value is not None else default
 
 
+def _as_bool(value) -> bool:
+    """Coerce an env string to bool (true/1/yes/on → True)."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+def _resolve_vault_path(raw: dict) -> Path:
+    """Resolve vault_path from env, YAML, or default; block the retired A/B vault."""
+    env_path = os.getenv("KB_VAULT_PATH") or os.getenv("OBSIDIAN_VAULT_PATH")
+    if env_path is not None:
+        path = Path(env_path)
+    else:
+        path = Path(raw.get("vault_path", str(DEFAULT_VAULT_PATH)))
+
+    try:
+        resolved = path.resolve()
+        retired = RETIRED_AB_VAULT_PATH.resolve()
+    except (OSError, RuntimeError):
+        resolved = path
+        retired = RETIRED_AB_VAULT_PATH
+
+    if resolved == retired:
+        raise ValueError(
+            f"vault_path {path} is the retired A/B vault; point kb-agent at "
+            f"{DEFAULT_VAULT_PATH} (Seven74AI/obsidian-vault) instead"
+        )
+    return path
+
+
 def load_config(config_path: Path | None = None, env_path: Path | None = None) -> Config:
     """Load configuration from YAML file and .env, returning a typed Config object.
 
@@ -126,12 +164,16 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
     return Config(
         # Paths
         kb_agent_dir=Path(raw.get("kb_agent_dir", str(REPO_ROOT))),
-        vault_path=Path(raw.get("vault_path", str(REPO_ROOT.parent / "kb-agent-vault"))),
+        vault_path=_resolve_vault_path(raw),
         cookie_dir=Path(raw.get("cookie_dir", str(REPO_ROOT / "cookies"))),
         temp_dir=Path(raw.get("temp_dir", "/tmp")),
         # Concurrency
         video_semaphore=int(_env_or_default(raw.get("video_semaphore"), "KB_VIDEO_SEMAPHORE", 1)),
         text_parallel=int(_env_or_default(raw.get("text_parallel"), "KB_TEXT_PARALLEL", 3)),
+        # Watch sources
+        watch_scheduler_enabled=_env_or_default(
+            raw.get("watch_scheduler_enabled"), "KB_WATCH_SCHEDULER_ENABLED", True, convert=_as_bool
+        ),
         # Retry
         retry_delays=raw.get("retry_delays", [5, 15, 60, 180]),
         max_retries=int(_env_or_default(raw.get("max_retries"), "KB_MAX_RETRIES", 5)),

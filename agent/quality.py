@@ -71,7 +71,7 @@ def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) ->
 
     # Fact-check count — count bullet points under \"### Factual Issues\"
     # within \"## Critical Analysis\"
-    fact_check_count = _count_fact_checks(lines)
+    fact_check_count = count_fact_checks(lines)
     if fact_check_count < config.article_min_fact_checks:
         failures.append(
             f"Too few fact checks: {fact_check_count} < "
@@ -171,7 +171,7 @@ def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -
 
     # Fact-check count — count bullet points under "### Factual Issues"
     # within "## Critical Analysis"
-    fact_check_count = _count_fact_checks(lines)
+    fact_check_count = count_fact_checks(lines)
     if fact_check_count < config.book_min_fact_checks:
         failures.append(
             f"Too few fact checks: {fact_check_count} < "
@@ -295,7 +295,7 @@ def _find_section(lines: list[str], name: str) -> int | None:
     return None
 
 
-def _count_fact_checks(lines: list[str]) -> int:
+def count_fact_checks(lines: list[str]) -> int:
     """Count bullet-point entries under ### Factual Issues within ## Critical Analysis.
 
     Counts lines starting with '- ' or '* ' inside the Factual Issues subsection.

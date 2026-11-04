@@ -3,7 +3,7 @@
 No Flask or MCP imports in this package.
 """
 
-from agent.core.bulk import bulk_import, ingest_playlist
+from agent.core.bulk import bulk_import, expand_youtube_playlist, ingest_playlist
 from agent.core.detect import detect_type
 from agent.core.note import get_note
 from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
@@ -11,6 +11,7 @@ from agent.core.resume import normalize_reason_pattern, resume_tasks, retry_task
 from agent.core.search import search_notes
 from agent.core.slugify import slugify
 from agent.core.status import compute_staleness, format_elapsed, get_task, list_tasks
+from agent.core.sources import lookup_all_sources, register_source, update_source_state
 from agent.core.submit import plan_submission, submit_plan, submit_url
 from agent.core.watch_source import (
     diff_items,
@@ -26,7 +27,6 @@ from agent.core.watch_source import (
 
 __all__ = [
     "PIPELINE_STEPS",
-    "bulk_import",
     "compute_staleness",
     "diff_items",
     "detect_type",
@@ -34,7 +34,6 @@ __all__ = [
     "format_elapsed",
     "get_note",
     "get_task",
-    "ingest_playlist",
     "is_poll_due",
     "items_to_urls",
     "list_tasks",
@@ -44,6 +43,8 @@ __all__ = [
     "poll_all_due_sources",
     "poll_watch_source",
     "register_watch_source",
+    "lookup_all_sources",
+    "register_source",
     "resume_tasks",
     "run_watch_scheduler",
     "retry_task",
@@ -52,4 +53,8 @@ __all__ = [
     "steps_for_content_type",
     "submit_plan",
     "submit_url",
+    "update_source_state",
+    "bulk_import",
+    "expand_youtube_playlist",
+    "ingest_playlist",
 ]
