@@ -4,7 +4,7 @@
 Usage:
     python3 mcp_server.py
 
-Exposes submit_url and detect_type wired to agent.core. Run alongside run.py
+Exposes the full kb-agent MCP tool surface wired to agent.core. Run alongside run.py
 (consumer + Flask dashboard) so submitted tasks are processed into vault notes.
 """
 

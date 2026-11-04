@@ -1,4 +1,4 @@
-"""MCP tracer — stateless streamable HTTP tools (submit_url, detect_type)."""
+"""MCP server — stateless streamable HTTP tools (full kb-agent surface)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 from agent.config import Config
 from agent.core import get_note
-from agent.db import AGENT_SCHEMA, init_db
+from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.llm import LLMResponse
 from agent.mcp.server import build_mcp_server
 from agent.pipelines.web import step_synthesize_web
@@ -20,6 +20,20 @@ from fastmcp.utilities.tests import asgi_server
 
 CORE_ROOT = Path(__file__).resolve().parents[1] / "agent" / "core"
 FORBIDDEN_IMPORT_ROOTS = {"flask", "mcp", "fastmcp"}
+
+EXPECTED_MCP_TOOLS = frozenset({
+    "submit_url",
+    "detect_type",
+    "list_tasks",
+    "get_task",
+    "resume_task",
+    "retry_task",
+    "search_notes",
+    "get_note",
+    "ingest_playlist",
+    "bulk_import",
+    "watch_source",
+})
 
 
 def _module_import_roots(source: str) -> set[str]:
@@ -66,7 +80,7 @@ async def _with_stateless_client(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_lists_submit_url_and_detect_type(mcp_server):
+async def test_mcp_exposes_eleven_tools(mcp_server):
     async with asgi_server(
         mcp_server,
         transport="streamable-http",
@@ -76,7 +90,7 @@ async def test_mcp_lists_submit_url_and_detect_type(mcp_server):
         async with running.client() as client:
             tools = await client.list_tools()
             names = {t.name for t in tools}
-            assert names == {"submit_url", "detect_type"}
+            assert names == EXPECTED_MCP_TOOLS
 
 
 @pytest.mark.asyncio
@@ -195,3 +209,180 @@ def test_http_app_stateless_streamable_transport(mcp_server):
         stateless_http=True,
     )
     assert app is not None
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_and_get_task(mcp_server, mcp_config, monkeypatch):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    db_path = mcp_config.kb_agent_dir / "data" / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://example.com/list-me",
+        "web",
+        "list_me",
+        ["extract"],
+    )
+    conn.close()
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client() as client:
+            listed = await client.call_tool("list_tasks", {"limit": 10})
+            body = listed.data
+            assert body["counts"]["total"] >= 1
+            got = await client.call_tool("get_task", {"task_id": task_id})
+            payload = got.data
+            assert payload["found"] is True
+            assert payload["task"]["id"] == task_id
+
+
+@pytest.mark.asyncio
+async def test_mcp_resume_and_retry_task(mcp_server, mcp_config):
+    db_path = mcp_config.kb_agent_dir / "data" / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(conn, "https://x.com", "web", "x", ["s1"], status="paused")
+    conn.execute("UPDATE tasks SET error = ? WHERE id = ?", ("cookies bad", task_id))
+    conn.commit()
+    conn.close()
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client() as client:
+            resumed = await client.call_tool("resume_task", {"reason": "cookies"})
+            assert resumed.data["resumed"] == 1
+
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task_id,))
+            conn.commit()
+            conn.close()
+
+            retried = await client.call_tool("retry_task", {"task_id": task_id})
+            assert retried.data["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_notes_and_get_note(mcp_server, mcp_config):
+    articles = mcp_config.vault_path / "Knowledge base" / "articles"
+    (articles / "mcp-search.md").write_text("# MCP\nquantum field notes\n", encoding="utf-8")
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client() as client:
+            hits = await client.call_tool("search_notes", {"query": "quantum"})
+            assert any("mcp-search" in h["slug"] for h in hits.data)
+            note = await client.call_tool(
+                "get_note", {"slug": "mcp-search", "content_type": "web"}
+            )
+            assert note.data["found"] is True
+            assert "quantum" in note.data["note"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_bulk_import_calls_submit_per_url(mcp_server, mcp_config, monkeypatch):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    db_path = mcp_config.kb_agent_dir / "data" / "agent.db"
+    init_db(db_path, AGENT_SCHEMA)
+    calls: list[str] = []
+
+    def track_submit(url, config, conn):
+        calls.append(url)
+        from agent.core.submit import submit_url as real_submit
+
+        return real_submit(url, config, conn)
+
+    monkeypatch.setattr("agent.core.bulk.submit_url", track_submit)
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client() as client:
+            result = await client.call_tool(
+                "bulk_import",
+                {"urls": ["https://a.com/1", "https://a.com/2"]},
+            )
+            body = result.data
+            assert body["count"] == 2
+            assert len(body["results"]) == 2
+    assert calls == ["https://a.com/1", "https://a.com/2"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_ingest_playlist_expands_to_submit(mcp_server, mcp_config, monkeypatch):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    db_path = mcp_config.kb_agent_dir / "data" / "agent.db"
+    init_db(db_path, AGENT_SCHEMA)
+
+    def fake_expand(_playlist: str) -> list[str]:
+        return [
+            "https://youtube.com/watch?v=aaa",
+            "https://youtube.com/watch?v=bbb",
+        ]
+
+    monkeypatch.setattr("agent.core.bulk.expand_youtube_playlist", fake_expand)
+    calls: list[str] = []
+
+    def track_submit(url, config, conn):
+        calls.append(url)
+        from agent.core.submit import submit_url as real_submit
+
+        return real_submit(url, config, conn)
+
+    monkeypatch.setattr("agent.core.bulk.submit_url", track_submit)
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client() as client:
+            result = await client.call_tool(
+                "ingest_playlist",
+                {"playlist_url": "https://youtube.com/playlist?list=PLtest"},
+            )
+            body = result.data
+            assert body["status"] == "ok"
+            assert body["count"] == 2
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_watch_source_registers(mcp_server, mcp_config):
+    db_path = mcp_config.kb_agent_dir / "data" / "agent.db"
+    init_db(db_path, AGENT_SCHEMA)
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client() as client:
+            result = await client.call_tool(
+                "watch_source",
+                {
+                    "page_url": "https://example.com/listing",
+                    "item_pattern": r"video/(\d+)",
+                    "item_url_template": "https://example.com/watch/{item}",
+                    "baseline": False,
+                },
+            )
+            row = result.data
+            assert row["page_url"] == "https://example.com/listing"
+            assert "{item}" in row["item_url_template"] or "watch" in row["item_url_template"]

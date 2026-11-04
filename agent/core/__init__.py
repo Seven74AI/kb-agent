@@ -3,6 +3,7 @@
 No Flask or MCP imports in this package.
 """
 
+from agent.core.bulk import bulk_import, ingest_playlist
 from agent.core.detect import detect_type
 from agent.core.note import get_note
 from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
@@ -25,6 +26,7 @@ from agent.core.watch_source import (
 
 __all__ = [
     "PIPELINE_STEPS",
+    "bulk_import",
     "compute_staleness",
     "diff_items",
     "detect_type",
@@ -32,6 +34,7 @@ __all__ = [
     "format_elapsed",
     "get_note",
     "get_task",
+    "ingest_playlist",
     "is_poll_due",
     "items_to_urls",
     "list_tasks",
