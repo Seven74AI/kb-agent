@@ -554,7 +554,7 @@ def test_step_minio_upload_with_mock(config, task_dict):
         note_path.write_text("""---
 date: 2026-06-19
 source: test
-minio: http://vmi3304846.tail5c02a1.ts.net:9000/kb-agent-archive/placeholder/slug.md
+minio: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/placeholder/slug.md
 ---
 
 # Test
@@ -574,7 +574,7 @@ minio: http://vmi3304846.tail5c02a1.ts.net:9000/kb-agent-archive/placeholder/slu
         f"Placeholder was not replaced."
     )
     # The minio: field in frontmatter must point to the real URL (not the placeholder path)
-    assert "kb-agent-archive/articles/" in updated_content, (
+    assert "knowledge-base/articles/" in updated_content, (
         "MinIO URL should contain the real folder path (articles/...), not the template placeholder"
     )
 

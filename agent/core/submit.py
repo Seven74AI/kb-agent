@@ -59,7 +59,7 @@ def submit_plan(agent_conn: sqlite3.Connection, plan: dict, tags=None) -> dict:
     """Enqueue a task from a plan produced by :func:`plan_submission`."""
     if plan["status"] == "paused":
         task_id = create_task(
-            agent_conn, plan["url"], plan["platform"], plan["slug"], plan["steps"],
+            agent_conn, plan["url"], plan["content_type"], plan["slug"], plan["steps"],
             status="paused", tags=tags,
         )
         agent_conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (plan["reason"], task_id))
@@ -72,7 +72,7 @@ def submit_plan(agent_conn: sqlite3.Connection, plan: dict, tags=None) -> dict:
             "task_id": task_id,
         }
 
-    task_id = create_task(agent_conn, plan["url"], plan["platform"], plan["slug"], plan["steps"], tags=tags)
+    task_id = create_task(agent_conn, plan["url"], plan["content_type"], plan["slug"], plan["steps"], tags=tags)
     return {
         "status": "pending",
         "http_status": 201,

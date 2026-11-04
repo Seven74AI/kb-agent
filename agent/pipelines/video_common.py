@@ -64,19 +64,34 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
             step_name="fetch_transcript",
         )
 
-    # Synthesize-only path skips extract_metadata; write minimal metadata so
-    # downstream density checks (e.g. YouTube _check_density) can run.
+    # Synthesize-only path skips extract_metadata: normalize batch segments
+    # (`time` -> `start`/`end`) and write minimal metadata so downstream density
+    # checks (e.g. YouTube _check_density) can run.
+    try:
+        data = json.loads(merged_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise StepError(
+            f"Transcript fetch produced invalid JSON: {exc}",
+            error_type=ErrorType.RETRY,
+            step_name="fetch_transcript",
+        )
+    segs = data.get("segments", [])
+    if not segs:
+        raise StepError(
+            "Transcript has no segments",
+            error_type=ErrorType.RETRY,
+            step_name="fetch_transcript",
+        )
+    for i, seg in enumerate(segs):
+        if isinstance(seg, dict) and "time" in seg and "start" not in seg:
+            seg["start"] = seg.pop("time")
+        if isinstance(seg, dict) and "end" not in seg:
+            nxt = segs[i + 1].get("start", segs[i + 1].get("time")) if i + 1 < len(segs) else None
+            seg["end"] = nxt if nxt is not None else seg.get("start", 0) + 5.0
+    merged_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
     meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
     if not meta_path.exists():
-        duration = 0.0
-        try:
-            merged = json.loads(merged_path.read_text(encoding="utf-8"))
-            duration = _duration_from_merged(merged)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            duration = 0.0
-        meta_path.write_text(
-            json.dumps({"duration": duration}),
-            encoding="utf-8",
-        )
+        meta_path.write_text(json.dumps({"duration": _duration_from_merged(data)}), encoding="utf-8")
 
     return str(merged_path)

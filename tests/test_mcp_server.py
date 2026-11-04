@@ -23,6 +23,7 @@ FORBIDDEN_IMPORT_ROOTS = {"flask", "mcp", "fastmcp"}
 
 EXPECTED_MCP_TOOLS = frozenset({
     "submit_url",
+    "ingest",
     "detect_type",
     "list_tasks",
     "get_task",
@@ -33,6 +34,7 @@ EXPECTED_MCP_TOOLS = frozenset({
     "ingest_playlist",
     "bulk_import",
     "watch_source",
+    "run_batch",
 })
 
 
@@ -297,13 +299,15 @@ async def test_mcp_bulk_import_calls_submit_per_url(mcp_server, mcp_config, monk
     init_db(db_path, AGENT_SCHEMA)
     calls: list[str] = []
 
-    def track_submit(url, config, conn):
+    import agent.mcp.server as mcp_server_mod
+
+    real_routed = mcp_server_mod.submit_routed
+
+    def track_routed(url, config, conn, *, tags=None):
         calls.append(url)
-        from agent.core.submit import submit_url as real_submit
+        return real_routed(url, config, conn, tags=tags)
 
-        return real_submit(url, config, conn)
-
-    monkeypatch.setattr("agent.core.bulk.submit_url", track_submit)
+    monkeypatch.setattr(mcp_server_mod, "submit_routed", track_routed)
 
     async with asgi_server(
         mcp_server,
@@ -337,13 +341,15 @@ async def test_mcp_ingest_playlist_expands_to_submit(mcp_server, mcp_config, mon
     monkeypatch.setattr("agent.core.bulk.expand_youtube_playlist", fake_expand)
     calls: list[str] = []
 
-    def track_submit(url, config, conn):
+    import agent.mcp.server as mcp_server_mod
+
+    real_routed = mcp_server_mod.submit_routed
+
+    def track_routed(url, config, conn, *, tags=None):
         calls.append(url)
-        from agent.core.submit import submit_url as real_submit
+        return real_routed(url, config, conn, tags=tags)
 
-        return real_submit(url, config, conn)
-
-    monkeypatch.setattr("agent.core.bulk.submit_url", track_submit)
+    monkeypatch.setattr(mcp_server_mod, "submit_routed", track_routed)
 
     async with asgi_server(
         mcp_server,

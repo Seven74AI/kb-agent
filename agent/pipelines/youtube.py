@@ -1260,6 +1260,8 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
     note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
     if not note_path.exists():
         return
+    if not uploaded:
+        return
 
     tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
     content = note_path.read_text(encoding="utf-8")

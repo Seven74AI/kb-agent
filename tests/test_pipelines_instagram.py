@@ -440,21 +440,48 @@ class TestMinIO:
     """Tests for step_ig_minio_upload."""
 
     @patch("subprocess.run")
-    def test_minio_upload_success(self, mock_run, config, reel_task):
-        note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{reel_task['slug']}.md"
+    def test_minio_upload_reel_source_archival(self, mock_run, config, reel_task):
+        slug = reel_task["slug"]
+        note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{slug}.md"
         note_path.write_text("""---
 date: 2026-01-01
 source: instagram.com
-minio: <filled by archival step>
+source_files:
+  video: <filled by archival step>
+---
+# Content""")
+
+        Path(config.temp_dir / f"{slug}_reel.mp4").write_bytes(b"video")
+        Path(config.temp_dir / f"{slug}_merged.json").write_text("{}")
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        result = step_ig_minio_upload(reel_task, config)
+        assert result.startswith("Uploaded:")
+        assert f"videos/{slug}.mp4" in result
+        assert f"transcripts/{slug}.json" in result
+
+        content = note_path.read_text()
+        assert "source_files:" in content
+        assert f"videos/{slug}.mp4" in content
+
+    @patch("subprocess.run")
+    def test_minio_upload_post_note_archival(self, mock_run, config, post_task):
+        slug = post_task["slug"]
+        note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{slug}.md"
+        note_path.write_text("""---
+date: 2026-01-01
+source: instagram.com
+raw: <filled by archival step>
 ---
 # Content""")
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
-        result = step_ig_minio_upload(reel_task, config)
-        assert "http://vmi3304846.tail5c02a1.ts.net:9000/" in result
+        result = step_ig_minio_upload(post_task, config)
+        assert result.startswith("http://vmi3304846.tail5c02a1.ts.net:9000/")
 
         content = note_path.read_text()
-        assert "minio: http://vmi3304846.tail5c02a1.ts.net:9000/" in content
+        assert f"raw: {result}" in content
+        assert "<filled by archival step>" not in content
 
 
 # ── Git Push ─────────────────────────────────────────────────────────────────

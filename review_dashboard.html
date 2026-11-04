@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kb-agent · Review &amp; State</title>
+<style>
+  :root { --bg:#0e1117; --card:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e; --green:#3fb950; --red:#f85149; --amber:#d29922; --blue:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
+  header { border-bottom:1px solid var(--border); padding-bottom:20px; margin-bottom:28px; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  .sub { color:var(--muted); font-size:13px; }
+  h2 { font-size:19px; margin:34px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:22px 0 8px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+  .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .card .v { font-size:20px; font-weight:600; margin-top:4px; }
+  .ok { color:var(--green); } .bad { color:var(--red); } .warn { color:var(--amber); }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  code { background:#21262d; padding:1px 5px; border-radius:4px; font-size:13px; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.c { background:#2d1b1b; color:var(--red); } .pill.h { background:#2d2314; color:var(--amber); }
+  .pill.m { background:#1b2330; color:var(--blue); } .pill.l { background:#1c2a1c; color:var(--green); }
+  ul { margin:6px 0; padding-left:20px; } li { margin:5px 0; }
+  .tag { color:var(--muted); font-size:12px; }
+  a { color:var(--blue); }
+  .muted { color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>kb-agent — Review &amp; State Report</h1>
+    <div class="sub">2026-11-04 · 59 commits since 2026-10-10 · Seven74AI/kb-agent · 9 parallel Cursor agents + app-state audit</div>
+  </header>
+
+  <h2>App Status</h2>
+  <div class="cards">
+    <div class="card"><div class="k">CI</div><div class="v ok">green · 423 passed</div></div>
+    <div class="card"><div class="k">kb-agent</div><div class="v ok">active</div></div>
+    <div class="card"><div class="k">kb-mcp</div><div class="v ok">active · 13 tools</div></div>
+    <div class="card"><div class="k">Vault notes</div><div class="v">420</div></div>
+    <div class="card"><div class="k">MinIO objects</div><div class="v">803</div></div>
+    <div class="card"><div class="k">Disk</div><div class="v warn">67%</div></div>
+  </div>
+
+  <h2>1 · Executive Summary</h2>
+  <p>kb-agent consolidated from a Hermes-submission pipeline into a stateless MCP server + consumer with a durable deferred-ingestion queue. This pass found and fixed two real bugs (video-archive ordering, missing <code>see_also</code> step) plus the CI suite drift. App is healthy; 8 failed / 1 paused task rows remain stale test artifacts.</p>
+
+  <h2>2 · Change Inventory</h2>
+  <table>
+    <tr><th>Theme</th><th>What changed</th></tr>
+    <tr><td>Video batch processing</td><td>durable <code>ingest_queue</code> → nightly <code>batch_ingest.py</code> (download → one Modal run → upload → synthesize-only dispatch)</td></tr>
+    <tr><td>Frontmatter</td><td>ADR-002 <code>source_files:</code> (video: <code>video</code>+<code>transcript</code>; text: <code>raw</code>/<code>text</code>)</td></tr>
+    <tr><td>Slug</td><td><code>SLUG_MAX_LEN=128</code>, preserve YouTube <code>?v=ID</code></td></tr>
+    <tr><td>Tags</td><td>user tags threaded to note frontmatter (deterministic merge)</td></tr>
+    <tr><td>Bucket</td><td><code>knowledge-base</code> restored as sole bucket</td></tr>
+    <tr><td>MCP</td><td>13 tools, uniform <code>{status,error,traceback}</code> envelope</td></tr>
+  </table>
+
+  <h2>3 · Review Findings <span class="tag">43 total · severity-graded</span></h2>
+
+  <h3>Critical — fixed this pass <span class="pill c">2</span></h3>
+  <ul>
+    <li><b>Video never archived</b> — <code>ig_cleanup</code>/<code>threads_cleanup</code> ran <em>before</em> <code>minio_upload</code> and deleted the video file, so the full reel/threads pipeline could never archive it. <b>Fixed:</b> <code>minio_upload</code> now precedes <code>cleanup</code>.</li>
+    <li><b>Missing <code>see_also</code></b> — enqueue-time <code>PIPELINE_STEPS</code> omitted <code>see_also</code> for youtube/instagram/threads/books, so See Also wikilinks were never generated. <b>Fixed:</b> added to all seven lists.</li>
+  </ul>
+
+  <h3>High — recommended <span class="pill h">11</span></h3>
+  <ul>
+    <li><code>submit.py</code> — <code>create_task</code> gets <code>platform</code> but steps come from <code>content_type</code>; a <code>threads</code> row can carry <code>threads_video</code> steps.</li>
+    <li><code>slugify.py</code> — truncation can cut <code>_v_&lt;id&gt;</code> mid-suffix → distinct videos collide.</li>
+    <li><code>bulk.py</code> + <code>watch_source.py</code> — default <code>submit_fn=submit_url</code>; playlist/watch paths bypass the deferred batch.</li>
+    <li><code>youtube.py</code> + <code>bunny_stream.py</code> — <code>_update_note_*</code> rewrites <code>source_files:</code> even when <code>uploaded</code> is empty.</li>
+    <li><code>video_common.py</code> — <code>fetch_transcript</code> doesn't normalize segment <code>time</code>→<code>start</code>/<code>end</code>.</li>
+    <li><code>batch_ingest.py</code> + <code>batch_transcribe.py</code> — subprocess/ffmpeg/Modal <code>returncode</code> ignored.</li>
+    <li><code>batch_ingest.py</code> — dispatch + status update not atomic → duplicate tasks on crash.</li>
+    <li><code>server.py</code> — <code>run_batch</code> lock TOCTOU; <code>resume_task("")</code> resumes all paused.</li>
+  </ul>
+
+  <h3>Medium <span class="pill m">13</span> &amp; Low <span class="pill l">12</span></h3>
+  <p class="muted">Indented <code>tags:</code> not matched by <code>append_note_tags</code>; <code>dedup_check</code> greps URL as regex (no <code>-F</code>); hardcoded Tailscale host / cookie paths / <code>/root/kb-agent</code>; missing <code>mega_video</code> pipeline; density-gate skipped on synthesize-only path; <code>youtu.be</code>/<code>shorts</code>/<code>embed</code> IDs unhandled; <code>StepError</code> logged without traceback. Full list in <code>docs/review-2026-11-04.md</code>.</p>
+
+  <h2>4 · Whole-App State</h2>
+  <table>
+    <tr><th>Aspect</th><th>State</th></tr>
+    <tr><td>Services</td><td><span class="ok">kb-agent active</span> · <span class="ok">kb-mcp active</span></td></tr>
+    <tr><td>Config</td><td>vault <code>/root/Documents/Obsidian Vault</code> · bucket <code>knowledge-base</code> · LLM <code>deepseek-v4-pro</code></td></tr>
+    <tr><td>Tasks</td><td>10 done · 8 failed · 1 paused <span class="muted">(failed = stale benchmark/test)</span></td></tr>
+    <tr><td>Queue</td><td>12 queued (youtube playlist test) · 1 watch source (TDAH)</td></tr>
+    <tr><td>CI</td><td><span class="ok">green</span> — 423 passed (PR #51 merged)</td></tr>
+    <tr><td>Crons</td><td><code>KB ingest nightly batch</code> @ 02:00 active</td></tr>
+  </table>
+
+  <h2>5 · Recommended Follow-ups</h2>
+  <ol>
+    <li>Purge 8 failed + 1 paused stale task rows.</li>
+    <li>Batch-fix the 11 high-priority findings (§3, independent — good Cursor batch-fix candidates).</li>
+    <li>Add a DeepSeek prepaid-balance monitor (crons risk 402 on depletion).</li>
+  </ol>
+
+  <footer class="muted" style="margin-top:40px;border-top:1px solid var(--border);padding-top:16px;">
+    Full report: <a href="https://github.com/Seven74AI/kb-agent/blob/main/docs/review-2026-11-04.md">docs/review-2026-11-04.md</a>
+  </footer>
+</div>
+</body>
+</html>

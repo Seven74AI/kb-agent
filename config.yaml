@@ -43,7 +43,7 @@ edgee_api_key: ""             # EDGEE_API_KEY from .env (separate from DEEPSEEK_
 
 # MinIO
 minio_endpoint: http://localhost:9000
-minio_bucket: kb-agent-archive
+minio_bucket: knowledge-base
 
 # Firecrawl (shared with Hermes)
 firecrawl_url: http://localhost:3002/v2/scrape
