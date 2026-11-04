@@ -2,7 +2,7 @@
 
 # Paths
 kb_agent_dir: /root/kb-agent
-vault_path: /root/kb-agent-vault
+vault_path: /root/obsidian-vault
 cookie_dir: /root/kb-agent/cookies
 temp_dir: /tmp
 

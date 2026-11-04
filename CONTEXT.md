@@ -307,7 +307,7 @@ Both Hermes and KB Agent run on the same VPS but are fully isolated:
 | Resource | Hermes | KB Agent |
 |---|---|---|
 | MinIO bucket | `knowledge-base/` | `kb-agent-archive/` |
-| Obsidian vault | `OBSIDIAN_VAULT_PATH` | `/root/kb-agent-vault/` |
+| Obsidian vault | `OBSIDIAN_VAULT_PATH` / `KB_VAULT_PATH` | `/root/obsidian-vault/` (shared main vault) |
 | Cookies | `/root/.hermes/cookies/` | `/root/kb-agent/cookies/` |
 | Config | `~/.hermes/` | `/root/kb-agent/` |
 | Firecrawl | `localhost:3002` (shared, stateless) | Same |
@@ -328,19 +328,14 @@ against yt-dlp overwrites) and re-validates paused tasks for that platform.
 - Temp path isolation: `/tmp/book_{slug}.epub`, `/tmp/book_{slug}_full.txt`.
   No shared `/tmp/book.epub` — parallel book tasks each get unique paths.
 
-## Vault Bootstrap
+## Vault
 
-- **Empty vault.** Starts with nothing — no notes, no templates, no folder structure.
-  First note creates the vault. See Also returns zero results until the vault builds
-  critical mass (~50 notes). This enforces isolation: every note in the vault was
-  produced by KB Agent, no confusion about provenance.
-- **Inherits Hermes structure.** Same folder conventions (`articles/`, `videos/`,
-  `books/`, etc.), same frontmatter format (YAML: `source_url`, `content_type`, `date`,
-  `tags`, MinIO links). Structure is identical so the only variable in A/B comparison
-  is synthesis quality — not format, not folders.
-- **Separate private Git repo.** New repo (e.g. `kb-agent-obsidian-vault`) — not the
-  existing `Seven74AI/obsidian-vault`. Two Obsidian windows, two repos, side-by-side
-  comparison. Private until KB Agent earns trust.
+- **Main production vault.** KB Agent writes to the same Obsidian Git repo as Hermes:
+  `Seven74AI/obsidian-vault` at `/root/obsidian-vault/` (override with `KB_VAULT_PATH`
+  or `OBSIDIAN_VAULT_PATH`). The separate `/root/kb-agent-vault/` A/B repo is retired —
+  config rejects that path so new notes cannot land there.
+- **Shared structure.** Same folder conventions (`articles/`, `videos/`, `books/`, etc.)
+  and frontmatter (YAML: `source_url`, `content_type`, `date`, `tags`, MinIO links).
 
 ## Testing / Rollout
 - **Two independent systems.** No automated mirroring. No same-URL-to-both.
