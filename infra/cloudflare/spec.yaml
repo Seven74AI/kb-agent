@@ -1,0 +1,19 @@
+# Source of truth for mcp.sevend.io on the sevend-io-stream Cloudflare Tunnel.
+# When adopting an existing tunnel, insert any pre-existing ingress rules above
+# the MCP hostname entry (keep http_status:404 last).
+
+zone_name: sevend.io
+tunnel_name: sevend-io-stream
+
+mcp:
+  hostname: mcp.sevend.io
+  origin: http://127.0.0.1:8000
+
+consumer_keys:
+  - cursor_cloud
+  - mac_local
+
+tunnel_ingress:
+  - hostname: mcp.sevend.io
+    service: http://127.0.0.1:8000
+  - service: http_status:404

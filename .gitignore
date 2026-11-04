@@ -10,3 +10,9 @@ dist/
 .vscode/
 cookies/
 spawn_*.py
+
+# Terraform (infra/cloudflare)
+infra/cloudflare/.terraform/
+infra/cloudflare/*.tfstate
+infra/cloudflare/*.tfstate.*
+infra/cloudflare/terraform.tfvars
