@@ -23,7 +23,7 @@ from agent.core.status import list_tasks as core_list_tasks
 from agent.core.submit import submit_url as core_submit_url
 from agent.core.submit import submit_ingest as core_submit_ingest
 from agent.core.batch_lock import is_locked
-from agent.core.watch_source import register_watch_source
+from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
 from agent.mcp.db import open_agent_conn, open_logs_conn
 
@@ -122,10 +122,10 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
 
     @mcp.tool
     def ingest_playlist(playlist_url: str) -> dict[str, Any]:
-        """Expand a YouTube playlist and submit each video URL."""
+        """Expand a YouTube playlist and queue each video (deferred batch)."""
         conn = open_agent_conn(cfg)
         try:
-            return core_ingest_playlist(playlist_url, cfg, conn)
+            return core_ingest_playlist(playlist_url, cfg, conn, submit_fn=submit_routed)
         finally:
             conn.close()
 
