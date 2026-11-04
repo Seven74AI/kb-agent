@@ -20,4 +20,4 @@ def slugify(url: str) -> str:
     video_id = f"_v_{m.group(1)}" if m else ""
     slug = re.sub(r"[?#].*", "", slug)
     slug = re.sub(r"[^a-zA-Z0-9._-]", "_", slug)
-    return (slug + video_id)[:SLUG_MAX_LEN]
+    return slug[: SLUG_MAX_LEN - len(video_id)] + video_id

@@ -125,6 +125,9 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
             capture_output=True, text=True, timeout=7200,
         )
         print((r.stdout or r.stderr)[-1500:])
+        if r.returncode != 0:
+            print(f"  [error] batch_transcribe failed ({r.returncode}); leaving {ctype} queued")
+            continue
 
         # 3. upload video + transcript, then dispatch synthesize-only
         for q, vdest in items:
@@ -138,6 +141,7 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"  [warn] {q['slug']}: upload failed ({exc}); leaving queued")
                 continue
+            update_ingest_status(conn, q["id"], "dispatching")
             rr = dispatch_synthesize(
                 q["url"], config, conn,
                 content_type=f"{q['content_type']}_synthesize", slug=q["slug"],

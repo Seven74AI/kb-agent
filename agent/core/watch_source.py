@@ -192,7 +192,7 @@ def poll_watch_source(
     if not force and not is_poll_due(row["last_polled_at"], row["cadence_seconds"], now):
         return {"page_url": page_url, "skipped": True, "reason": "not_due"}
 
-    submit = submit_fn or submit_url
+    submit = submit_fn or submit_routed
     html = fetch_html(page_url)
     current = extract_items(html, row["item_pattern"])
     last_seen = parse_last_seen(row["last_seen_json"])

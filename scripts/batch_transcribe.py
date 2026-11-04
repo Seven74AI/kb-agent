@@ -72,7 +72,9 @@ def main():
         base = os.path.splitext(f)[0]
         if f.lower().endswith(VIDEO_EXTS):
             wav = os.path.join(wav_dir, base + ".wav")
-            sh(["ffmpeg", "-y", "-loglevel", "error", "-i", p, "-ac", "1", "-ar", "16000", wav])
+            if sh(["ffmpeg", "-y", "-loglevel", "error", "-i", p, "-ac", "1", "-ar", "16000", wav]).returncode != 0:
+                print(f"[warn] {f}: ffmpeg failed; skipping")
+                continue
             names.append(base)
         elif f.lower().endswith(".wav"):
             shutil.copy(p, os.path.join(wav_dir, f))
@@ -92,6 +94,9 @@ def main():
         cmd += ["--initial-prompt", prompt]
     r = sh(cmd, cwd=MODAL, timeout=3600)
     print((r.stdout or r.stderr)[-1500:])
+    if r.returncode != 0:
+        print(f"[error] Modal run failed ({r.returncode}); aborting")
+        return r.returncode
 
     made = []
     for n in names:

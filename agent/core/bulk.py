@@ -9,7 +9,6 @@ from collections.abc import Callable
 import sqlite3
 
 from agent.config import Config
-from agent.core.submit import submit_url
 
 # yt-dlp lives in the py3.11 hermes-agent venv; the MCP server runs in a separate
 # mcp-venv with system PATH (no yt-dlp), so resolve it explicitly.
@@ -51,8 +50,12 @@ def bulk_import(
     *,
     submit_fn: SubmitFn | None = None,
 ) -> dict:
-    """Submit each URL via :func:`submit_url` (or injected *submit_fn*)."""
-    submit = submit_fn or submit_url
+    """Submit each URL via the routed submit (or injected *submit_fn*)."""
+    if submit_fn is None:
+        from agent.core.watch_source import submit_routed
+
+        submit_fn = submit_routed
+    submit = submit_fn
     cleaned = [(u or "").strip() for u in urls if (u or "").strip()]
     results = [submit(u, config, agent_conn) for u in cleaned]
     return {"count": len(results), "results": results}

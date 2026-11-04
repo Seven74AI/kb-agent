@@ -456,6 +456,8 @@ def _update_note_source_files(slug: str, config: Config, uploaded: list) -> None
     note_path = _note_path(config, slug)
     if not note_path.exists():
         return
+    if not uploaded:
+        return
 
     tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
     content = note_path.read_text(encoding="utf-8")

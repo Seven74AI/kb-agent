@@ -36,4 +36,32 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
             error_type=ErrorType.RETRY,
             step_name="fetch_transcript",
         )
+
+    # Normalize batch transcript segments: merge_speakers writes `time`, but
+    # _format_transcript_for_llm / _build_speaker_summary read `start`/`end`.
+    import json
+
+    try:
+        data = json.loads(merged_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise StepError(
+            f"Transcript fetch produced invalid JSON: {exc}",
+            error_type=ErrorType.RETRY,
+            step_name="fetch_transcript",
+        )
+    segs = data.get("segments", [])
+    if not segs:
+        raise StepError(
+            "Transcript has no segments",
+            error_type=ErrorType.RETRY,
+            step_name="fetch_transcript",
+        )
+    for i, seg in enumerate(segs):
+        if isinstance(seg, dict) and "time" in seg and "start" not in seg:
+            seg["start"] = seg.pop("time")
+        if isinstance(seg, dict) and "end" not in seg:
+            nxt = segs[i + 1].get("start", segs[i + 1].get("time")) if i + 1 < len(segs) else None
+            seg["end"] = nxt if nxt is not None else seg.get("start", 0) + 5.0
+    merged_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
     return str(merged_path)
