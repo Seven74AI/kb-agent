@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Daily TDAH summit check — detect new videos on terragrandir, download them,
-transcribe in ONE batch Modal run, upload transcripts, and create one note ticket
+transcribe in ONE batch Modal run, upload transcripts, and dispatch one synthesize task
 per new video. Runs as a --no-agent cron; stdout is delivered to the user.
 """
 import json
@@ -10,13 +10,18 @@ import subprocess
 import sys
 import urllib.request
 
+sys.path.insert(0, "/root/kb-agent")
+from agent.config import load_config  # noqa: E402
+from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
+from agent.core.submit import dispatch_synthesize  # noqa: E402
+
 MAIN = "https://www.terragrandir.com/conferences-tdah-adulte-2026/"
-CDN = "https://vz-46d29c85-edb.b-cdn.net"
+CDN = "https://vz-46d29c85-ed.b-cdn.net"
 REF = "Referer: https://player.mediadelivery.net/"
 MODAL = "/root/modal"
 TMP = "/tmp/tdah_daily"
-VB = "minio/knowledge-base/videos"       # mc alias 'minio'
-TB = "minio/knowledge-base/transcripts"
+VB = "minio/kb-agent-archive/videos"       # mc alias 'minio'
+TB = "minio/kb-agent-archive/transcripts"
 
 UUID_RE = re.compile(
     r"player\.mediadelivery\.net/embed/\d+/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"
@@ -66,30 +71,10 @@ def merge_speakers(diar_path, trans_path):
     return {"segments": out}
 
 
-def note_body(slug):
-    return f"""## Task
-Write the KB note for the TDAH summit talk `{slug}`.
-
-The video and the diarized French transcription are already downloaded and archived in MinIO. Read the transcription and write the note.
-
-## Sources
-- Transcription (speaker-attributed JSON, segments with `time`/`speaker`/`text`): `mc cat minio/knowledge-base/transcripts/{slug}.json`
-- Video (already uploaded): `minio/knowledge-base/videos/{slug}.mp4`
-
-## Rules
-1. **French content AND French section labels.** The talk is French. Follow `templates/tdah-summit-note-template.md` (in the `knowledge-base` skill) — exact section order: Métadonnées → Résumé → Chapitres → Concepts clés → Points clés → Résumé par chapitre → Résumé par locuteur → Extractions utiles → Nuances & Limites → Transcription → Voir aussi.
-2. Frontmatter: `date` = 2026 for Day-2 talks (inédites), 2025 for Day-1 replays; `tags` must include `sommet-tdah-2026`; `source_files` = the MinIO video + transcript URLs (full Tailscale FQDN `http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/...`).
-3. Ground every claim in the transcript — no hallucination.
-
-## Steps
-1. `mc cat minio/knowledge-base/transcripts/{slug}.json` (read fully).
-2. Write `Knowledge base/{slug}.md` following the template.
-3. `cd "$OBSIDIAN_VAULT_PATH" && git add "Knowledge base/{slug}.md" && git commit -m "add: {slug}" && git push`
-"""
-
-
 def main():
     os.makedirs(TMP, exist_ok=True)
+    config = load_config()
+    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
 
     # 1. detect new slugs from the main page
     html = fetch(MAIN)
@@ -138,7 +123,7 @@ def main():
     tail = (r.stdout or r.stderr)[-1500:]
     print("Modal output tail:\n" + tail)
 
-    # 5. merge + upload + ticket
+    # 5. merge + upload + dispatch
     made = []
     for ns, mp4 in downloaded:
         diar = os.path.join(out_dir, f"{ns}.diarization.json")
@@ -151,15 +136,11 @@ def main():
         sh(["mc", "cp", mp4, f"{VB}/{ns}.mp4"])
         sh(["mc", "cp", mpath, f"{TB}/{ns}.json"])
 
-        bpath = os.path.join(TMP, f"{ns}.ticket.txt")
-        open(bpath, "w").write(note_body(ns))
-        r = sh(["hermes", "kanban", "--board", "knowledge-base", "create",
-                f"KB: note {ns}", "--assignee", "researcher-videos",
-                "--skill", "knowledge-base", "--max-runtime", "2h",
-                "--body-file", bpath, "--json"])
-        tid = re.search(r'"id"\s*:\s*"(t_[a-f0-9]+)"', r.stdout)
-        made.append((ns, tid.group(1) if tid else "?"))
-        print(f"  {ns}: uploaded + ticket {tid.group(1) if tid else '?'}")
+        page_url = f"https://www.terragrandir.com/{ns.replace('tdah-adulte-2026-', 'tdah-adulte-')}/"
+        r = dispatch_synthesize(page_url, config, conn,
+                                content_type="bunny_stream_synthesize", slug=ns)
+        made.append((ns, r.get("task_id", "?")))
+        print(f"  {ns}: uploaded + task {r.get('task_id', '?')}")
 
     print("DONE: " + ", ".join(n for n, _ in made))
 
