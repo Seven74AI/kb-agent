@@ -30,6 +30,11 @@ class Config:
     video_semaphore: int = 1
     text_parallel: int = 3
 
+    # ── Watch sources ──
+    # In-process background scheduler for recurring page watches. Disable when
+    # cron drives polling (scripts/watch_sources_poll.py) to avoid dual pollers.
+    watch_scheduler_enabled: bool = True
+
     # ── Retry ──
     retry_delays: list[int] = field(default_factory=lambda: [5, 15, 60, 180])
     max_retries: int = 5
@@ -92,6 +97,11 @@ def _env_or_default(raw_value, env_key: str, default, convert=None):
     return raw_value if raw_value is not None else default
 
 
+def _as_bool(value) -> bool:
+    """Coerce an env string to bool (true/1/yes/on → True)."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 def _resolve_vault_path(raw: dict) -> Path:
     """Resolve vault_path from env, YAML, or default; block the retired A/B vault."""
     env_path = os.getenv("KB_VAULT_PATH") or os.getenv("OBSIDIAN_VAULT_PATH")
@@ -160,6 +170,10 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         # Concurrency
         video_semaphore=int(_env_or_default(raw.get("video_semaphore"), "KB_VIDEO_SEMAPHORE", 1)),
         text_parallel=int(_env_or_default(raw.get("text_parallel"), "KB_TEXT_PARALLEL", 3)),
+        # Watch sources
+        watch_scheduler_enabled=_env_or_default(
+            raw.get("watch_scheduler_enabled"), "KB_WATCH_SCHEDULER_ENABLED", True, convert=_as_bool
+        ),
         # Retry
         retry_delays=raw.get("retry_delays", [5, 15, 60, 180]),
         max_retries=int(_env_or_default(raw.get("max_retries"), "KB_MAX_RETRIES", 5)),
