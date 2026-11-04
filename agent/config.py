@@ -67,6 +67,11 @@ class Config:
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 5000
 
+    # ── MCP (stateless streamable HTTP) ──
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 8000
+    mcp_path: str = "/mcp"
+
     # ── Transcription ──
     transcription_backend: str = "cpu"  # cpu | modal
     modal_cli: str = "/root/modal/venv/bin/modal"
@@ -163,6 +168,9 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         # Webhook
         webhook_host=str(raw.get("webhook_host", "0.0.0.0")),
         webhook_port=int(_env_or_default(raw.get("webhook_port"), "KB_WEBHOOK_PORT", 5000)),
+        mcp_host=str(raw.get("mcp_host", "0.0.0.0")),
+        mcp_port=int(_env_or_default(raw.get("mcp_port"), "KB_MCP_PORT", 8000)),
+        mcp_path=str(raw.get("mcp_path", "/mcp")),
         # Transcription
         transcription_backend=str(
             _env_or_default(raw.get("transcription_backend"), "KB_TRANSCRIPTION_BACKEND", "cpu")
