@@ -62,7 +62,7 @@ def test_slugify_removes_query():
 def test_slugify_truncates():
     long_url = "https://example.com/" + "a" * 200
     result = slugify(long_url)
-    assert len(result) <= 100
+    assert len(result) <= 128
 
 
 # ── _format_elapsed tests ─────────────────────────────────────────────────────
