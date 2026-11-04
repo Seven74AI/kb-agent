@@ -31,6 +31,18 @@ CREATE TABLE IF NOT EXISTS task_steps (
 CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
     source_url, content_type, status, error, content=tasks, content_rowid=rowid
 );
+
+CREATE TABLE IF NOT EXISTS watch_sources (
+    id TEXT PRIMARY KEY,
+    page_url TEXT NOT NULL UNIQUE,
+    item_pattern TEXT NOT NULL,
+    item_url_template TEXT NOT NULL,
+    cadence_seconds INTEGER NOT NULL DEFAULT 86400,
+    last_seen_json TEXT NOT NULL DEFAULT '[]',
+    last_polled_at TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 LOGS_SCHEMA = """
