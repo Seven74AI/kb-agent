@@ -21,10 +21,23 @@ os.environ.pop("PYTHONPATH", None)
 
 MODAL = "/root/modal"
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
+# Per-input ceiling so one stuck ffmpeg does not rely on batch_ingest's 7200s parent timeout.
+FFMPEG_TIMEOUT = 900
 
 
 def sh(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def extract_wav(video_path: str, wav_path: str) -> subprocess.CompletedProcess:
+    """Extract 16 kHz mono WAV from a video; fails explicitly on timeout."""
+    return sh(
+        [
+            "ffmpeg", "-y", "-loglevel", "error", "-i", video_path,
+            "-ac", "1", "-ar", "16000", wav_path,
+        ],
+        timeout=FFMPEG_TIMEOUT,
+    )
 
 
 def merge_speakers(diar_path, trans_path):
@@ -72,7 +85,15 @@ def main():
         base = os.path.splitext(f)[0]
         if f.lower().endswith(VIDEO_EXTS):
             wav = os.path.join(wav_dir, base + ".wav")
-            sh(["ffmpeg", "-y", "-loglevel", "error", "-i", p, "-ac", "1", "-ar", "16000", wav])
+            try:
+                r = extract_wav(p, wav)
+            except subprocess.TimeoutExpired:
+                print(f"[error] {f}: ffmpeg timed out after {FFMPEG_TIMEOUT}s")
+                continue
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip()
+                print(f"[error] {f}: ffmpeg failed ({err or r.returncode})")
+                continue
             names.append(base)
         elif f.lower().endswith(".wav"):
             shutil.copy(p, os.path.join(wav_dir, f))

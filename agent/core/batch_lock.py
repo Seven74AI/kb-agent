@@ -48,7 +48,16 @@ def acquire(config: Config) -> bool:
             return True
         except FileExistsError:
             pass
-        if is_locked(config):
+        try:
+            pid = int(path.read_text().strip())
+        except (ValueError, OSError):
+            # Corrupt/unreadable lock — remove and retry create
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                return False
+            continue
+        if _pid_alive(pid):
             return False  # live holder — give up
         # stale — steal it and retry
         try:

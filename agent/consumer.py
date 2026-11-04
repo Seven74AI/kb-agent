@@ -258,7 +258,8 @@ class Consumer:
                 content_type = task.get("content_type", "web")
 
                 if content_type in (
-                    "youtube", "bunny_stream", "instagram_reel", "mega", "threads_video",
+                    "youtube", "bunny_stream", "instagram_reel", "mega", "mega_video",
+                    "threads_video",
                 ):
                     # Video tasks — semaphore-controlled
                     task_obj = asyncio.create_task(self._execute_video(task))
@@ -340,7 +341,12 @@ class Consumer:
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
                 error_msg = str(e)
-                self._log_error(task_id, step_name, f"StepError({error_type}): {error_msg}")
+                tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                self._log_error(
+                    task_id,
+                    step_name,
+                    f"StepError({error_type}): {error_msg}\n{tb}",
+                )
 
                 if error_type == "fail":
                     print(f"[consumer] Step '{step_name}' FAILED: {error_msg}")

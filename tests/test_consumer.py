@@ -215,6 +215,29 @@ async def test_execute_task_fail_error(consumer, agent_db):
 
 
 @pytest.mark.asyncio
+async def test_execute_task_step_error_logs_traceback(consumer, agent_db, logs_db):
+    """StepError should be logged with a full traceback, not only the message."""
+    task_id = create_task(agent_db, "https://example.com", "web", "tb_slug", ["tb_step"])
+
+    def tb_step(task, cfg):
+        raise StepError("boom", error_type=ErrorType.FAIL)
+
+    register_step("tb_step", tb_step, "retry")
+    await consumer._execute_task({"id": task_id, "content_type": "web"})
+
+    row = logs_db.execute(
+        "SELECT content FROM step_logs WHERE task_id = ? AND stream = 'stderr'",
+        (task_id,),
+    ).fetchone()
+    assert row is not None
+    assert "StepError(fail): boom" in row["content"]
+    assert "Traceback" in row["content"]
+    assert "tb_step" in row["content"]
+
+    del STEP_REGISTRY["tb_step"]
+
+
+@pytest.mark.asyncio
 async def test_execute_task_pause_error(consumer, agent_db):
     """Test that a PAUSE StepError pauses the task."""
     task_id = create_task(agent_db, "https://example.com", "web", "test_slug",

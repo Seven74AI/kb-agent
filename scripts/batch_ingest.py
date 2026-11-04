@@ -20,10 +20,13 @@ from pathlib import Path
 # py3.11 subprocesses (yt-dlp cffi mismatch) when this runs under `hermes cron`.
 os.environ.pop("PYTHONPATH", None)
 
-sys.path.insert(0, "/root/kb-agent")
+_bootstrap_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_bootstrap_root))
 
 from agent.archival import upload_file_to_minio  # noqa: E402
 from agent.config import load_config  # noqa: E402
+
+sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
     init_db,
@@ -119,8 +122,9 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
         out_dir = base / "batch_out" / ctype
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Batch-transcribing {len(items)} {ctype} video(s) in one Modal run...")
+        transcribe_script = Path(config.kb_agent_dir) / "scripts" / "batch_transcribe.py"
         r = subprocess.run(
-            [sys.executable, "/root/kb-agent/scripts/batch_transcribe.py",
+            [sys.executable, str(transcribe_script),
              str(bdir), "--out-dir", str(out_dir)] + TRANSCRIBE_ARGS.get(ctype, []),
             capture_output=True, text=True, timeout=7200,
         )
@@ -154,31 +158,32 @@ def main() -> None:
         return
     try:
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            queued = list_ingest_by_status(conn, "queued")
+            if not queued:
+                print("No queued ingest links.")
+                return
 
-        queued = list_ingest_by_status(conn, "queued")
-        if not queued:
-            print("No queued ingest links.")
-            return
+            print(f"Queued: {len(queued)} link(s)")
+            video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
+            non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
 
-        print(f"Queued: {len(queued)} link(s)")
-        video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
-        non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
+            for q in non_video:
+                r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
+                status = r.get("status")
+                if status in ("pending", "paused", "skipped"):
+                    update_ingest_status(conn, q["id"], "dispatched")
+                    print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
+                else:
+                    update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
+                    print(f"  [failed] {q['slug']} -> {status}")
 
-        for q in non_video:
-            r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
-            status = r.get("status")
-            if status in ("pending", "paused", "skipped"):
-                update_ingest_status(conn, q["id"], "dispatched")
-                print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
-            else:
-                update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
-                print(f"  [failed] {q['slug']} -> {status}")
+            if video:
+                _process_videos(video, config, conn)
 
-        if video:
-            _process_videos(video, config, conn)
-
-        conn.close()
-        print(f"DONE: {len(non_video)} non-video + {len(video)} video processed")
+            print(f"DONE: {len(non_video)} non-video + {len(video)} video processed")
+        finally:
+            conn.close()
     finally:
         release(config)
 

@@ -1,6 +1,7 @@
 """Database initialization — SQLite schemas for agent.db and logs.db."""
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -116,6 +117,38 @@ def serialize_tags(tags) -> str | None:
     return json.dumps(tags) if tags else None
 
 
+_MIGRATE_TABLES = ("tasks", "ingest_queue")
+
+
+def _column_defs_from_schema(schema: str) -> dict[str, dict[str, str]]:
+    """Parse CREATE TABLE column definitions from agent DDL (non-virtual tables)."""
+    result: dict[str, dict[str, str]] = {}
+    for match in re.finditer(
+        r"CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\);",
+        schema,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        table = match.group(1)
+        if table.endswith("_fts"):
+            continue
+        cols: dict[str, str] = {}
+        for raw_line in match.group(2).split("\n"):
+            line = raw_line.strip().rstrip(",")
+            if not line:
+                continue
+            upper = line.upper()
+            if upper.startswith(("PRIMARY ", "FOREIGN ", "UNIQUE ", "CHECK ", "CONSTRAINT ")):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                cols[parts[0]] = parts[1]
+        result[table] = cols
+    return result
+
+
+_SCHEMA_COLUMNS = _column_defs_from_schema(AGENT_SCHEMA)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing on pre-existing databases (idempotent, schema-safe).
 
@@ -125,14 +158,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
-    if "tasks" in tables:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-        if "tags" not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN tags TEXT")
-    if "ingest_queue" in tables:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(ingest_queue)").fetchall()}
-        if "tags" not in cols:
-            conn.execute("ALTER TABLE ingest_queue ADD COLUMN tags TEXT")
+    for table in _MIGRATE_TABLES:
+        if table not in tables:
+            continue
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col, col_def in _SCHEMA_COLUMNS.get(table, {}).items():
+            if col == "id" or col in existing:
+                continue
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
     conn.commit()
 
 
@@ -208,6 +241,13 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
         "SELECT id, status FROM ingest_queue WHERE url = ?", (url,)
     ).fetchone()
     if row:
+        serialized = serialize_tags(tags)
+        if serialized:
+            with conn:
+                conn.execute(
+                    "UPDATE ingest_queue SET tags = ? WHERE url = ?",
+                    (serialized, url),
+                )
         return row["id"], False
     import uuid
     ingest_id = str(uuid.uuid4())
