@@ -17,3 +17,4 @@ infra/cloudflare/*.tfstate
 infra/cloudflare/*.tfstate.*
 infra/cloudflare/terraform.tfvars
 .venv/
+mcp-venv/
