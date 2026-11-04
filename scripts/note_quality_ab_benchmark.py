@@ -46,7 +46,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from agent.benchmark.hermes import hermes_cli_available, submit_hermes_kanban  # noqa: E402
 from agent.benchmark.note_quality import (  # noqa: E402
     compare_from_staging,
     compare_from_vaults,
@@ -138,12 +137,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "run_manifest.jsonl"
 
-    if not args.submit_hermes and not args.submit_kb_agent:
-        print("run: enable at least one of --submit-hermes or --submit-kb-agent", file=sys.stderr)
-        return 2
-
-    if args.submit_hermes and not hermes_cli_available():
-        print("run: hermes CLI not on PATH; cannot --submit-hermes", file=sys.stderr)
+    if not args.submit_kb_agent:
+        print("run: --submit-kb-agent is required", file=sys.stderr)
         return 2
 
     db_path = Path(args.agent_db) if args.agent_db else config.kb_agent_dir / "data" / "agent.db"
@@ -158,12 +153,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         for row in rows:
             url = row["url"]
             record: dict = {"url": url, "content_type": row.get("content_type")}
-            if args.submit_hermes:
-                record["hermes"] = submit_hermes_kanban(
-                    url,
-                    assignee=args.hermes_assignee,
-                    max_runtime_seconds=args.hermes_max_runtime,
-                )
             if args.submit_kb_agent and conn is not None:
                 record["kb_agent"] = submit_url(
                     url,
@@ -210,11 +199,8 @@ def main() -> int:
     p_run.add_argument("--urls", required=True, help="JSONL URL list")
     p_run.add_argument("--output", required=True, help="Run output directory")
     p_run.add_argument("--config", help="config.yaml path")
-    p_run.add_argument("--submit-hermes", action="store_true")
     p_run.add_argument("--submit-kb-agent", action="store_true")
     p_run.add_argument("--ignore-dedup", action="store_true", help="kb-agent: enqueue even if URL in vault")
-    p_run.add_argument("--hermes-assignee", default="researcher")
-    p_run.add_argument("--hermes-max-runtime", type=int, default=3600)
     p_run.add_argument("--agent-db", help="Path to agent.db for kb-agent enqueue")
     p_run.set_defaults(func=cmd_run)
 

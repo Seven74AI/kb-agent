@@ -17,6 +17,7 @@ from agent.core.search import search_notes as core_search_notes
 from agent.core.status import get_task as core_get_task
 from agent.core.status import list_tasks as core_list_tasks
 from agent.core.submit import submit_url as core_submit_url
+from agent.core.submit import submit_ingest as core_submit_ingest
 from agent.core.watch_source import register_watch_source
 from agent.mcp.db import open_agent_conn, open_logs_conn
 
@@ -43,6 +44,15 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         conn = open_agent_conn(cfg)
         try:
             return core_submit_url(url, cfg, conn)
+        finally:
+            conn.close()
+
+    @mcp.tool
+    def ingest(url: str) -> dict[str, Any]:
+        """Queue a URL for deferred batch processing (durable inbox; a nightly batch collects it)."""
+        conn = open_agent_conn(cfg)
+        try:
+            return core_submit_ingest(url, cfg, conn)
         finally:
             conn.close()
 
