@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS task_steps (
 CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
     source_url, content_type, status, error, content=tasks, content_rowid=rowid
 );
+
+CREATE TABLE IF NOT EXISTS sources (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    cadence INTEGER NOT NULL,
+    last_seen TEXT,
+    last_content_hash TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 LOGS_SCHEMA = """
