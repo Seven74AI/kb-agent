@@ -3,7 +3,7 @@
 Pure domain layer for kb-agent (`core/` package). Adapters:
 
 - **Flask** — `agent/webhook.py` (human dashboard + `POST /submit`, `POST /resume`)
-- **MCP** (planned) — stateless tools per `docs/prd-kb-mcp-consolidation.md`
+- **MCP** — `mcp_server.py` / `agent.mcp` (stateless streamable HTTP; see PRD)
 
 **Constraints:** No Flask, FastMCP, or MCP SDK imports inside `core/`. Side effects (SQLite, grep, curl, LLM) are injected or isolated in module functions that adapters wire to production dependencies.
 

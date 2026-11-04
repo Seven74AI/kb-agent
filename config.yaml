@@ -49,6 +49,11 @@ firecrawl_url: http://localhost:3002/v2/scrape
 webhook_host: 0.0.0.0
 webhook_port: 5000
 
+# MCP tracer (stateless streamable HTTP)
+mcp_host: 0.0.0.0
+mcp_port: 8000
+mcp_path: /mcp
+
 # Transcription (cpu = local pyannote + faster-whisper; modal = GPU on Modal A10)
 transcription_backend: cpu
 modal_cli: /root/modal/venv/bin/modal
