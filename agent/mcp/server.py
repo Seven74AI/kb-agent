@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -19,6 +23,7 @@ from agent.core.status import list_tasks as core_list_tasks
 from agent.core.submit import submit_url as core_submit_url
 from agent.core.submit import submit_ingest as core_submit_ingest
 from agent.core.watch_source import register_watch_source
+from agent.db import list_ingest_by_status
 from agent.mcp.db import open_agent_conn, open_logs_conn
 
 
@@ -154,6 +159,41 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             )
         finally:
             conn.close()
+
+    @mcp.tool
+    def run_batch() -> dict[str, Any]:
+        """Trigger the batch collector now: download + batch-transcribe + dispatch queued links.
+
+        Runs detached in the background (Modal transcription can take a while);
+        returns immediately with the queued count and the log path.
+        """
+        conn = open_agent_conn(cfg)
+        try:
+            queued = list_ingest_by_status(conn, "queued")
+        finally:
+            conn.close()
+
+        if not queued:
+            return {"status": "noop", "queued": 0, "message": "No queued ingest links."}
+
+        script = Path(cfg.kb_agent_dir) / "scripts" / "batch_ingest.py"
+        log_path = Path(cfg.kb_agent_dir) / "data" / "batch_manual.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as log:
+            log.write(f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n")
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        return {
+            "status": "started",
+            "queued": len(queued),
+            "log": str(log_path),
+            "message": "Batch running in background; results appended to the log.",
+        }
 
     return mcp
 
