@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from agent.archival import append_note_tags
+from agent.archival import MINIO_TAILSCALE_BASE, append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -498,8 +498,6 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     transcript_text = _format_transcript_for_llm(merged)
     source_domain = urlparse(source_url).netloc or "instagram.com"
     date_str = datetime.now().strftime("%Y-%m-%d")
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
-
     if music_only:
         # Music-only reel: use caption as primary content
         system_prompt = f"""You are a knowledge base curator processing an Instagram reel.
@@ -548,8 +546,8 @@ OUTPUT FORMAT:
   source: instagram.com
   source_url: {source_url}
   source_files:
-    video: {tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
-    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
+    video: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/videos/{safe_slug}.mp4
+    transcript: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/transcripts/{safe_slug}.json
   confidence: plausible
   tags: [instagram, reel]
 - Then sections as above."""
@@ -980,13 +978,14 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
     if content_type == "instagram_reel":
         # Source-archival: video + transcript (matches the batch collector).
         uploaded = []
-        for name in (f"{safe_slug}_reel.mp4", f"{safe_slug}_reel.webm"):
-            p = Path(config.temp_dir) / name
-            if p.exists():
-                ext = p.suffix.lower().lstrip(".")
-                upload_file_to_minio(p, f"{bucket}/videos/{safe_slug}.{ext}", timeout=120)
-                uploaded.append(f"videos/{safe_slug}.{ext}")
-                break
+        for p in sorted(Path(config.temp_dir).glob(f"{safe_slug}_reel.*")):
+            if not p.is_file():
+                continue
+            ext = p.suffix.lower().lstrip(".")
+            if not ext:
+                continue
+            upload_file_to_minio(p, f"{bucket}/videos/{safe_slug}.{ext}", timeout=120)
+            uploaded.append(f"videos/{safe_slug}.{ext}")
         merged = Path(config.temp_dir) / f"{safe_slug}_merged.json"
         if merged.exists():
             upload_file_to_minio(merged, f"{bucket}/transcripts/{safe_slug}.json", timeout=120)
