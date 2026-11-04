@@ -36,9 +36,18 @@ def _source_from_row(row: sqlite3.Row) -> dict:
 
 
 def register_source(agent_conn: sqlite3.Connection, url: str, cadence: int) -> str:
-    """Register a watched source. Returns the new source_id."""
+    """Register a watched source. Returns the new source_id.
+
+    Raises ValueError if the URL is already registered (idempotency is the
+    caller's concern — a duplicate is a domain error, not a silent no-op).
+    """
     url = _validate_url(url)
     cadence = _validate_cadence(cadence)
+    existing = agent_conn.execute(
+        "SELECT id FROM sources WHERE url = ?", (url,)
+    ).fetchone()
+    if existing is not None:
+        raise ValueError(f"source already registered: {url}")
     source_id = str(uuid.uuid4())
     with agent_conn:
         agent_conn.execute(

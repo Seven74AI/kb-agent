@@ -70,7 +70,19 @@ def test_register_source_rejects_invalid_url(agent_conn):
         register_source(agent_conn, "not-a-url", 60)
     with pytest.raises(ValueError, match="url"):
         register_source(agent_conn, "", 60)
+    with pytest.raises(ValueError, match="url"):
+        register_source(agent_conn, "ftp://example.com/feed", 60)
+    with pytest.raises(ValueError, match="url"):
+        register_source(agent_conn, "https:///no-host", 60)
     assert lookup_all_sources(agent_conn) == []
+
+
+def test_register_source_rejects_duplicate_url(agent_conn):
+    register_source(agent_conn, "https://example.com/feed", 3600)
+    with pytest.raises(ValueError, match="already registered"):
+        register_source(agent_conn, "https://example.com/feed", 86400)
+    # One row only — the duplicate never hit the table.
+    assert len(lookup_all_sources(agent_conn)) == 1
 
 
 def test_register_source_rejects_invalid_cadence(agent_conn):
@@ -78,6 +90,10 @@ def test_register_source_rejects_invalid_cadence(agent_conn):
         register_source(agent_conn, "https://example.com/a", 0)
     with pytest.raises(ValueError, match="cadence"):
         register_source(agent_conn, "https://example.com/a", -1)
+    with pytest.raises(ValueError, match="cadence"):
+        register_source(agent_conn, "https://example.com/a", True)
+    with pytest.raises(ValueError, match="cadence"):
+        register_source(agent_conn, "https://example.com/a", 60.0)
     assert lookup_all_sources(agent_conn) == []
 
 
