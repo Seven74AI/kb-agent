@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from agent.router import SIMPLE_PLATFORMS, route_jev
+
 
 # ── URL Pattern Matching ────────────────────────────────────────────────────
 
@@ -54,8 +56,56 @@ def detect_platform(url: str) -> str:
 
 # ── Content Subtype Detection ────────────────────────────────────────────────
 
+def _fetch_content(url: str, platform: str) -> str | None:
+    """Fetch the raw content signal Jev needs for subtype resolution.
+
+    Returns raw HTML (threads/substack) or a filename list (mega), or None on
+    failure. Reuses the same fetches the legacy scrapers use.
+    """
+    if platform == "threads":
+        try:
+            cookie_path = Path("/root/.hermes/cookies/threads_cookies.txt")
+            cmd = [
+                "curl", "-s", "--max-time", "15",
+                "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+                "-H", "Accept: text/html,application/xhtml+xml",
+            ]
+            if cookie_path.exists():
+                cmd.extend(["-b", str(cookie_path)])
+            cmd.append(url)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            return result.stdout or None
+        except (subprocess.TimeoutExpired, Exception):
+            return None
+    elif platform == "substack":
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "15", url],
+                capture_output=True, text=True, timeout=20,
+            )
+            return result.stdout or None
+        except (subprocess.TimeoutExpired, Exception):
+            return None
+    elif platform == "mega":
+        try:
+            result = subprocess.run(
+                ["megadl", "--print-names", url],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return None
+            return result.stdout or None
+        except (subprocess.TimeoutExpired, Exception):
+            return None
+    return None
+
+
 def detect_content_subtype(url: str, platform: str) -> str:
     """Determine the content subtype for platforms with variants.
+
+    Simple platforms (regex already unambiguous) return the platform directly.
+    Ambiguous platforms (threads/substack/mega) and the 'web' fallback are
+    classified by Jev; if Jev fails, the legacy scrapers take over.
 
     Args:
         url: The source URL.
@@ -63,19 +113,28 @@ def detect_content_subtype(url: str, platform: str) -> str:
 
     Returns:
         Content subtype string. For most platforms, just returns the platform.
-        - threads -> 'threads_text' or 'threads_video' (based on video_versions in page JSON)
-        - substack → 'text', 'image', or 'video'
-        - mega → 'book_batch', 'video', or 'unknown'
+        - threads -> 'threads_text' or 'threads_video'
+        - substack -> 'substack_text' / 'substack_video' / 'substack_image'
+        - mega -> 'mega_video' / 'book' / 'book_batch'
     """
+    if platform in SIMPLE_PLATFORMS:
+        return platform
+
+    # Ambiguous tail (threads/substack/mega/web) → Jev with fetched content.
+    content = _fetch_content(url, platform)
+    try:
+        return route_jev(url, content)
+    except Exception:
+        pass
+
+    # Legacy fallback (Jev unavailable or failed).
     if platform == "threads":
         return _detect_threads_subtype(url)
     elif platform == "substack":
         return _detect_substack_subtype(url)
     elif platform == "mega":
         return _detect_mega_subtype(url)
-    else:
-        # Single content type — no subtype needed
-        return platform
+    return platform
 
 
 def _detect_threads_subtype(url: str) -> str:
