@@ -438,10 +438,12 @@ OUTPUT FORMAT:
   date: {date_str}
   source: {source_domain}
   source_url: {source_url}
+  source_files:
+    raw: <filled by archival step>
   confidence: plausible
   tags: [tag1, tag2, tag3]
 - Then the note sections as shown in the template.
-- Leave the minio: field in frontmatter — it will be filled later.
+- Leave the source_files: field in frontmatter — it will be filled later.
 - Leave the See Also section empty — it will be filled later by a separate step.
 
 DO NOT invent content. Every factual claim must be traceable to the source.
@@ -456,7 +458,8 @@ def _fallback_template() -> str:
 date: YYYY-MM-DD
 source: <platform/author>
 source_url: <URL>
-minio: <filled by archival step>
+source_files:
+  raw: <filled by archival step>
 confidence: plausible
 tags: []
 ---
@@ -649,9 +652,9 @@ def step_quality_gate(task: dict, config: Config) -> str:
 # ── MinIO Upload Step (wraps archival.py) ─────────────────────────────────────
 
 def step_minio_upload(task: dict, config: Config) -> str:
-    """Upload source content to MinIO and add minio: field to note frontmatter.
+    """Upload source content to MinIO and add source_files: field to note frontmatter.
 
-    Wraps archival.step_minio_upload and adds the minio URL to the note.
+    Wraps archival.step_minio_upload and adds the source_files URL to the note.
 
     Args:
         task: Task dict with id, slug, content_type, source_url.
@@ -665,24 +668,24 @@ def step_minio_upload(task: dict, config: Config) -> str:
     # Upload the raw source
     minio_url = archival_minio_upload(task, config)
 
-    # Add minio: field to the note's frontmatter
+    # Add source_files: field to the note's frontmatter
     note_path = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
     if note_path.exists():
         content = note_path.read_text(encoding="utf-8")
-        # Insert or replace minio: field in frontmatter
+        # Insert or replace source_files.raw in frontmatter
         if content.startswith("---"):
             end_fm = content.find("---", 3)
             if end_fm != -1:
                 frontmatter = content[3:end_fm]
-                if re.search(r'^minio:', frontmatter, re.MULTILINE):
-                    # LLM-template includes a minio: placeholder — replace with real URL
+                if re.search(r'^source_files:', frontmatter, re.MULTILINE):
+                    # Replace the raw: placeholder with the real URL
                     content = re.sub(
-                        r'^minio:.*$', f'minio: {minio_url}',
+                        r'^  raw:.*$', f'  raw: {minio_url}',
                         content, flags=re.MULTILINE
                     )
                 else:
-                    # No minio: field — insert one after the opening ---
-                    content = content[:3] + "\nminio: " + minio_url + content[3:]
+                    # No source_files: field — insert after the opening ---
+                    content = content[:3] + "\nsource_files:\n  raw: " + minio_url + content[3:]
                 note_path.write_text(content, encoding="utf-8")
 
     return minio_url

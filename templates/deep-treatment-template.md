@@ -2,7 +2,8 @@
 date: YYYY-MM-DD
 source: <platform/author, date>
 source_url: <optional URL>
-minio: http://vmi3304846.tail5c02a1.ts.net:9000/kb-agent-archive/<folder>/<slug>.<ext>
+source_files:
+  raw: <filled by archival step>
 confidence: verified | plausible | emerging | debunked | untested
 tags: [tag1, tag2, tag3]
 ---

@@ -697,6 +697,9 @@ def step_synthesize_book(task: dict, config: Config) -> str:
 topic: [books/{slug[:30]}]
 date: {_today()}
 source: {author} — *{title}* (book)
+source_url: {task.get("source_url", "")}
+source_files:
+  text: <filled by archival step>
 confidence: plausible
 tags: [book, book-summary]
 ---
@@ -1044,6 +1047,25 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
             pass  # Source file upload is best-effort
 
     tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
+
+    # Update note frontmatter with source_files URLs
+    note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
+    if note_path.exists():
+        content = note_path.read_text(encoding="utf-8")
+        lines = ["source_files:"]
+        for u in uploaded:
+            suffix = Path(u).suffix.lower().lstrip(".")
+            kind = "epub" if suffix == "epub" else ("pdf" if suffix == "pdf" else "text")
+            lines.append(f"  {kind}: {tailscale_base}/{config.minio_bucket}/{u}")
+        block = "\n".join(lines)
+        if "source_files:" in content:
+            content = re.sub(
+                r"source_files:.*?(?=\n\w|\Z)", block, content, flags=re.DOTALL
+            )
+        else:
+            content = content[:3] + "\n" + block + content[3:]
+        note_path.write_text(content, encoding="utf-8")
+
     return json.dumps({
         "uploaded": uploaded,
         "urls": [f"{tailscale_base}/{config.minio_bucket}/{u}" for u in uploaded],

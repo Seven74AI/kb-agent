@@ -544,7 +544,8 @@ OUTPUT FORMAT:
   date: {date_str}
   source: instagram.com
   source_url: {source_url}
-  minio: <filled by archival step>
+  source_files:
+    raw: <filled by archival step>
   confidence: plausible
   tags: [instagram, reel]
 - Then sections as above."""
@@ -833,7 +834,8 @@ OUTPUT FORMAT:
   date: {date_str}
   source: instagram.com (@{uploader})
   source_url: {source_url}
-  minio: <filled by archival step>
+  source_files:
+    raw: <filled by archival step>
   confidence: plausible
   tags: [instagram, carousel]
 - Then sections as above."""
@@ -975,8 +977,8 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
     # Update note frontmatter with minio URL
     content = note_path.read_text(encoding="utf-8")
     updated = re.sub(
-        r"minio:\s*<filled by archival step>",
-        f"minio: {minio_url}",
+        r"raw:\s*<filled by archival step>",
+        f"raw: {minio_url}",
         content,
     )
     note_path.write_text(updated, encoding="utf-8")

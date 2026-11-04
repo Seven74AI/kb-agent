@@ -820,7 +820,8 @@ OUTPUT FORMAT:
   date: {date_str}
   source: threads.net (@{author})
   source_url: {source_url}
-  minio: <filled by archival step>
+  source_files:
+    raw: <filled by archival step>
   confidence: plausible
   tags: [threads, video]
 - Then the note sections as shown above.
@@ -914,7 +915,8 @@ OUTPUT FORMAT:
   date: {date_str}
   source: threads.net (@{author})
   source_url: {source_url}
-  minio: <filled by archival step>
+  source_files:
+    raw: <filled by archival step>
   confidence: {confidence}
   tags: [threads, social-media]
 - Then the note sections."""
@@ -1076,8 +1078,8 @@ def step_threads_minio_upload(task: dict, config: Config) -> str:
     # Update note frontmatter with minio URL
     content = note_path.read_text(encoding="utf-8")
     updated = re.sub(
-        r"minio:\s*<filled by archival step>",
-        f"minio: {minio_url}",
+        r"raw:\s*<filled by archival step>",
+        f"raw: {minio_url}",
         content,
     )
     note_path.write_text(updated, encoding="utf-8")

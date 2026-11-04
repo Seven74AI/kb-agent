@@ -1255,7 +1255,15 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
     # Build source_files block
     source_files_lines = ["source_files:"]
     for u in uploaded:
-        source_files_lines.append(f"  {Path(u).stem}: {tailscale_base}/{config.minio_bucket}/{u}")
+        suffix = Path(u).suffix.lower().lstrip(".")
+        kind = {
+            "json": "transcript",
+            "webm": "video",
+            "mp4": "video",
+            "mp3": "audio",
+            "m4a": "audio",
+        }.get(suffix, suffix)
+        source_files_lines.append(f"  {kind}: {tailscale_base}/{config.minio_bucket}/{u}")
     source_files_block = "\n".join(source_files_lines)
 
     # Replace placeholder source_files with real URLs
