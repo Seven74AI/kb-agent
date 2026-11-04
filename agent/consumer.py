@@ -103,7 +103,6 @@ class Consumer:
             self._watch_task = asyncio.create_task(
                 run_watch_scheduler(
                     self.config,
-                    self.agent_conn,
                     fetch_html=default_fetch_html,
                     stopping=lambda: self._stopping,
                 ),

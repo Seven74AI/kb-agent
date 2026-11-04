@@ -20,7 +20,6 @@ from agent.core.watch_source import (
     poll_watch_source,
     register_watch_source,
     serialize_last_seen,
-    WATCH_SOURCES_SCHEMA,
 )
 from agent.db import AGENT_SCHEMA, init_db
 
@@ -48,8 +47,7 @@ SAMPLE_HTML_NEW = """
 @pytest.fixture
 def agent_conn(tmp_path):
     db_path = tmp_path / "agent.db"
-    schema = AGENT_SCHEMA + WATCH_SOURCES_SCHEMA
-    conn = init_db(db_path, schema)
+    conn = init_db(db_path, AGENT_SCHEMA)
     conn.row_factory = sqlite3.Row
     yield conn
     conn.close()
@@ -94,9 +92,8 @@ def test_last_seen_json_roundtrip():
 
 def test_merge_last_seen_after_poll():
     last = frozenset({"j1-intro"})
-    current = frozenset({"j1-intro", "j2-keynote", "j3-panel"})
-    new = frozenset({"j2-keynote", "j3-panel"})
-    merged = merge_last_seen_after_poll(last, current, new)
+    newly_seen = frozenset({"j2-keynote", "j3-panel"})
+    merged = merge_last_seen_after_poll(last, newly_seen)
     assert merged == frozenset({"j1-intro", "j2-keynote", "j3-panel"})
 
 
@@ -231,3 +228,114 @@ def test_poll_all_due_sources_skips_not_due(core_config, agent_conn, monkeypatch
         now=now,
     )
     assert results == []
+
+
+def test_register_watch_source_invalid_regex(agent_conn):
+    with pytest.raises(ValueError, match="not a valid regex"):
+        register_watch_source(
+            agent_conn,
+            TDAH_PAGE,
+            item_pattern="(unclosed",
+            item_url_template=TDAH_TEMPLATE,
+            fetch_html=lambda url: SAMPLE_HTML,
+        )
+
+
+def test_poll_watch_source_failed_submit_not_marked_seen(core_config, agent_conn, monkeypatch):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    def failing_submit(url, config, conn):
+        return {"status": "error", "http_status": 500, "error": "boom"}
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=failing_submit,
+        now=now,
+    )
+    # Item not marked seen → next poll retries it.
+    assert result["new_items"] == ["j3-panel"]
+    row = agent_conn.execute(
+        "SELECT last_seen_json FROM watch_sources WHERE page_url = ?",
+        (TDAH_PAGE,),
+    ).fetchone()
+    assert parse_last_seen(row["last_seen_json"]) == frozenset({"j1-intro", "j2-keynote"})
+
+    # Second poll still sees j3-panel as new (retried), once cadence elapses.
+    later = now + timedelta(days=1)
+    result2 = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=failing_submit,
+        now=later,
+    )
+    assert result2["new_items"] == ["j3-panel"]
+
+
+def test_poll_watch_source_submit_exception_isolated(core_config, agent_conn, monkeypatch):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    def exploding_submit(url, config, conn):
+        raise RuntimeError("db locked")
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML_NEW,
+        submit_fn=exploding_submit,
+        now=now,
+    )
+    assert result["new_items"] == ["j3-panel"]
+    assert result["submissions"][0]["status"] == "error"
+    row = agent_conn.execute(
+        "SELECT last_seen_json FROM watch_sources WHERE page_url = ?",
+        (TDAH_PAGE,),
+    ).fetchone()
+    assert parse_last_seen(row["last_seen_json"]) == frozenset({"j1-intro", "j2-keynote"})
+
+
+def test_poll_all_due_sources_isolates_source_errors(core_config, agent_conn, monkeypatch):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    def fetch_boom(url):
+        raise RuntimeError("network down")
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    results = poll_all_due_sources(
+        agent_conn,
+        core_config,
+        fetch_html=fetch_boom,
+        now=now,
+        submit_fn=lambda url, config, conn: {"status": "pending", "http_status": 201},
+    )
+    assert len(results) == 1
+    assert results[0]["page_url"] == TDAH_PAGE
+    assert "network down" in results[0]["error"]
