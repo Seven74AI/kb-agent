@@ -43,6 +43,11 @@ institutional biases, funding sources. 1-2 paragraphs.
 
 ## Critical Analysis
 What's genuinely new vs restating? What's omitted? What's the self-interest angle?
+
+### Factual Issues
+- Specific factual claim from the source to verify or dispute, with a direct quote.
+- Another concrete factual issue found in the source.
+
 Methodological or factual issues. Keep shorter than the thematic analysis — the reader
 needs to understand the content before your critique.
 

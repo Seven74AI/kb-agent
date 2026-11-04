@@ -83,7 +83,7 @@ class DeepSeekClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 16000,
+            "max_tokens": 64000,
         }
         if tools:
             body["tools"] = tools
@@ -149,7 +149,7 @@ class EdgeeClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 16000,
+            "max_tokens": 64000,
         }
         if tools:
             body["tools"] = tools
