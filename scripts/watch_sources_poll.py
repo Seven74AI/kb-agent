@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""One-shot poll of all due watch sources (for cron).
+
+Example:
+  python3 scripts/watch_sources_poll.py
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agent.config import load_config
+from agent.core.watch_source import default_fetch_html, poll_all_due_sources
+from agent.db import AGENT_SCHEMA, init_db
+
+
+def main() -> int:
+    config = load_config()
+    db_path = config.kb_agent_dir / "data" / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    try:
+        results = poll_all_due_sources(conn, config, fetch_html=default_fetch_html)
+    finally:
+        conn.close()
+
+    if not results:
+        print("No due watch sources or no new items.", file=sys.stderr)
+        return 0
+
+    for r in results:
+        new = r.get("new_items") or []
+        print(f"{r['page_url']}: submitted {len(new)} new item(s): {', '.join(new)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
