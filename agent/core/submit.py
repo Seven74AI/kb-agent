@@ -55,12 +55,12 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
     }
 
 
-def submit_plan(agent_conn: sqlite3.Connection, plan: dict) -> dict:
+def submit_plan(agent_conn: sqlite3.Connection, plan: dict, tags=None) -> dict:
     """Enqueue a task from a plan produced by :func:`plan_submission`."""
     if plan["status"] == "paused":
         task_id = create_task(
             agent_conn, plan["url"], plan["platform"], plan["slug"], plan["steps"],
-            status="paused",
+            status="paused", tags=tags,
         )
         agent_conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (plan["reason"], task_id))
         agent_conn.commit()
@@ -72,7 +72,7 @@ def submit_plan(agent_conn: sqlite3.Connection, plan: dict) -> dict:
             "task_id": task_id,
         }
 
-    task_id = create_task(agent_conn, plan["url"], plan["platform"], plan["slug"], plan["steps"])
+    task_id = create_task(agent_conn, plan["url"], plan["platform"], plan["slug"], plan["steps"], tags=tags)
     return {
         "status": "pending",
         "http_status": 201,
@@ -89,6 +89,7 @@ def submit_url(
     agent_conn: sqlite3.Connection,
     *,
     ignore_dedup: bool = False,
+    tags=None,
 ) -> dict:
     """Submit a URL to the task queue.
 
@@ -104,11 +105,11 @@ def submit_url(
     plan = plan_submission(url, config, ignore_dedup=ignore_dedup)
     if plan["status"] in ("error", "skipped"):
         return plan
-    return submit_plan(agent_conn, plan)
+    return submit_plan(agent_conn, plan, tags=tags)
 
 
 def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
-                  content_type: str | None = None) -> dict:
+                  content_type: str | None = None, tags=None) -> dict:
     """Queue a URL for deferred batch processing (durable ingest inbox).
 
     Detects the content type, stores the link durably, and returns. Nothing is
@@ -124,7 +125,7 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
     subtype = content_type or detect_content_subtype(url, platform)
     slug = slugify(url)
 
-    ingest_id, created = queue_ingest(agent_conn, url, subtype, slug)
+    ingest_id, created = queue_ingest(agent_conn, url, subtype, slug, tags=tags)
 
     return {
         "status": "queued",
@@ -138,7 +139,7 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
 
 
 def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection, *,
-                        content_type: str, slug: str) -> dict:
+                        content_type: str, slug: str, tags=None) -> dict:
     """Dispatch a synthesize-only task with an explicit content type + slug.
 
     Used by batch collectors that have already downloaded, transcribed, and
@@ -151,7 +152,7 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
 
     platform = detect_platform(url)
     steps = steps_for_content_type(content_type, platform)
-    task_id = create_task(agent_conn, url, content_type, slug, steps)
+    task_id = create_task(agent_conn, url, content_type, slug, steps, tags=tags)
 
     return {
         "status": "pending",

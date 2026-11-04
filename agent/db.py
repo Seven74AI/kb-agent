@@ -1,5 +1,6 @@
 """Database initialization — SQLite schemas for agent.db and logs.db."""
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -11,6 +12,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     content_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     slug TEXT,
+    tags TEXT,
     error TEXT,
     retries INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
     url TEXT NOT NULL UNIQUE,
     content_type TEXT NOT NULL,
     slug TEXT NOT NULL,
+    tags TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     error TEXT,
     created_at TEXT DEFAULT (datetime('now')),
@@ -84,6 +87,46 @@ CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
 """
 
 
+def normalize_tags(tags) -> list[str]:
+    """Normalize tags input (str/comma/JSON/list) to a deduped list of clean strings."""
+    if not tags:
+        return []
+    if isinstance(tags, str):
+        s = tags.strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                tags = json.loads(s)
+            except json.JSONDecodeError:
+                tags = [t.strip() for t in s.strip("[]").split(",") if t.strip()]
+        else:
+            tags = [t.strip() for t in s.split(",") if t.strip()]
+    out = []
+    for t in tags:
+        t = str(t).strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def serialize_tags(tags) -> str | None:
+    """Encode tags to a JSON array string for storage (None when empty)."""
+    tags = normalize_tags(tags)
+    return json.dumps(tags) if tags else None
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing on pre-existing databases (idempotent)."""
+    tasks_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "tags" not in tasks_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN tags TEXT")
+    iq_cols = {r[1] for r in conn.execute("PRAGMA table_info(ingest_queue)").fetchall()}
+    if "tags" not in iq_cols:
+        conn.execute("ALTER TABLE ingest_queue ADD COLUMN tags TEXT")
+    conn.commit()
+
+
 def init_db(db_path: Path, schema: str) -> sqlite3.Connection:
     """Initialize a SQLite database with the given schema.
 
@@ -109,11 +152,12 @@ def init_db(db_path: Path, schema: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(schema)
     conn.commit()
+    _migrate(conn)
     return conn
 
 
 def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
-                steps: list[str], status: str = "pending") -> str:
+                steps: list[str], status: str = "pending", tags=None) -> str:
     """Create a new task with its pipeline steps.
 
     Args:
@@ -123,6 +167,7 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
         slug: URL-derived slug for naming output files.
         steps: Ordered list of step names for this pipeline.
         status: Initial task status (default 'pending').
+        tags: Optional user-specified tags (str/comma/JSON/list) added to the note.
 
     Returns:
         The new task UUID.
@@ -131,8 +176,8 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
     task_id = str(uuid.uuid4())
     with conn:
         conn.execute(
-            "INSERT INTO tasks (id, source_url, content_type, slug, status) VALUES (?, ?, ?, ?, ?)",
-            (task_id, url, content_type, slug, status),
+            "INSERT INTO tasks (id, source_url, content_type, slug, status, tags) VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, url, content_type, slug, status, serialize_tags(tags)),
         )
         for i, step_name in enumerate(steps):
             conn.execute(
@@ -143,7 +188,7 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
 
 
 def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
-                 status: str = "queued") -> tuple[str, bool]:
+                 status: str = "queued", tags=None) -> tuple[str, bool]:
     """Insert a link into the ingest queue (dedup by URL).
 
     Returns ``(ingest_id, created_new)``. A URL already in the queue returns its
@@ -159,8 +204,8 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
     ingest_id = str(uuid.uuid4())
     with conn:
         conn.execute(
-            "INSERT INTO ingest_queue (id, url, content_type, slug, status) VALUES (?, ?, ?, ?, ?)",
-            (ingest_id, url, content_type, slug, status),
+            "INSERT INTO ingest_queue (id, url, content_type, slug, status, tags) VALUES (?, ?, ?, ?, ?, ?)",
+            (ingest_id, url, content_type, slug, status, serialize_tags(tags)),
         )
     return ingest_id, True
 

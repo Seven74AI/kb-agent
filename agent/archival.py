@@ -4,11 +4,42 @@ Deterministic shell commands for archiving source content and pushing notes.
 Used by all pipelines (web, threads, instagram, books, youtube).
 """
 
+import re
 import subprocess
 from pathlib import Path
 
 from agent.config import RETIRED_AB_VAULT_PATH
+from agent.db import normalize_tags
 from agent.exceptions import ErrorType, StepError
+
+
+def append_note_tags(note_path: Path, tags) -> None:
+    """Append user-specified tags to a note's frontmatter ``tags:`` list.
+
+    Deterministic post-processing (not prompt-based): merges custom tags into the
+    existing ``tags: [...]`` YAML line. Idempotent + deduped; no-op when there are
+    no tags or no ``tags:`` line.
+    """
+    tags = normalize_tags(tags)
+    if not tags:
+        return
+    note_path = Path(note_path)
+    if not note_path.exists():
+        return
+    text = note_path.read_text(encoding="utf-8")
+
+    def _merge(match: re.Match) -> str:
+        inner = match.group(1).strip()
+        existing = [t.strip() for t in inner.split(",") if t.strip()]
+        merged: list[str] = []
+        for t in existing + tags:
+            if t and t not in merged:
+                merged.append(t)
+        return f"tags: [{', '.join(merged)}]"
+
+    new_text = re.sub(r"^tags:\s*\[([^\]]*)\]", _merge, text, count=1, flags=re.MULTILINE)
+    if new_text != text:
+        note_path.write_text(new_text, encoding="utf-8")
 
 
 # ── MinIO helpers ─────────────────────────────────────────────────────────────

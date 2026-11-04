@@ -289,7 +289,7 @@ def default_fetch_html(url: str) -> str:
 VIDEO_CONTENT_TYPES = {"youtube", "bunny_stream", "instagram_reel", "threads_video"}
 
 
-def submit_routed(url: str, config: Config, conn: sqlite3.Connection) -> dict:
+def submit_routed(url: str, config: Config, conn: sqlite3.Connection, *, tags=None) -> dict:
     """Submit a watch-discovered URL: video → deferred ingest, else immediate.
 
     Video types go through ``submit_ingest`` so the nightly batch collector
@@ -302,8 +302,8 @@ def submit_routed(url: str, config: Config, conn: sqlite3.Connection) -> dict:
     platform = detect_platform(url)
     subtype = detect_content_subtype(url, platform)
     if subtype in VIDEO_CONTENT_TYPES:
-        return submit_ingest(url, config, conn, content_type=subtype)
-    return submit_url(url, config, conn)
+        return submit_ingest(url, config, conn, content_type=subtype, tags=tags)
+    return submit_url(url, config, conn, tags=tags)
 
 
 def _poll_due_sources_in_thread(

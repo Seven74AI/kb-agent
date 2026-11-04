@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -857,6 +858,7 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
     note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(note_content, encoding="utf-8")
+    append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
 

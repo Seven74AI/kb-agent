@@ -18,6 +18,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -710,6 +711,7 @@ tags: [book, book-summary]
 
 """
     note_path.write_text(frontmatter + note_content, encoding="utf-8")
+    append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
 

@@ -9,6 +9,7 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.exceptions import ErrorType, StepError
@@ -358,6 +359,7 @@ def step_synthesize_note(task: dict, config: Config) -> str:
     note_path = _note_path(config, slug)
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(response.content, encoding="utf-8")
+    append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 
 

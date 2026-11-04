@@ -136,6 +136,7 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
             rr = dispatch_synthesize(
                 q["url"], config, conn,
                 content_type=f"{q['content_type']}_synthesize", slug=q["slug"],
+                tags=q.get("tags"),
             )
             update_ingest_status(conn, q["id"], "dispatched")
             print(f"  [dispatch] {q['slug']} -> {rr.get('task_id', rr.get('status'))}")
@@ -159,7 +160,7 @@ def main() -> None:
         non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
 
         for q in non_video:
-            r = submit_url(q["url"], config, conn, ignore_dedup=True)
+            r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
             status = r.get("status")
             if status in ("pending", "paused", "skipped"):
                 update_ingest_status(conn, q["id"], "dispatched")

@@ -45,20 +45,20 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         return core_detect_type(url)
 
     @mcp.tool
-    def submit_url(url: str) -> dict[str, Any]:
-        """Enqueue a URL for pipeline processing; returns task status and handle."""
+    def submit_url(url: str, tags: str = "") -> dict[str, Any]:
+        """Enqueue a URL for pipeline processing. `tags` (comma-separated) are added to the note."""
         conn = open_agent_conn(cfg)
         try:
-            return core_submit_url(url, cfg, conn)
+            return core_submit_url(url, cfg, conn, tags=tags)
         finally:
             conn.close()
 
     @mcp.tool
-    def ingest(url: str) -> dict[str, Any]:
-        """Queue a URL for deferred batch processing (durable inbox; a nightly batch collects it)."""
+    def ingest(url: str, tags: str = "") -> dict[str, Any]:
+        """Queue a URL for deferred batch processing. `tags` (comma-separated) are added to the note."""
         conn = open_agent_conn(cfg)
         try:
-            return core_submit_ingest(url, cfg, conn)
+            return core_submit_ingest(url, cfg, conn, tags=tags)
         finally:
             conn.close()
 
@@ -121,20 +121,26 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         return {"found": True, "note": note}
 
     @mcp.tool
-    def ingest_playlist(playlist_url: str) -> dict[str, Any]:
-        """Expand a YouTube playlist and queue each video (deferred batch)."""
+    def ingest_playlist(playlist_url: str, tags: str = "") -> dict[str, Any]:
+        """Expand a YouTube playlist and queue each video (deferred batch). `tags` (comma-separated) added to each note."""
         conn = open_agent_conn(cfg)
         try:
-            return core_ingest_playlist(playlist_url, cfg, conn, submit_fn=submit_routed)
+            return core_ingest_playlist(
+                playlist_url, cfg, conn,
+                submit_fn=lambda u, c, conn_: submit_routed(u, c, conn_, tags=tags),
+            )
         finally:
             conn.close()
 
     @mcp.tool
-    def bulk_import(urls: list[str]) -> dict[str, Any]:
-        """Submit many URLs in one call (video → deferred batch, else immediate)."""
+    def bulk_import(urls: list[str], tags: str = "") -> dict[str, Any]:
+        """Submit many URLs in one call (video → deferred batch, else immediate). `tags` (comma-separated) added to each note."""
         conn = open_agent_conn(cfg)
         try:
-            return core_bulk_import(urls, cfg, conn, submit_fn=submit_routed)
+            return core_bulk_import(
+                urls, cfg, conn,
+                submit_fn=lambda u, c, conn_: submit_routed(u, c, conn_, tags=tags),
+            )
         finally:
             conn.close()
 

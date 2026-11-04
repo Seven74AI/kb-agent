@@ -15,6 +15,7 @@ from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
+from agent.archival import append_note_tags
 from agent.archival import step_minio_upload as archival_minio_upload
 from agent.archival import step_git_push as archival_git_push
 from agent.pipelines import Step, register_pipeline
@@ -294,6 +295,7 @@ def step_synthesize_web(task: dict, config: Config) -> str:
         )
 
     note_path.write_text(note_content, encoding="utf-8")
+    append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 
 
