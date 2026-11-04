@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -44,17 +45,40 @@ def expand_youtube_playlist(playlist_url: str) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _submit_one(
+    submit: SubmitFn,
+    url: str,
+    config: Config,
+    agent_conn: sqlite3.Connection,
+    *,
+    tags,
+) -> dict:
+    """Call *submit* with ``tags`` only when its signature accepts that parameter."""
+    if tags is None:
+        return submit(url, config, agent_conn)
+    params = inspect.signature(submit).parameters
+    accepts_tags = "tags" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if accepts_tags:
+        return submit(url, config, agent_conn, tags=tags)
+    return submit(url, config, agent_conn)
+
+
 def bulk_import(
     urls: list[str],
     config: Config,
     agent_conn: sqlite3.Connection,
     *,
     submit_fn: SubmitFn | None = None,
+    tags=None,
 ) -> dict:
     """Submit each URL via :func:`submit_url` (or injected *submit_fn*)."""
     submit = submit_fn or submit_url
     cleaned = [(u or "").strip() for u in urls if (u or "").strip()]
-    results = [submit(u, config, agent_conn) for u in cleaned]
+    results = [
+        _submit_one(submit, u, config, agent_conn, tags=tags) for u in cleaned
+    ]
     return {"count": len(results), "results": results}
 
 

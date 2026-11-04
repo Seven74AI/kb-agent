@@ -87,6 +87,12 @@ PIPELINE_STEPS: dict[str, list[str]] = {
     "mega": [
         "megadl_download", "classify_content", "delegate",
     ],
+    "mega_video": [
+        "extract_metadata", "download_video", "extract_audio",
+        "diarize", "transcribe", "merge_and_identify",
+        "cleanup_temp", "synthesize_youtube",
+        "quality_gate", "minio_upload", "see_also", "git_push",
+    ],
 }
 
 

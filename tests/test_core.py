@@ -56,6 +56,67 @@ def test_slugify_basic():
     assert slugify("https://example.com/foo/bar") == "example.com_foo_bar"
 
 
+def test_slugify_youtube_watch_v_param():
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert slugify(url).endswith("_v_dQw4w9WgXcQ")
+
+
+@pytest.mark.parametrize(
+    "url,vid",
+    [
+        ("https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+    ],
+)
+def test_slugify_youtube_path_ids(url, vid):
+    assert slugify(url).endswith(f"_v_{vid}")
+
+
+def test_steps_for_mega_video_not_mega_delegate():
+    from agent.core.pipelines import steps_for_content_type
+
+    steps = steps_for_content_type("mega_video", "mega")
+    assert steps[0] == "extract_metadata"
+    assert "megadl_download" not in steps
+    assert "download_video" in steps
+    assert steps[-1] == "git_push"
+
+
+def test_bulk_import_passes_tags_when_submit_accepts(core_config, agent_conn):
+    received: list = []
+
+    def submit_with_tags(url, config, conn, tags=None):
+        received.append(tags)
+        return {"status": "ok", "url": url}
+
+    bulk_import(
+        ["https://example.com/a"],
+        core_config,
+        agent_conn,
+        tags="foo, bar",
+        submit_fn=submit_with_tags,
+    )
+    assert received == ["foo, bar"]
+
+
+def test_bulk_import_omits_tags_when_submit_does_not_accept(core_config, agent_conn):
+    received: list[str] = []
+
+    def submit_plain(url, config, conn):
+        received.append(url)
+        return {"status": "ok"}
+
+    bulk_import(
+        ["https://example.com/a"],
+        core_config,
+        agent_conn,
+        tags="ignored",
+        submit_fn=submit_plain,
+    )
+    assert received == ["https://example.com/a"]
+
+
 def test_detect_type_web():
     result = detect_type("https://example.com/page")
     assert result["platform"] == "web"
