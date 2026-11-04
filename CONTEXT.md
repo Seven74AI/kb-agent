@@ -85,6 +85,9 @@ URL submitted
   │     instagram.com/reel/                                  → instagram_reel
   │     instagram.com/p/                                     → instagram_post
   │     substack.com/                                        → substack
+  │     mega.nz/                                             → mega
+  │     player.mediadelivery.net/, terragrandir.com/         → bunny_stream
+  │     wikispooks.org/                                      → wikispooks
   │     .epub, .pdf, .mobi, .azw3 (direct upload)           → book
   │     everything else                                      → web
   │
@@ -100,12 +103,15 @@ URL submitted
   │     web:           curl Firecrawl /scrape health
   │     → any fail = PAUSE with reason, do NOT create task
   │
-  └── Content subtype (only for platforms with variants)
-        threads:   curl + grep video_versions → VIDEO or TEXT
-                   (media_type=19 handled by video_versions check)
-        substack:  curl preloads JSON + SSR HTML fallback → TEXT/IMAGE/VIDEO
+  └── Content subtype (platforms with variants + regex misses)
+        threads/substack/mega/web → Jev (OpenRouter decisions API, ~$0.00002/call)
+           with fetched content signal; falls back to legacy scrape on Jev failure:
+             threads:   curl + grep video_versions (media_type=19 handled)
+             substack:  curl preloads JSON + SSR HTML fallback → TEXT/IMAGE/VIDEO
+             mega:      megadl --print-names + extension heuristics
         instagram_post: always TEXT/IMAGE (carousel alt text extraction)
                         no video-in-carousel detection in current system
+        See docs/decisions/001-jev-routing-cascade.md
 ```
 
 #### Mega Link Detection
