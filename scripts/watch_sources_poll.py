@@ -36,9 +36,11 @@ def main() -> int:
         print("No due watch sources or no new items.", file=sys.stderr)
         return 0
 
+    exit_code = 0
     for r in results:
         if "error" in r:
             print(f"{r['page_url']}: ERROR {r['error']}", file=sys.stderr)
+            exit_code = 1
             continue
         new = r.get("new_items") or []
         failed = [s for s in r.get("submissions", []) if s.get("status") == "error"]
@@ -48,9 +50,10 @@ def main() -> int:
                 f"{len(failed)} failed (retry next run)",
                 file=sys.stderr,
             )
+            exit_code = 1
         else:
             print(f"{r['page_url']}: submitted {len(new)} new item(s): {', '.join(new)}")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

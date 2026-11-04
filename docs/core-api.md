@@ -15,14 +15,24 @@ Pure domain layer for kb-agent (`core/` package). Adapters:
 | `core/submit.py` | `submit_url` | Enqueue URL (dedup → health → subtype → steps → task row) |
 | `core/status.py` | `list_tasks`, `get_task` | Read task queue + optional log enrichment |
 | `core/resume.py` | `resume_task`, `retry_task` | Bulk resume by pause reason; single-task retry |
-| `core/notes.py` | `search_notes`, `get_note` | Vault grep search + note load |
+| `core/search.py` | `search_notes` | Vault grep search |
+| `core/note.py` | `get_note` | Vault note load |
+| `core/bulk.py` | `ingest_playlist`, `bulk_import` | YouTube playlist expansion; multi-URL submit |
 | `core/pipelines.py` | (internal) | Content-type → ordered pipeline step names |
-| `core/sources.py` | `watch_source` (foundation) | Register/lookup watched sources; persist last-seen + content hash |
-| `core/util.py` | (internal) | `slugify` |
-| `core/types.py` | — | Dataclasses / enums returned to adapters |
-| `core/watch_source.py` | — | Register/list/poll recurring page watches; diff + auto-submit |
+| `core/slugify.py` | (internal) | `slugify` |
+| `core/sources.py` | — (internal) | Low-level source registry; persist last-seen + content hash |
+| `core/watch_source.py` | `watch_source` | Register/list/poll recurring page watches; diff + auto-submit |
 
-Bulk tools (`ingest_playlist`, `bulk_import`) will compose `submit_url` in later tickets.
+Bulk tools (`ingest_playlist`, `bulk_import`) are wired and compose `submit_url`.
+
+> **`sources` vs `watch_sources`:** two registries coexist. `watch_sources`
+> (`core/watch_source.py`) is the *active* recurring-ingest path — it holds the regex
+> pattern + `{item}` URL template, diffs items against `last_seen_json`, and calls
+> `submit_url`; the MCP `watch_source` tool registers here. `sources`
+> (`core/sources.py`, table `sources`) is a lower-level registry (URL + cadence +
+> last-seen timestamp + content hash) with no MCP tool wired yet; it is the foundation
+> for content-hash-based change detection, not the poll/submit path. Do not map the
+> `watch_source` MCP tool to `sources.py`.
 
 **`watch_source`** (`agent/core/watch_source.py`): register a listing page (URL + regex +
 `{item}` URL template + cadence), poll on a scheduler loop, diff against `last_seen_json`,

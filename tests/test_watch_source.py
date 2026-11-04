@@ -135,6 +135,65 @@ def test_register_watch_source_baseline(agent_conn):
     assert parse_last_seen(row["last_seen_json"]) == frozenset({"j1-intro", "j2-keynote"})
 
 
+def test_register_watch_source_baseline_false_seeds_empty(agent_conn):
+    row = register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        cadence_seconds=86400,
+        baseline=False,
+    )
+    assert row["page_url"] == TDAH_PAGE
+    assert parse_last_seen(row["last_seen_json"]) == frozenset()
+
+
+def test_register_watch_source_rejects_non_http_url(agent_conn):
+    with pytest.raises(ValueError, match="http or https"):
+        register_watch_source(
+            agent_conn,
+            "ftp://example.com/listing",
+            item_pattern=TDAH_PATTERN,
+            item_url_template=TDAH_TEMPLATE,
+            fetch_html=lambda url: SAMPLE_HTML,
+        )
+    with pytest.raises(ValueError, match="http or https"):
+        register_watch_source(
+            agent_conn,
+            "https:///no-host",
+            item_pattern=TDAH_PATTERN,
+            item_url_template=TDAH_TEMPLATE,
+            fetch_html=lambda url: SAMPLE_HTML,
+        )
+
+
+def test_register_baseline_false_first_poll_submits_all(core_config, agent_conn):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        baseline=False,
+    )
+    submitted: list[str] = []
+
+    def track_submit(url, config, conn):
+        submitted.append(url)
+        return {"status": "pending", "http_status": 201, "task_id": "t1", "platform": "web"}
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    result = poll_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        core_config,
+        fetch_html=lambda url: SAMPLE_HTML,
+        submit_fn=track_submit,
+        now=now,
+    )
+    assert set(result["new_items"]) == {"j1-intro", "j2-keynote"}
+    assert len(submitted) == 2
+
+
 def test_register_duplicate_raises(agent_conn):
     register_watch_source(
         agent_conn,

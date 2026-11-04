@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from agent.config import Config
 from agent.core.submit import submit_url
@@ -91,6 +92,16 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {k: row[k] for k in row.keys()}
 
 
+def _validate_page_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("page_url required")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("page_url must be an http or https URL with a host")
+    return url
+
+
 def register_watch_source(
     conn: sqlite3.Connection,
     page_url: str,
@@ -102,9 +113,7 @@ def register_watch_source(
     baseline: bool = True,
 ) -> dict[str, Any]:
     """Register a page to watch. Optionally baseline *last_seen* from a live fetch."""
-    page_url = page_url.strip()
-    if not page_url:
-        raise ValueError("page_url required")
+    page_url = _validate_page_url(page_url)
     if cadence_seconds < 1:
         raise ValueError("cadence_seconds must be >= 1")
     if "{item}" not in item_url_template:
