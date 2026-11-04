@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Callable
 
@@ -9,6 +10,10 @@ import sqlite3
 
 from agent.config import Config
 from agent.core.submit import submit_url
+
+# yt-dlp lives in the py3.11 hermes-agent venv; the MCP server runs in a separate
+# mcp-venv with system PATH (no yt-dlp), so resolve it explicitly.
+YTDLP_BIN = shutil.which("yt-dlp") or "/usr/local/lib/hermes-agent/venv/bin/yt-dlp"
 
 ExpandPlaylistFn = Callable[[str], list[str]]
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
@@ -22,7 +27,7 @@ def expand_youtube_playlist(playlist_url: str) -> list[str]:
     try:
         proc = subprocess.run(
             [
-                "yt-dlp",
+                YTDLP_BIN,
                 "--flat-playlist",
                 "--print",
                 "url",
