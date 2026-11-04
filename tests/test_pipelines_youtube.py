@@ -167,6 +167,28 @@ def test_validate_cookies_valid(tmp_path):
 
 # ── Metadata extraction tests ────────────────────────────────────────────────
 
+def test_step_extract_metadata_na_duration(config, task_dict):
+    """yt-dlp may emit NA for duration; treat as 0.0."""
+    mock_stdout = "Test Title||Test Channel||NA||10000||20260101"
+
+    with patch("agent.pipelines.youtube._validate_cookies"):
+        with patch("subprocess.run") as mock_run:
+
+            def side_effect(*args, **kwargs):
+                cmd = args[0]
+                if "--print" in cmd and "chapters" in " ".join(cmd):
+                    return MagicMock(returncode=0, stdout="[]")
+                if "--print" in cmd and "description" in " ".join(cmd):
+                    return MagicMock(returncode=0, stdout="Test description")
+                return MagicMock(returncode=0, stdout=mock_stdout)
+
+            mock_run.side_effect = side_effect
+            meta_json = step_extract_metadata(task_dict, config)
+
+    meta = json.loads(meta_json)
+    assert meta["duration"] == 0.0
+
+
 def test_step_extract_metadata_success(config, task_dict):
     """Test successful metadata extraction."""
     mock_stdout = "Test Title||Test Channel||600||10000||20260101"

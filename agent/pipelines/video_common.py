@@ -5,11 +5,38 @@ speaker-attributed transcript to MinIO. A synthesize-only task then fetches that
 transcript and writes the note — no download/diarize/transcribe steps.
 """
 
+import json
 import subprocess
 from pathlib import Path
 
 from agent.config import Config
 from agent.exceptions import ErrorType, StepError
+
+
+def _duration_from_merged(merged: dict) -> float:
+    """Infer media duration (seconds) from a merged transcript JSON payload."""
+    duration = merged.get("duration")
+    if isinstance(duration, (int, float)):
+        return float(duration)
+
+    nested = merged.get("transcript")
+    if isinstance(nested, dict):
+        inner_duration = nested.get("duration")
+        if isinstance(inner_duration, (int, float)):
+            return float(inner_duration)
+        segments = nested.get("segments") or []
+    else:
+        segments = merged.get("segments") or []
+
+    max_end = 0.0
+    for seg in segments:
+        if isinstance(seg, dict):
+            end = seg.get("end", 0) or 0
+            try:
+                max_end = max(max_end, float(end))
+            except (TypeError, ValueError):
+                continue
+    return max_end
 
 
 def step_fetch_transcript(task: dict, config: Config) -> str:
@@ -37,10 +64,9 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
             step_name="fetch_transcript",
         )
 
-    # Normalize batch transcript segments: merge_speakers writes `time`, but
-    # _format_transcript_for_llm / _build_speaker_summary read `start`/`end`.
-    import json
-
+    # Synthesize-only path skips extract_metadata: normalize batch segments
+    # (`time` -> `start`/`end`) and write minimal metadata so downstream density
+    # checks (e.g. YouTube _check_density) can run.
     try:
         data = json.loads(merged_path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
@@ -63,5 +89,9 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
             nxt = segs[i + 1].get("start", segs[i + 1].get("time")) if i + 1 < len(segs) else None
             seg["end"] = nxt if nxt is not None else seg.get("start", 0) + 5.0
     merged_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    if not meta_path.exists():
+        meta_path.write_text(json.dumps({"duration": _duration_from_merged(data)}), encoding="utf-8")
 
     return str(merged_path)

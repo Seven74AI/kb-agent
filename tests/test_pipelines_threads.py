@@ -129,6 +129,14 @@ class TestHelpers:
         url = _extract_video_url(html)
         assert url == "https://v.cdn/v.mp4"  # Highest quality
 
+    def test_extract_video_url_nested_brackets_in_url(self):
+        html = (
+            '{"video_versions":[{"url":"https://v.cdn/v.mp4?token=[nested]","height":720},'
+            '{"url":"https://v.cdn/v_hd.mp4","height":1080}]}'
+        )
+        url = _extract_video_url(html)
+        assert url == "https://v.cdn/v_hd.mp4"
+
     def test_extract_video_url_none(self):
         html = '{"caption":{"text":"hello"}}'
         assert _extract_video_url(html) is None
@@ -136,8 +144,16 @@ class TestHelpers:
     def test_extract_all_captions(self):
         html = '{"caption":{"text":"First caption text."}} and {"text":"Second caption text."}'
         captions = _extract_all_captions(html)
-        assert len(captions) >= 1
-        assert any("First caption" in c or "Second caption" in c for c in captions)
+        assert captions == ["First caption text."]
+
+    def test_extract_all_captions_multiple_caption_objects(self):
+        html = (
+            '{"caption":{"text":"First caption."}}'
+            ',"thread_items":[{"post":{"caption":{"text":"Second caption."}}}]'
+        )
+        captions = _extract_all_captions(html)
+        assert "First caption." in captions
+        assert "Second caption." in captions
 
     def test_extract_all_captions_empty(self):
         html = '<html><body>Nothing here</body></html>'
