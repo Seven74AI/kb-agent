@@ -17,9 +17,10 @@ from agent.core import (
     compute_staleness,
     format_elapsed,
     list_tasks,
+    plan_submission,
     resume_tasks,
     slugify,
-    submit_url,
+    submit_plan,
 )
 from agent.core.resume import normalize_reason_pattern
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db
@@ -86,8 +87,15 @@ def submit():
     if not url:
         return jsonify({"error": "url required"}), 400
 
-    conn = _get_agent_conn()
-    result = submit_url(url, config, conn)
+    plan = plan_submission(url, config)
+    if plan["status"] in ("error", "skipped"):
+        result = plan
+    else:
+        conn = _get_agent_conn()
+        try:
+            result = submit_plan(conn, plan)
+        finally:
+            conn.close()
 
     body = {k: v for k, v in result.items() if k not in ("http_status", "status")}
     body["status"] = result["status"]

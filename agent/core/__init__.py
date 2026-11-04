@@ -10,7 +10,7 @@ from agent.core.resume import normalize_reason_pattern, resume_tasks, retry_task
 from agent.core.search import search_notes
 from agent.core.slugify import slugify
 from agent.core.status import compute_staleness, format_elapsed, get_task, list_tasks
-from agent.core.submit import submit_url
+from agent.core.submit import plan_submission, submit_plan, submit_url
 
 __all__ = [
     "PIPELINE_STEPS",
@@ -21,10 +21,12 @@ __all__ = [
     "get_task",
     "list_tasks",
     "normalize_reason_pattern",
+    "plan_submission",
     "resume_tasks",
     "retry_task",
     "search_notes",
     "slugify",
     "steps_for_content_type",
+    "submit_plan",
     "submit_url",
 ]
