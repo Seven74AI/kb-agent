@@ -19,6 +19,7 @@ Pure domain layer for kb-agent (`core/` package). Adapters:
 | `core/pipelines.py` | (internal) | Content-type → ordered pipeline step names |
 | `core/util.py` | (internal) | `slugify` |
 | `core/types.py` | — | Dataclasses / enums returned to adapters |
+| `core/diff.py` | `watch_source` (foundation) | Pure content/ETag diff vs persisted hash (no state mutation) |
 | `core/watch_source.py` | `watch_source` | Register/list/poll recurring page watches; diff + auto-submit |
 
 Bulk tools (`ingest_playlist`, `bulk_import`) will compose `submit_url` in later tickets.
@@ -87,6 +88,29 @@ Grep under `{vault}/Knowledge base/**/*.md`.
 
 Resolve slug across standard KB folders or load by vault-relative path.
 
+### `check_content_change` / `content_fingerprint` / `normalize_source_content`
+
+Pure diff helper for watched sources. Computes a stable `sha256:` fingerprint from
+`normalize_source_content` when `content` is provided, or compares normalized HTTP
+ETags when only `etag` is available. Returns `NEW` when there is no prior hash or the
+fingerprint/etag differs; returns `UNCHANGED` on a match. Does not write SQLite state
+— callers persist `last_content_hash` and `last_seen` themselves.
+
+**Hash families.** `last_content_hash` must stay in one family per source: `sha256:<hex>`
+(from `content_fingerprint`) when polling with `content`, or a bare normalized ETag
+(from `normalize_etag`) when polling with `etag`. Mixing families compares unequal and
+always reports `NEW` — do not persist a body hash and later poll with `etag` (or vice
+versa).
+
+**Persisting the result.** On `NEW`, `content_hash` is the value to store. On
+`UNCHANGED` with `etag`, `content_hash` is `None`: skip the hash update (do not
+overwrite the stored hash) but still update `last_seen` so the source is recorded as
+polled.
+
+**Input.** `normalize_source_content` accepts a decoded body or a full raw HTTP message
+with a status line; header stripping only applies to a genuine `HTTP/...` status line,
+so a body that begins with a `word: value` line is left intact.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -97,6 +121,7 @@ Resolve slug across standard KB folders or load by vault-relative path.
 | `preflight_health` | no | cookie files, curl, `which megadl` |
 | `dedup_check` | no | grep vault |
 | `slugify` | yes | — |
+| `check_content_change` / `content_fingerprint` | yes | — |
 | `resolve_pipeline_steps` | yes | — |
 | `submit_url` | orchestration | via `SubmitDependencies` |
 | `list_tasks` / `get_task` | no | SQLite |
