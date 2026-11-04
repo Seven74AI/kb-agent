@@ -117,13 +117,22 @@ def serialize_tags(tags) -> str | None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns missing on pre-existing databases (idempotent)."""
-    tasks_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-    if "tags" not in tasks_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN tags TEXT")
-    iq_cols = {r[1] for r in conn.execute("PRAGMA table_info(ingest_queue)").fetchall()}
-    if "tags" not in iq_cols:
-        conn.execute("ALTER TABLE ingest_queue ADD COLUMN tags TEXT")
+    """Add columns missing on pre-existing databases (idempotent, schema-safe).
+
+    ``init_db`` is shared between the agent schema and the logs schema, so guard
+    each table's migration on the table actually existing.
+    """
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "tasks" in tables:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN tags TEXT")
+    if "ingest_queue" in tables:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(ingest_queue)").fetchall()}
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE ingest_queue ADD COLUMN tags TEXT")
     conn.commit()
 
 
