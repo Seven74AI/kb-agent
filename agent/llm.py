@@ -83,6 +83,7 @@ class DeepSeekClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "max_tokens": 16000,
         }
         if tools:
             body["tools"] = tools
@@ -99,7 +100,7 @@ class DeepSeekClient(LLMClient):
         data = resp.json()
 
         choice = data["choices"][0]
-        content = choice["message"]["content"]
+        content = choice["message"].get("content") or choice["message"].get("reasoning_content") or ""
         usage = data.get("usage", {})
 
         result = LLMResponse(
@@ -148,6 +149,7 @@ class EdgeeClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "max_tokens": 16000,
         }
         if tools:
             body["tools"] = tools
@@ -164,7 +166,7 @@ class EdgeeClient(LLMClient):
         data = resp.json()
 
         choice = data["choices"][0]
-        content = choice["message"]["content"]
+        content = choice["message"].get("content") or choice["message"].get("reasoning_content") or ""
         usage = data.get("usage", {})
 
         result = LLMResponse(
