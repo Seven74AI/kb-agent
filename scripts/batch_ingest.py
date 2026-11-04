@@ -25,6 +25,7 @@ from agent.db import (  # noqa: E402
     list_ingest_by_status,
     update_ingest_status,
 )
+from agent.core.batch_lock import acquire, release  # noqa: E402
 from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
 
 # content_type -> download-phase step names (everything before the ffmpeg audio
@@ -142,32 +143,38 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
 
 def main() -> None:
     config = load_config()
-    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
-
-    queued = list_ingest_by_status(conn, "queued")
-    if not queued:
-        print("No queued ingest links.")
+    if not acquire(config):
+        print("Another batch run is in progress; exiting.")
         return
+    try:
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
 
-    print(f"Queued: {len(queued)} link(s)")
-    video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
-    non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
+        queued = list_ingest_by_status(conn, "queued")
+        if not queued:
+            print("No queued ingest links.")
+            return
 
-    for q in non_video:
-        r = submit_url(q["url"], config, conn, ignore_dedup=True)
-        status = r.get("status")
-        if status in ("pending", "paused", "skipped"):
-            update_ingest_status(conn, q["id"], "dispatched")
-            print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
-        else:
-            update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
-            print(f"  [failed] {q['slug']} -> {status}")
+        print(f"Queued: {len(queued)} link(s)")
+        video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
+        non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
 
-    if video:
-        _process_videos(video, config, conn)
+        for q in non_video:
+            r = submit_url(q["url"], config, conn, ignore_dedup=True)
+            status = r.get("status")
+            if status in ("pending", "paused", "skipped"):
+                update_ingest_status(conn, q["id"], "dispatched")
+                print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
+            else:
+                update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
+                print(f"  [failed] {q['slug']} -> {status}")
 
-    conn.close()
-    print(f"DONE: {len(non_video)} non-video + {len(video)} video processed")
+        if video:
+            _process_videos(video, config, conn)
+
+        conn.close()
+        print(f"DONE: {len(non_video)} non-video + {len(video)} video processed")
+    finally:
+        release(config)
 
 
 if __name__ == "__main__":
