@@ -33,98 +33,18 @@ Nombre de concepts :
 
 ## PASSE 2 — Note finale
 
-En utilisant les concepts extraits en Passe 1 + le transcript complet,
-produis la note structurée suivante. **Ordre canonique des sections :**
-Résumé → Métadonnées → Concepts clés → Résumé par locuteur → Chapitres →
-Points clés → Nuances & Limites → Extractions utiles → Transcription → Voir aussi.
-La Transcription est une annexe en fin de note (format dialogue continu,
-`*(timestamp)* **SPEAKER_XX** : texte`). Le lecteur doit trouver l'essentiel
-(résumés, concepts) en premier, la transcription brute en dernier.
+En utilisant les concepts extraits en Passe 1 + le transcript complet, rédige la note
+en suivant **le modèle `templates/youtube-note-template.md`**. L'ordre des sections, les
+libellés (anglais) et le format de chaque section sont définis dans le modèle — suis-le
+fidèlement, ne réinvente pas la structure ici.
 
-### A) Résumé global (3-4 phrases)
-- La thèse centrale + les mécanismes clés invoqués
-- Pas juste "le microbiote est important" mais "le microbiote pilote
-  l'inflammation via les métabolites X qui modulent la voie Y"
-- Le resume est dans la langue de la video (anglais → anglais, francais → francais)
-
-### B) Métadonnées
-- Langue, intervenant(s) (issus des étiquettes SPEAKER_00, SPEAKER_01 du transcript), durée
-- Source (URL si YouTube, Mega si fichier local)
-- Si plusieurs speakers, lister tous les labels distincts présents
-
-### C) Concepts clés
-Reprendre chaque concept de la Passe 1, développé en 1 paragraphe.
-Chaque concept est un bloc autonome : un lecteur qui lit UNIQUEMENT
-cette section doit tout comprendre. Inclure les mécanismes, pas juste
-les conclusions.
-
-### D) Résumé par locuteur
-
-Pour chaque locuteur distinct dans le transcript, produire un résumé de ce qu'il a couvert :
-
-```
-SPEAKER_00 (XX min de parole) :
-- Thèmes abordés : [2-4 thèmes]
-- Position / thèse défendue
-- Arguments et mécanismes clés
-```
-
-- Si `speaker_names` est fourni dans le JSON (identification depuis métadonnées),
-  utiliser le vrai nom entre parenthèses : `SPEAKER_00 (Paul)`.
-- Si le locuteur est purement réactif (questions courtes, relances), le noter.
-- Pour les segments `overlap: true`, attribution au locuteur composite
-  (`SPEAKER_00 | SPEAKER_01`) mais ne pas les compter dans le temps de parole.
-- Nombre de locuteurs : si >5, ne garder que les 5 plus actifs.
-
-### E) Chapitres
-Tableau : | Timestamp | Titre | Affirmations clés | Mécanismes/Données |
-
-- "Affirmations clés" : les 2-3 claims principaux du chapitre
-- "Mécanismes/Données" : le "comment" derrière chaque claim
-  (chiffres, protocoles, études citées, noms de chercheurs)
-- Si le chapitre est purement anecdotique (témoignage personnel),
-  le noter explicitement
-- La redondance avec Concepts clés est assumée : ce sont deux
-  parcours de lecture différents (thématique vs chronologique)
-
-### F) Points clés (8-15)
-- Chaque point : 1-2 phrases, format "[Claim] — [Mécanisme/Preuve]"
-- Pas de généralités type "c'est important", "il faut écouter son corps"
-- Actionnable ou contenant un mécanisme
-- Liste dense, skimmable
-
-### G) Nuances & Limites
-- Ce que l'intervenant présente comme certitude vs hypothèse
-- Études/papiers mentionnés (même approximativement)
-- Glissements sémantiques (corrélation présentée comme causalité)
-- Affirmations extraordinaires non étayées
-- **Pas de fact-checking externe** — on signale ce que la vidéo
-  elle-même présente ou omet, sans vérifier
-
-### H) Extractions utiles
-
-**Citations** — verbatim marquantes avec timestamp approximatif
-```
-> "citation exacte" (HH:MM:SS)
-```
-
-**Protocoles/Méthodes** — dosages, routines, pratiques concrètes mentionnées
-
-**Références externes** — chercheurs, livres, études, institutions cités
-
-### I) Voir aussi
-- Notes liées dans le vault
+- **Contenu** : dans la langue DE LA VIDEO (anglais → anglais, français → français). Ne traduis jamais.
+- **Libellés de section** : TOUJOURS en anglais (Metadata, Summary, Chapters, Key Concepts…), quelle que soit la langue source.
+- **Transcription** : annexe en fin de note (format dialogue continu, `*(timestamp)* **SPEAKER_XX** : texte`). Le lecteur doit trouver l'essentiel (résumé, concepts) en premier, la transcription brute en dernier.
 
 ## Qualité
 
-- **Ancrage** : chaque claim doit pouvoir être rattaché à un segment du
-  transcript. Pas de paraphrase vague.
-- **Densité** : une note de 29 min devrait faire ~5-8 KB de markdown.
-  Si elle fait 2 KB, c'est trop superficiel.
-- **Langue** : Le contenu est dans la langue DE LA VIDEO (anglais → contenu anglais,
-  francais → contenu francais). Les LABELS de section sont TOUJOURS en anglais
-  (Summary, Key Concepts, Chapters, etc.), peu importe la langue source.
-  NE TRADUIS JAMAIS le contenu.
-- **Ne pas halluciner de contenu** : si une section n'a pas de matière
-  (ex: aucune référence externe citée), le dire sobrement ("Aucune
-  référence externe citée dans la vidéo").
+- **Ancrage** : chaque claim doit pouvoir être rattaché à un segment du transcript. Pas de paraphrase vague.
+- **Densité** : une note de 29 min devrait faire ~5-8 KB de markdown. Si elle fait 2 KB, c'est trop superficiel.
+- **Langue** : contenu dans la langue DE LA VIDEO, libellés en anglais. NE TRADUIS JAMAIS le contenu.
+- **Ne pas halluciner de contenu** : si une section n'a pas de matière (ex: aucune référence externe citée), le dire sobrement ("No external references cited in the video").

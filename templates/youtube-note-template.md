@@ -1,6 +1,6 @@
 ---
 date: YYYY-MM-DD
-source: <chaîne YouTube>, <date publication>
+source: "<channel>, <publication date>"  # MUST be quoted — may contain `:`
 source_url: https://youtube.com/watch?v=VIDEO_ID
 source_files:
   video: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/videos/<slug>.webm
@@ -10,94 +10,96 @@ confidence: plausible
 tags: [tag1, tag2, tag3]
 ---
 
-# Titre de la video
+# Video Title
 
-> **Language:** Content in source language. Section labels in English
-> (Summary, Key Concepts, Chapters...) regardless of video language.
+> **Language:** Content in the source language. Section labels are ALWAYS in English
+> (Metadata, Summary, Chapters, Key Concepts…) regardless of the video's language.
 
-## Métadonnées
-- **Chaîne / Intervenant(s) :** ...
-- **Durée :** XX min
-- **Langue :** ...
-- **Publié le :** ...
-- **Vues :** ...
+## Metadata
+- **Channel / Speaker(s):** ...
+- **Duration:** XX min
+- **Language:** ...
+- **Published:** ...
+- **Views:** ...
 
-## Résumé
-3-4 phrases denses. La thèse centrale + les mécanismes clés invoqués.
-Pas "le microbiote est important" mais "le microbiote pilote l'inflammation
-via les métabolites X qui modulent la voie Y".
+## Summary
+3-4 dense sentences. The central thesis + the key mechanisms invoked.
+Not "the microbiome is important" but "the microbiome drives inflammation
+via metabolites X that modulate pathway Y".
 
-## Chapitres
+## Chapters
 
-| Timestamp | Titre | Affirmations clés | Mécanismes / Données |
-|-----------|-------|-------------------|----------------------|
-| 00:00 | Introduction | Les 2-3 claims principaux | Le "comment" : chiffres, études, protocoles |
-| 05:23 | Le problème | ... | ... |
+| Timestamp | Title | Key claims | Mechanisms / Data |
+|-----------|-------|-----------|-------------------|
+| 00:00 | Introduction | The 2-3 main claims | The "how": figures, studies, protocols |
+| 05:23 | The problem | ... | ... |
 
-Si un chapitre est purement anecdotique (témoignage personnel), le noter
-explicitement : "(témoignage personnel, pas de données)".
+If a chapter is purely anecdotal (personal testimony), note it explicitly:
+"(personal testimony, no data)". Redundancy with Key Concepts is intentional —
+two different reading paths (thematic vs chronological).
 
-## Résumé par chapitre
-Résumé détaillé de chaque chapitre avec les affirmations principales.
+## Chapter Summary
+Detailed summary of each chapter with its main claims.
 
-## Concepts clés
-3-6 concepts transversaux développés individuellement. Chaque concept = un
-sous-titre avec 2-4 phrases qui expliquent le mécanisme, pas juste la conclusion.
+## Key Concepts
+3-6 cross-cutting concepts, each developed individually. Each concept = a
+sub-heading with 2-4 sentences explaining the mechanism, not just the conclusion.
 
-Format par concept :
-### Concept — explication du mécanisme
-Ce qui est affirmé, comment ça fonctionne, données/chiffres/études citées.
-Implication pratique si mentionnée.
+Format per concept:
+### Concept — explanation of the mechanism
+What is claimed, how it works, data/figures/studies cited.
+Practical implication if mentioned.
 
-## Résumé par locuteur
+## Speaker Summary
 
-| Locuteur | Temps | Thèmes | Position |
-|----------|-------|--------|----------|
-| SPEAKER_00 (~XX min) | Thème 1, Thème 2 | Thèse défendue | |
-| SPEAKER_01 (~XX min) | Thème 3, Thème 4 | Contre-point si pertinent | |
+| Speaker | Time | Topics | Position |
+|---------|------|--------|----------|
+| SPEAKER_00 (~XX min) | Topic 1, Topic 2 | Thesis defended | |
+| SPEAKER_01 (~XX min) | Topic 3, Topic 4 | Counter-point if relevant | |
 
-- Si les noms réels sont connus (identification depuis métadonnées), les utiliser
-- Si >5 locuteurs, ne garder que les 5 plus actifs
-- Si un locuteur est purement réactif (questions courtes), le noter
-- Les segments `⚠️ Chevauchement` ne sont pas comptabilisés dans le temps de parole
+- If real names are known (identified from metadata), use them
+- If >5 speakers, keep only the 5 most active
+- If a speaker is purely reactive (short questions), note it
+- `⚠️ Overlap` segments are not counted in speaking time
 
-## Points clés
-8-15 points. Chaque point doit être actionnable ou contenir un mécanisme.
-Format : "[Claim] — [Mécanisme/Preuve apportée]"
-Pas de généralités type "c'est important", "il faut écouter son corps".
+## Key Points
+8-15 points. Each point must be actionable or contain a mechanism.
+Format: "[Claim] — [Mechanism/Evidence]"
+No generalities like "it's important", "listen to your body".
 
-## Nuances & Limites
-- Ce que l'intervenant présente comme certitude vs hypothèse
-- Études/papiers mentionnés (même approximativement : "une étude de 2023 à Harvard...")
-- Contradictions internes ou affirmations extraordinaires non étayées
+## Nuances & Limitations
+- What the speaker presents as certainty vs hypothesis
+- Studies/papers mentioned (even approximately: "a 2023 Harvard study…")
+- Internal contradictions or extraordinary unsupported claims
+- No external fact-checking — flag what the video itself presents or omits, without verifying
 
-## Extractions utiles
+## Useful Extractions
 
-### Citations
-> "citation exacte" (HH:MM:SS)
+### Quotes
+> "exact quote" (HH:MM:SS)
 
-### Protocoles / Méthodes
-- Dosages, routines, pratiques concrètes mentionnées
+### Protocols / Methods
+- Dosages, routines, concrete practices mentioned
 
-### Références externes
-- Chercheurs, livres, études, institutions cités
+### External References
+- Researchers, books, studies, institutions cited
 
-## Transcription
+## Transcript
 
-Format dialogue continu avec timestamps. Toute la transcription en fin de note (annexe).
+Continuous dialogue format with timestamps. Full transcript at the end of the note (appendix).
 
 ```
-*(HH:MM:SS)* **SPEAKER_00 (Nom si connu)** : texte de l'intervention...
+*(HH:MM:SS)* **SPEAKER_00 (Name if known)** : text of the intervention...
 
-*(HH:MM:SS)* **SPEAKER_01** : réponse...
+*(HH:MM:SS)* **SPEAKER_01** : response...
 
-⚠️ *(HH:MM:SS)* **SPEAKER_00 | SPEAKER_01** *(chevauchement)* : texte moins fiable...
+⚠️ *(HH:MM:SS)* **SPEAKER_00 | SPEAKER_01** *(overlap)* : less reliable text...
 ```
 
-- Les noms réels remplacent les labels si connus (ex: `SPEAKER_00 (Paul)`)
-- Les segments `overlap: true` sont préfixés par `⚠️` et annotés `*(chevauchement)*`
-- Pas de table — dialogue fluide pour la lecture
-- Les timestamps complets sont dans le JSON MinIO ; dans la note, arrondis à la seconde
+- Real names replace labels if known (e.g. `SPEAKER_00 (Paul)`)
+- `overlap: true` segments are prefixed with `⚠️` and annotated `*(overlap)*`
+- No table — fluid dialogue for reading
+- Full timestamps are in the MinIO JSON; in the note, rounded to the second
 
-## Voir aussi
-- [[Note liée]]
+## See Also
+- [[Related note]]
