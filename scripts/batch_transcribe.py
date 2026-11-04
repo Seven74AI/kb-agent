@@ -15,6 +15,10 @@ import shutil
 import subprocess
 import sys
 
+# Isolate from the Hermes runtime's py3.14 PYTHONPATH (cross-venv cffi mismatch
+# in the modal/yt-dlp subprocesses).
+os.environ.pop("PYTHONPATH", None)
+
 MODAL = "/root/modal"
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
 

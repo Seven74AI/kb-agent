@@ -10,10 +10,15 @@ Reads the durable ingest_queue (status='queued'):
 Runs as a --no-agent cron. Idempotent: a link is marked 'dispatched' only after
 its task is created; a crash re-runs cleanly next night.
 """
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Isolate from the Hermes runtime's py3.14 PYTHONPATH — it cross-contaminates
+# py3.11 subprocesses (yt-dlp cffi mismatch) when this runs under `hermes cron`.
+os.environ.pop("PYTHONPATH", None)
 
 sys.path.insert(0, "/root/kb-agent")
 
