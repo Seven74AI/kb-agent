@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from agent.core.diff import (
@@ -11,6 +13,16 @@ from agent.core.diff import (
     normalize_etag,
     normalize_source_content,
 )
+from agent.core.sources import lookup_all_sources, register_source, update_source_state
+from agent.db import AGENT_SCHEMA, init_db
+
+
+@pytest.fixture
+def agent_conn(tmp_path):
+    conn = init_db(tmp_path / "data" / "agent.db", AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    yield conn
+    conn.close()
 
 
 def test_content_fingerprint_is_stable():
@@ -36,6 +48,13 @@ def test_normalize_source_content_collapses_whitespace():
     assert normalize_source_content(a) == normalize_source_content(b)
 
 
+def test_normalize_source_content_keeps_word_value_leading_line():
+    # A body that starts with a `word: value` line must not be treated as
+    # HTTP headers: the leading line is real content, not an envelope.
+    body = "Note: important\n\nActual body"
+    assert normalize_source_content(body) == body
+
+
 def test_check_content_change_first_seen_with_content():
     result = check_content_change(
         last_content_hash=None,
@@ -44,6 +63,16 @@ def test_check_content_change_first_seen_with_content():
     )
     assert result.status == ContentChangeStatus.NEW
     assert result.content_hash == content_fingerprint("fresh payload")
+
+
+def test_check_content_change_first_seen_with_etag():
+    result = check_content_change(
+        last_content_hash=None,
+        last_seen=None,
+        etag='W/"abc123"',
+    )
+    assert result.status == ContentChangeStatus.NEW
+    assert result.content_hash == normalize_etag('W/"abc123"')
 
 
 def test_check_content_change_unchanged_content():
@@ -114,6 +143,18 @@ def test_check_content_change_etag_changed():
     assert result.content_hash == normalize_etag('W/"new"')
 
 
+def test_check_content_change_mixed_hash_families_reports_new():
+    # Documented contract: mixing a body `sha256:` hash with an ETag poll always
+    # compares unequal and reports NEW — never silently match across families.
+    stored_body_hash = content_fingerprint("body content")
+    result = check_content_change(
+        last_content_hash=stored_body_hash,
+        last_seen="2026-11-04T12:00:00+00:00",
+        etag='W/"abc123"',
+    )
+    assert result.status == ContentChangeStatus.NEW
+
+
 def test_check_content_change_requires_content_or_etag():
     with pytest.raises(ValueError, match="content or etag"):
         check_content_change(last_content_hash=None, last_seen=None)
@@ -126,3 +167,36 @@ def test_check_content_change_rejects_both_content_and_etag():
             content="body",
             etag='"x"',
         )
+
+
+def test_watch_source_poll_contract(agent_conn):
+    source_id = register_source(agent_conn, "https://example.com/feed", 3600)
+    row = lookup_all_sources(agent_conn)[0]
+    assert row["last_content_hash"] is None
+
+    # First poll: body content, no stored hash -> NEW, persist.
+    result = check_content_change(
+        last_content_hash=row["last_content_hash"],
+        last_seen=row["last_seen"],
+        content="body v1",
+    )
+    assert result.status == ContentChangeStatus.NEW
+    update_source_state(agent_conn, source_id, "2026-11-04T12:00:00+00:00", result.content_hash)
+
+    # Second poll, identical content -> UNCHANGED.
+    row = lookup_all_sources(agent_conn)[0]
+    result = check_content_change(
+        last_content_hash=row["last_content_hash"],
+        content="body v1",
+    )
+    assert result.status == ContentChangeStatus.UNCHANGED
+
+    # Changed content -> NEW, persist again.
+    result = check_content_change(
+        last_content_hash=row["last_content_hash"],
+        content="body v2",
+    )
+    assert result.status == ContentChangeStatus.NEW
+    assert result.content_hash == content_fingerprint("body v2")
+    update_source_state(agent_conn, source_id, "2026-11-04T12:05:00+00:00", result.content_hash)
+    assert lookup_all_sources(agent_conn)[0]["last_content_hash"] == result.content_hash

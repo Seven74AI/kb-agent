@@ -4,6 +4,17 @@ Compare freshly fetched source bytes against persisted ``last_content_hash``
 without mutating registry state. Content fingerprints use SHA-256 over
 :func:`normalize_source_content`; optional HTTP ETag values compare after
 :func:`normalize_etag` when no body is available (for example 304 responses).
+
+Hash families
+-------------
+``last_content_hash`` must stay in a single family per source:
+
+* body polling stores ``sha256:<hex>`` (see :func:`content_fingerprint`);
+* ETag polling stores the bare normalized ETag (see :func:`normalize_etag`).
+
+Mixing families (a body ``sha256:`` hash later polled with ``etag``, or vice
+versa) always compares unequal and reports ``NEW``. Use one mode consistently
+per source.
 """
 
 from __future__ import annotations
@@ -21,6 +32,13 @@ class ContentChangeStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ContentChangeResult:
+    """Outcome of a diff against persisted ``last_content_hash``.
+
+    ``content_hash`` is the value to persist on ``NEW``. It is ``None`` on an
+    ``UNCHANGED`` ETag match — do not overwrite the stored hash in that case;
+    the caller should still update ``last_seen``.
+    """
+
     status: ContentChangeStatus
     content_hash: str | None
 
@@ -36,7 +54,13 @@ def normalize_etag(etag: str) -> str:
 
 
 def normalize_source_content(raw: str | bytes) -> str:
-    """Normalize fetched source bytes for stable fingerprinting."""
+    """Normalize fetched source bytes for stable fingerprinting.
+
+    Accepts a decoded response body (the usual case for ``urllib``/``requests``)
+    or a full raw HTTP message when a status line is present. Header stripping
+    only applies to a genuine ``HTTP/...`` status line, so a body that merely
+    begins with a ``word: value`` line is left intact and fingerprints stably.
+    """
     if isinstance(raw, bytes):
         text = raw.decode("utf-8", errors="replace")
     else:
@@ -83,6 +107,20 @@ def check_content_change(
     ``last_seen`` is accepted for API symmetry with the sources registry but is
     not used for comparison — only ``last_content_hash`` (or its absence) drives
     the diff outcome.
+
+    Hash families
+    -------------
+    ``last_content_hash`` must stay in one family per source: ``sha256:<hex>``
+    from :func:`content_fingerprint` when polling with ``content``, or a bare
+    normalized ETag when polling with ``etag``. Mixing families compares unequal
+    and always yields ``NEW``.
+
+    Persisting the result
+    ---------------------
+    On ``NEW``, ``content_hash`` is the value to persist via
+    ``update_source_state``. On ``UNCHANGED`` with ``etag``, ``content_hash``
+    is ``None``: skip the hash update but still update ``last_seen`` so the
+    source is recorded as polled.
     """
     del last_seen  # persisted timestamp; callers update via sources.update_source_state
 
@@ -129,12 +167,13 @@ def check_content_change(
 
 
 def _strip_http_envelope(text: str) -> str:
+    """Strip a raw HTTP status line + headers when a status line is present.
+
+    Only a genuine ``HTTP/...`` status line triggers stripping. A body that
+    merely begins with a ``word: value`` line is returned unchanged, so body-only
+    content (the usual case for ``urllib``/``requests``) fingerprints stably.
+    """
     if text.startswith("HTTP/"):
-        sep = text.find("\n\n")
-        if sep != -1:
-            return text[sep + 2 :]
-    first_line = text.split("\n", 1)[0]
-    if re.match(r"^[\w-]+:\s", first_line):
         sep = text.find("\n\n")
         if sep != -1:
             return text[sep + 2 :]

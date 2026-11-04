@@ -101,6 +101,21 @@ ETags when only `etag` is available. Returns `NEW` when there is no prior hash o
 fingerprint/etag differs; returns `UNCHANGED` on a match. Does not write SQLite state
 — callers persist via `update_source_state`.
 
+**Hash families.** `last_content_hash` must stay in one family per source: `sha256:<hex>`
+(from `content_fingerprint`) when polling with `content`, or a bare normalized ETag
+(from `normalize_etag`) when polling with `etag`. Mixing families compares unequal and
+always reports `NEW` — do not persist a body hash and later poll with `etag` (or vice
+versa).
+
+**Persisting the result.** On `NEW`, `content_hash` is the value to store via
+`update_source_state`. On `UNCHANGED` with `etag`, `content_hash` is `None`: skip the
+hash update (do not overwrite the stored hash) but still update `last_seen` so the
+source is recorded as polled.
+
+**Input.** `normalize_source_content` accepts a decoded body or a full raw HTTP message
+with a status line; header stripping only applies to a genuine `HTTP/...` status line,
+so a body that begins with a `word: value` line is left intact.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
