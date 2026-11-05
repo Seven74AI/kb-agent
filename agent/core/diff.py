@@ -15,6 +15,17 @@ Hash families
 Mixing families (a body ``sha256:`` hash later polled with ``etag``, or vice
 versa) always compares unequal and reports ``NEW``. Use one mode consistently
 per source.
+
+``normalize_content`` / ``sha256_fingerprint``
+------------------------------------------------
+``normalize_content(content)``: accept ``str``; if ``bytes``, decode UTF-8.
+Normalize CRLF and lone CR to LF. Strip trailing whitespace per line. Collapse
+runs of 3+ consecutive LF to exactly 2 LF. Drop volatile header lines matching
+exactly at line start: ``Date:``, ``Last-Modified:``, ``ETag:``, ``Server:``,
+``X-Cache:``, ``X-Cache-Hits:``. Return normalized ``str``.
+
+``sha256_fingerprint(content)``: return lowercase hex SHA-256 digest of
+``normalize_content(content).encode('utf-8')``.
 """
 
 from __future__ import annotations
@@ -23,6 +34,38 @@ import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+
+
+_VOLATILE_HEADER = re.compile(
+    r"^(?:Date|Last-Modified|ETag|Server|X-Cache-Hits|X-Cache)\s*:",
+    re.IGNORECASE,
+)
+_EXCESS_NEWLINES = re.compile(r"\n{3,}")
+
+
+def normalize_content(content: str | bytes) -> str:
+    """Return normalized text for stable comparison and fingerprinting."""
+    if isinstance(content, bytes):
+        text = content.decode("utf-8")
+    else:
+        text = content or ""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if _VOLATILE_HEADER.match(line):
+            continue
+        lines.append(line.rstrip())
+    while lines and lines[-1] == "":
+        lines.pop()
+    normalized = "\n".join(lines)
+    return _EXCESS_NEWLINES.sub("\n\n", normalized)
+
+
+def sha256_fingerprint(content: str | bytes) -> str:
+    """Return lowercase hex SHA-256 of UTF-8 bytes of normalized *content*."""
+    normalized = normalize_content(content)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 class ContentChangeStatus(StrEnum):
