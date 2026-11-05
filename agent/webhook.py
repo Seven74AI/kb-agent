@@ -217,6 +217,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         th { background: var(--header-bg); font-weight: 600; position: sticky; top: 0; }
         tr:hover { background: #f5f5ff; }
         .url-cell { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .url-link { text-decoration: none; margin-left: 4px; }
         .step-list { font-size: 0.8rem; }
         .step-item { display: inline-block; margin: 1px 2px; padding: 1px 5px; border-radius: 3px; font-size: 0.75rem; }
         .step-pending { background: #f0f0f0; color: #888; }
@@ -255,7 +256,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="status-bar">
         {% for status, label in [('pending','Pending'),('in_progress','In Progress'),
                                   ('done','Done'),('paused','Paused'),('failed','Failed')] %}
-        <div class="status-badge {{ status }}">{{ label }}: {{ counts.get(status, 0) }}</div>
+        <div class="status-badge {{ status }}" title="{{ status_help.get(status, '') }}">{{ label }}: {{ counts.get(status, 0) }}</div>
         {% endfor %}
         <div class="status-badge" style="background:#e8e8ff;color:#333;">Total: {{ counts.get('total', 0) }}</div>
     </div>
@@ -263,7 +264,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- Last batch run -->
     <p class="subtitle" style="margin-bottom:0.5rem;">Last batch run:
     {% if last_run %}
-        <span class="status-badge {{ last_run.status }}">{{ last_run.status }}</span>
+        <span class="status-badge {{ last_run.status }}" title="{{ status_help.get(last_run.status, '') }}">{{ last_run.status }}</span>
         {{ last_run.finished_at or last_run.started_at }}
         · {{ last_run.failed }} failed · {{ last_run.dispatched }} dispatched
         {% if last_run.summary %} · {{ last_run.summary }}{% endif %}
@@ -312,8 +313,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             {% for q in ingest %}
             <tr>
                 <td>{{ q.content_type }}</td>
-                <td><div class="url-cell" title="{{ q.url }}">{{ q.url[:50] }}{% if q.url|length > 50 %}…{% endif %}</div></td>
-                <td><span class="status-badge {{ q.status }}">{{ q.status }}</span></td>
+                <td><div class="url-cell" title="{{ q.url }}">{{ q.url[:50] }}{% if q.url|length > 50 %}…{% endif %}</div>{% if q.url %}<a class="url-link" href="{{ q.url }}" target="_blank" rel="noopener" title="Open URL">🔗</a>{% endif %}</td>
+                <td><span class="status-badge {{ q.status }}" title="{{ status_help.get(q.status, '') }}">{{ q.status }}</span></td>
                 <td style="font-size:0.75rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;" title="{{ q.error or '' }}">{{ q.error or '—' }}</td>
                 <td style="font-size:0.8rem;">{{ q.created_at }}</td>
                 <td><form method="POST" action="/remove-ingest" onsubmit="return confirm('Remove this ingest item?');"><input type="hidden" name="ingest_id" value="{{ q.id }}"><button type="submit" class="btn" style="font-size:0.75rem;padding:0.15rem 0.4rem;">Remove</button></form></td>
@@ -347,12 +348,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <tr>
                 <td style="font-family:monospace;font-size:0.8rem;">{{ task.id[:8] }}</td>
                 <td>{{ task.content_type }}</td>
-                <td><div class="url-cell" title="{{ task.source_url }}">{{ task.source_url[:50] }}{% if task.source_url|length > 50 %}…{% endif %}</div></td>
-                <td><span class="status-badge {{ task.status }}">{{ task.status }}</span></td>
+                <td><div class="url-cell" title="{{ task.source_url }}">{{ task.source_url[:50] }}{% if task.source_url|length > 50 %}…{% endif %}</div>{% if task.source_url %}<a class="url-link" href="{{ task.source_url }}" target="_blank" rel="noopener" title="Open URL">🔗</a>{% endif %}</td>
+                <td><span class="status-badge {{ task.status }}" title="{{ status_help.get(task.status, '') }}">{{ task.status }}</span></td>
                 <td>
                     <div class="step-list">
                         {% for step in task.steps %}
-                        <span class="step-item step-{{ step.status }}">{{ step.name }}</span>
+                        <span class="step-item step-{{ step.status }}" title="{{ step.name }}: {{ status_help.get(step.status, '') }}">{{ step.name }}</span>
                         {% endfor %}
                     </div>
                 </td>
@@ -416,6 +417,27 @@ PAUSE_REASON_LABELS: list[tuple[str, str]] = [
     ("megadl", "Megadl Issues"),
 ]
 
+# Status -> one-line explanation, shown as a hover tooltip on every status badge.
+STATUS_HELP: dict[str, str] = {
+    # task statuses
+    "pending": "Queued — waiting for the consumer to claim it.",
+    "in_progress": "Consumer is running this task's steps now.",
+    "done": "Completed — note written to the vault.",
+    "paused": "Blocked — awaiting manual resume (cookie/firecrawl/megadl fix).",
+    "failed": "Failed — see the error column for the cause.",
+    # ingest-queue statuses (pre-dispatch batch collector)
+    "queued": "Awaiting the nightly batch collector (download + transcribe).",
+    "downloading": "Batch collector is downloading the video now.",
+    "staged": "Downloaded — staged for batch transcription.",
+    "transcribing": "Batch transcription (Modal) is running.",
+    "dispatching": "Transcribed — creating the synthesize task.",
+    "dispatched": "Handed to the consumer as a synthesize task.",
+    # batch-run statuses
+    "running": "Currently running.",
+    "ok": "Batch finished cleanly.",
+    "crashed": "Batch process crashed before finishing.",
+}
+
 
 @app.route("/remove-ingest", methods=["POST"])
 def remove_ingest_item():
@@ -474,6 +496,7 @@ def dashboard():
         now=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         pause_reasons=PAUSE_REASON_LABELS,
         cookie_types=ALLOWED_COOKIE_FILES,
+        status_help=STATUS_HELP,
     )
 
 
