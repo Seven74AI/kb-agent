@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+data/
+/tmp/
+*.egg-info/
+dist/
+.vscode/
+cookies/
+spawn_*.py
+
+# Terraform (infra/cloudflare)
+infra/cloudflare/.terraform/
+infra/cloudflare/*.tfstate
+infra/cloudflare/*.tfstate.*
+infra/cloudflare/terraform.tfvars
+.venv/
+mcp-venv/

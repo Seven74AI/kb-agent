@@ -1,0 +1,3 @@
+cloudflare_account_id = "00000000000000000000000000000000"
+cloudflare_team_name  = "sevend"
+# cloudflare_api_token — set via TF_VAR_cloudflare_api_token or a private .tfvars (never commit)
