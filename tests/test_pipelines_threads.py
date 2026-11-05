@@ -164,7 +164,7 @@ class TestHelpers:
         assert captions == []
 
     def test_extract_author(self):
-        html = '{"username":"testuser"}'
+        html = r'{"permalink":"https://www.threads.com/\u0040testuser/post/ABC"}'
         assert _extract_author(html) == "testuser"
 
     def test_extract_author_unknown(self):
@@ -249,7 +249,7 @@ class TestTextExtraction:
 
     @patch("agent.pipelines.threads._curl_threads")
     def test_extract_text_basic(self, mock_curl, config, task_dict):
-        html = '{"caption":{"text":"Hello world from Threads!"},"username":"testuser","is_reply":false}'
+        html = r'{"caption":{"text":"Hello world from Threads!"},"permalink":"https://www.threads.com/\u0040testuser/post/ABC","is_reply":false}'
         mock_curl.return_value = html
 
         result = step_threads_extract_text(task_dict, config)

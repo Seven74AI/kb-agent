@@ -412,10 +412,12 @@ def check_density(note_path: Path, config: Config) -> None:
 
 
 def strip_code_fence(content: str) -> str:
-    """Strip a leading ```yaml/``` fence and trailing ``` from LLM note output.
+    """Normalize LLM note output into a valid Obsidian note.
 
     The synthesis LLM sometimes wraps the YAML frontmatter in a ```yaml code
-    fence, which breaks the frontmatter parser + quality gate. Strip it.
+    fence — and uses the fence *in place of* the opening ``---`` delimiter —
+    which breaks the frontmatter parser + quality gate. Strip the fence and
+    restore the opening ``---`` if it is missing.
     """
     content = (content or "").strip()
     for prefix in ("```yaml", "```markdown", "```"):
@@ -424,7 +426,11 @@ def strip_code_fence(content: str) -> str:
             break
     if content.endswith("```"):
         content = content[:-3].rstrip()
-    return content.strip() + "\n"
+    content = content.strip()
+    # the LLM often emits the fence instead of the opening --- ; restore it
+    if not content.startswith("---"):
+        content = "---\n" + content
+    return content + "\n"
 
 
 # ── MinIO Upload ─────────────────────────────────────────────────────────────
