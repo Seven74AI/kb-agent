@@ -111,6 +111,26 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+General-purpose text normalization and fingerprinting for stable SHA-256 hashing.
+`normalize_content` accepts `str` or `bytes` (bytes decoded as UTF-8 with
+`errors="replace"`, so invalid UTF-8 becomes U+FFFD instead of raising), normalizes
+CRLF/lone CR to LF, strips per-line trailing whitespace, collapses 3+ consecutive
+blank lines to 2, and drops document-wide any line starting with `Date:`,
+`Last-Modified:`, `ETag:`, `Server:`, `X-Cache:`, or `X-Cache-Hits:`. `sha256_fingerprint`
+returns the bare lowercase hex digest (no `sha256:` prefix) of the normalized text.
+
+**Relationship to the poll path.** These two form a *second, independent* scheme for
+arbitrary text; the watched-source poll path still fingerprints exclusively with
+`content_fingerprint` / `normalize_source_content`, so these helpers do not change
+runtime dedup behavior. Do not mix the two schemes in one `last_content_hash` value:
+`sha256_fingerprint` returns bare hex, `content_fingerprint` returns `sha256:<hex>`,
+and the two normalizers differ (`normalize_content` strips document-wide volatile
+headers and collapses blank lines; `normalize_source_content` does not). Prefer
+`content_fingerprint` for the poll path; use `normalize_content` / `sha256_fingerprint`
+for general-purpose text hashing outside that path.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |

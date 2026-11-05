@@ -20,15 +20,31 @@ per source.
 ----------------------------------------------
 :func:`normalize_content` prepares arbitrary text for stable hashing:
 
-* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8 with ``errors="replace"``
+  (invalid bytes become U+FFFD, so fetched bytes never raise).
 * Normalize CRLF and lone CR to LF.
 * Strip trailing whitespace on each line.
 * Collapse three or more consecutive LF characters to two.
-* Drop volatile header lines that start exactly with ``Date:``, ``Last-Modified:``,
-  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
+* Drop any line that starts exactly with ``Date:``, ``Last-Modified:``,
+  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:`` — document-wide,
+  not only inside an HTTP envelope.
 
-:func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest of
-``normalize_content(content)`` encoded as UTF-8 bytes.
+:func:`sha256_fingerprint` returns the bare lowercase hex SHA-256 digest of
+``normalize_content(content)`` encoded as UTF-8 bytes (no ``sha256:`` prefix).
+
+Relationship to ``content_fingerprint`` / ``normalize_source_content``
+......................................................................
+``normalize_content`` / ``sha256_fingerprint`` form a *second, independent*
+fingerprint scheme for arbitrary text. The watched-source poll path still
+fingerprints with :func:`normalize_source_content` / :func:`content_fingerprint`
+only; these helpers are not yet wired into runtime dedup, so they do not change
+dedup behavior. The two schemes differ and must not be mixed in one
+``last_content_hash`` value: ``sha256_fingerprint`` returns bare hex while
+``content_fingerprint`` returns ``sha256:<hex>``; ``normalize_content`` strips
+document-wide volatile header lines and collapses 3+ blank lines, which
+``normalize_source_content`` does not. Prefer ``content_fingerprint`` when
+hashing fetched source bytes for the poll path; use ``normalize_content`` /
+``sha256_fingerprint`` for general-purpose text hashing outside that path.
 """
 
 from __future__ import annotations
@@ -68,9 +84,14 @@ class ContentChangeResult:
 
 
 def normalize_content(content: str | bytes) -> str:
-    """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
+    """Normalize text for stable SHA-256 fingerprinting (see module docstring).
+
+    Bytes are decoded as UTF-8 with ``errors="replace"`` so invalid UTF-8 in
+    fetched bytes becomes U+FFFD instead of raising. Volatile header lines are
+    dropped document-wide, not only inside an HTTP envelope.
+    """
     if isinstance(content, bytes):
-        text = content.decode("utf-8")
+        text = content.decode("utf-8", errors="replace")
     else:
         text = content
 
@@ -88,7 +109,13 @@ def normalize_content(content: str | bytes) -> str:
 
 
 def sha256_fingerprint(content: str | bytes) -> str:
-    """Return lowercase hex SHA-256 of :func:`normalize_content` UTF-8 bytes."""
+    """Return bare lowercase hex SHA-256 of :func:`normalize_content` UTF-8 bytes.
+
+    Unlike :func:`content_fingerprint` (which returns ``sha256:<hex>`` over
+    :func:`normalize_source_content`), this returns a bare hex digest and is for
+    general-purpose text hashing outside the watched-source poll path. The two
+    schemes must not be mixed in one ``last_content_hash`` value.
+    """
     normalized = normalize_content(content)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

@@ -54,6 +54,34 @@ def test_normalize_content_drops_volatile_header_lines():
     assert "body line" in normalized
 
 
+def test_normalize_content_golden_output():
+    # Golden-string assertion: non-prefix lines must survive intact, and the
+    # volatile prefix lines must be removed without disturbing the rest.
+    raw = (
+        "Date: Mon, 01 Jan 2024 00:00:00 GMT\n"
+        "Last-Modified: Tue, 02 Jan 2024 00:00:00 GMT\n"
+        "ETag: \"abc\"\n"
+        "Server: nginx\n"
+        "X-Cache: HIT\n"
+        "X-Cache-Hits: 3\n"
+        "Title: keep me\n"
+        "body line\n"
+    )
+    assert normalize_content(raw) == "Title: keep me\nbody line\n"
+
+
+def test_normalize_content_volatile_only_normalizes_to_empty():
+    assert normalize_content("Date: x\nETag: y") == ""
+    assert normalize_content("Server: nginx\nX-Cache: HIT\n") == ""
+
+
+def test_normalize_content_invalid_utf8_bytes_replaced_not_raised():
+    # Invalid UTF-8 in fetched bytes must decode with replacement (U+FFFD),
+    # not raise UnicodeDecodeError, matching normalize_source_content.
+    raw = b"\xff\xfe"
+    assert normalize_content(raw) == "\ufffd\ufffd"
+
+
 def test_sha256_fingerprint_stable_for_equivalent_text():
     a = "same\r\ncontent  \n"
     b = "same\ncontent\n"
