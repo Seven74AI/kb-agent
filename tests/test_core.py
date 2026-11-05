@@ -74,9 +74,9 @@ def test_slugify_youtube_path_ids(url, vid):
 
 
 def test_steps_for_mega_video_not_mega_delegate():
-    from agent.core.pipelines import steps_for_content_type
+    from agent.pipelines import get_pipeline_names
 
-    steps = steps_for_content_type("mega_video", "mega")
+    steps = get_pipeline_names("mega_video", "mega")
     assert steps[0] == "extract_metadata"
     assert "megadl_download" not in steps
     assert "download_video" in steps
