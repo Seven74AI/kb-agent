@@ -8,9 +8,68 @@ from agent.core.diff import (
     ContentChangeStatus,
     check_content_change,
     content_fingerprint,
+    normalize_content,
     normalize_etag,
     normalize_source_content,
+    sha256_fingerprint,
 )
+
+
+def test_normalize_content_accepts_bytes_and_str():
+    text = "alpha\nbeta  "
+    assert normalize_content(text) == normalize_content(text.encode("utf-8"))
+
+
+def test_normalize_content_line_endings_and_trailing_whitespace():
+    a = "hello\r\nworld  \r\nfoo\t"
+    b = "hello\nworld\nfoo"
+    assert normalize_content(a) == normalize_content(b)
+
+
+def test_normalize_content_collapses_excess_blank_lines():
+    a = "one\n\n\n\n\ntwo"
+    b = "one\n\ntwo"
+    assert normalize_content(a) == normalize_content(b)
+
+
+def test_normalize_content_drops_volatile_header_lines():
+    raw = (
+        "Date: Mon, 01 Jan 2024 00:00:00 GMT\n"
+        "Last-Modified: Tue, 02 Jan 2024 00:00:00 GMT\n"
+        "ETag: \"abc\"\n"
+        "Server: nginx\n"
+        "X-Cache: HIT\n"
+        "X-Cache-Hits: 3\n"
+        "Title: keep me\n"
+        "body line\n"
+    )
+    normalized = normalize_content(raw)
+    assert "Date:" not in normalized
+    assert "Last-Modified:" not in normalized
+    assert "ETag:" not in normalized
+    assert "Server:" not in normalized
+    assert "X-Cache:" not in normalized
+    assert "X-Cache-Hits:" not in normalized
+    assert "Title: keep me" in normalized
+    assert "body line" in normalized
+
+
+def test_sha256_fingerprint_stable_for_equivalent_text():
+    a = "same\r\ncontent  \n"
+    b = "same\ncontent\n"
+    assert sha256_fingerprint(a) == sha256_fingerprint(b)
+    assert sha256_fingerprint(a) == sha256_fingerprint(b.encode("utf-8"))
+
+
+def test_sha256_fingerprint_differs_for_substantive_change():
+    assert sha256_fingerprint("version one") != sha256_fingerprint("version two")
+
+
+def test_sha256_fingerprint_is_lowercase_hex():
+    digest = sha256_fingerprint("probe")
+    assert digest == digest.lower()
+    assert len(digest) == 64
+    assert all(ch in "0123456789abcdef" for ch in digest)
 
 
 def test_content_fingerprint_is_stable():
