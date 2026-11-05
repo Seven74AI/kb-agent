@@ -1,0 +1,124 @@
+"""Regression tests from real ingestion failures (2026-11-05 bulk import).
+
+Each case is a real URL or real payload shape that misclassified during the
+import, plus the correct outcome. Run on every kb workflow change — these are
+the concrete failures the detection/routing/normalization/extraction fixes
+must never reintroduce.
+"""
+
+import pytest
+
+from agent import detection
+from agent.pipelines.instagram import _shortcode_to_media_id
+from agent.pipelines.threads import _extract_json_array_after_key, _extract_video_url
+from agent.pipelines.video_common import strip_code_fence
+
+
+# ── Ground truth from the failed import ─────────────────────────────────────
+
+# Real Threads video posts (non-null video_versions array in the payload).
+THREADS_VIDEO = [
+    "https://www.threads.com/@tayjmcm/post/DZQkGBvFDB5",
+    # null video_versions FIRST, real array LATER — the extractor must skip null
+    "https://www.threads.com/@bourne_ti/post/Da3I_d0ls4E",
+    "https://www.threads.com/share/BBJahcWRBo/",
+]
+# Real Threads text posts (every video_versions is null).
+THREADS_TEXT = [
+    "https://www.threads.com/share/BABsuaYfBY/",
+    "https://www.threads.com/share/BAV8aVwjWb/",
+    "https://www.threads.com/share/BAE5AoLC_g/",
+]
+# Real Instagram comment deep-link.
+COMMENT_URL = "https://www.instagram.com/reel/DdnESNvo13o/?comment_id=18132350785588878"
+
+# Minimal payload shapes — the structural signal, not the whole ~900KB page.
+REAL_VIDEO_JSON = '"video_versions":[{"type":101,"url":"https://scontent.cdninstagram.com/v.mp4","height":1080}]'
+NULL_VIDEO_JSON = '"video_versions":null,"canonical_url":null,"usertags":null'
+NULL_THEN_REAL = NULL_VIDEO_JSON + ',"is_dash_eligible":null,' + REAL_VIDEO_JSON + ',"x":"y"'
+
+
+# ── Platform detection ──────────────────────────────────────────────────────
+
+def test_share_link_is_threads_not_web():
+    # threads.com/share/ short links must route to threads, not the web fallback.
+    assert detection.detect_platform("https://www.threads.com/share/BBJahcWRBo/") == "threads"
+
+
+# ── Subtype detection (deterministic, null-aware) ───────────────────────────
+
+@pytest.mark.parametrize("url", THREADS_VIDEO)
+def test_threads_video_detected(monkeypatch, url):
+    monkeypatch.setattr(detection, "_fetch_content", lambda u, p: REAL_VIDEO_JSON)
+    assert detection.detect_content_subtype(url, "threads") == "threads_video"
+
+
+@pytest.mark.parametrize("url", THREADS_TEXT)
+def test_threads_text_not_misdetected_as_video(monkeypatch, url):
+    # a bare video_versions substring (null) must NOT classify as video
+    monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_VIDEO_JSON)
+    assert detection.detect_content_subtype(url, "threads") == "threads_text"
+
+
+def test_null_then_real_still_video(monkeypatch):
+    # the original extraction bug: first occurrence null, real array later
+    monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_THEN_REAL)
+    assert detection.detect_content_subtype(THREADS_VIDEO[1], "threads") == "threads_video"
+
+
+def test_comment_id_routes_to_comment():
+    assert detection.detect_content_subtype(COMMENT_URL, "instagram_reel") == "instagram_comment"
+
+
+# ── URL normalization ───────────────────────────────────────────────────────
+
+def test_comment_id_preserved():
+    # comment_id is semantic — must survive normalization
+    assert detection.normalize_url(COMMENT_URL) == COMMENT_URL
+
+
+def test_tracking_params_stripped_comment_id_kept():
+    got = detection.normalize_url("https://www.instagram.com/reel/ID/?igsh=abc&comment_id=42&igsi=z")
+    assert "comment_id=42" in got
+    assert "igsh" not in got and "igsi" not in got
+
+
+def test_youtube_v_param_untouched():
+    assert (
+        detection.normalize_url("https://www.youtube.com/watch?v=abc123DEF45&list=PLx")
+        == "https://www.youtube.com/watch?v=abc123DEF45&list=PLx"
+    )
+
+
+# ── Video extraction (null-skip) ────────────────────────────────────────────
+
+def test_extract_array_skips_null_occurrence():
+    arr = _extract_json_array_after_key(NULL_THEN_REAL, "video_versions")
+    assert arr and '"url"' in arr
+
+
+def test_extract_video_url_null_then_real():
+    assert _extract_video_url(NULL_THEN_REAL) is not None
+
+
+def test_extract_video_url_all_null_is_none():
+    assert _extract_video_url(NULL_VIDEO_JSON) is None
+
+
+# ── Note code-fence strip ───────────────────────────────────────────────────
+
+def test_strip_code_fence_yaml():
+    out = strip_code_fence("```yaml\ndate: 2026-11-05\n---\n# T\nbody\n```")
+    assert out.startswith("date: 2026-11-05")
+    assert "```" not in out
+
+
+def test_strip_code_fence_noop():
+    assert strip_code_fence("---\ndate: x\n---\nbody") == "---\ndate: x\n---\nbody\n"
+
+
+# ── Shortcode decode ────────────────────────────────────────────────────────
+
+def test_shortcode_to_media_id():
+    # base-64 decode over A-Za-z0-9-_ ; the comment-API media id
+    assert _shortcode_to_media_id("DdnESNvo13o") == 3992178438581738984
