@@ -81,14 +81,9 @@ class Consumer:
         self._video_semaphore = asyncio.BoundedSemaphore(self.config.video_semaphore)
 
         # Import pipeline modules to register steps
-        from agent.pipelines import web  # noqa: F401
-        from agent.pipelines import youtube  # noqa: F401
-        from agent.pipelines import threads  # noqa: F401
-        from agent.pipelines import instagram  # noqa: F401
-        from agent.pipelines import books  # noqa: F401
-        from agent.pipelines import bunny_stream  # noqa: F401
-        from agent.pipelines import wikispooks  # noqa: F401
-        from agent.pipelines import PIPELINES
+        from agent.pipelines import import_all_pipelines, PIPELINES
+
+        import_all_pipelines()
 
         for steps in PIPELINES.values():
             for step in steps:
