@@ -890,7 +890,14 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
     else:
         # Text posts: simple size + quote check
         content = note_path.read_text(encoding="utf-8")
-        quote_count = sum(1 for line in content.split("\n") if line.strip().startswith("> "))
+        quote_count = 0
+        for line in content.split("\n"):
+            s = line.strip()
+            # strip a leading bullet marker (notes use "- > quote" as well as "> quote")
+            if s.startswith("- ") or s.startswith("* "):
+                s = s[2:].strip()
+            if s.startswith("> "):
+                quote_count += 1
         size = len(content)
 
         passed = quote_count >= 2 and size >= 2000
