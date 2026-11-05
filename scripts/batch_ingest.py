@@ -139,6 +139,8 @@ def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, li
         out_dir = base / "batch_out" / ctype
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Batch-transcribing {len(items)} {ctype} video(s) in one Modal run...")
+        for q, _ in items:
+            update_ingest_status(conn, q["id"], "transcribing")
         transcribe_script = Path(config.kb_agent_dir) / "scripts" / "batch_transcribe.py"
         r = subprocess.run(
             [sys.executable, str(transcribe_script),
