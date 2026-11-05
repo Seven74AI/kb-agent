@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from agent.archival import MINIO_TAILSCALE_BASE, append_note_tags
+from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -633,8 +633,8 @@ OUTPUT FORMAT:
   source: threads.net (@{author})
   source_url: {source_url}
   source_files:
-    video: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/videos/{safe_slug}.mp4
-    transcript: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/transcripts/{safe_slug}.json
+    video: {config.minio_tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
+    transcript: {config.minio_tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
   confidence: plausible
   tags: [threads, video]
 - Then the note sections as shown above.

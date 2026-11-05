@@ -69,6 +69,7 @@ class Config:
     minio_bucket: str = "knowledge-base"
     minio_access_key: str = ""
     minio_secret_key: str = ""
+    minio_tailscale_base: str = ""  # Tailscale URL for archived files (set via MINIO_TAILSCALE_BASE)
 
     # ── Firecrawl ──
     firecrawl_url: str = "http://localhost:3002/v2/scrape"
@@ -209,6 +210,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         minio_bucket=str(_env_or_default(raw.get("minio_bucket"), "MINIO_BUCKET", "knowledge-base")),
         minio_access_key=str(_env_or_default(raw.get("minio_access_key"), "MINIO_ACCESS_KEY", "")),
         minio_secret_key=str(_env_or_default(raw.get("minio_secret_key"), "MINIO_SECRET_KEY", "")),
+        minio_tailscale_base=str(_env_or_default(raw.get("minio_tailscale_base"), "MINIO_TAILSCALE_BASE", "")),
         # Firecrawl
         firecrawl_url=str(_env_or_default(raw.get("firecrawl_url"), "FIRECRAWL_URL", "http://localhost:3002/v2/scrape")),
         # Webhook

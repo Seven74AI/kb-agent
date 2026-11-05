@@ -17,6 +17,7 @@ class Step:
 
 # Pipeline registry: content_type → list[Step]
 PIPELINES: dict[str, list[Step]] = {}
+_all_imported = False
 
 
 def register_pipeline(content_type: str, steps: list[Step]):
@@ -31,6 +32,7 @@ def import_all_pipelines() -> None:
     rely on get_pipeline()'s auto-import. Importing a module runs its top-level
     register_pipeline() calls.
     """
+    global _all_imported
     from . import (  # noqa: F401
         books,
         bunny_stream,
@@ -41,6 +43,7 @@ def import_all_pipelines() -> None:
         wikispooks,
         youtube,
     )
+    _all_imported = True
 
 
 def get_pipeline(content_type: str) -> list[Step] | None:
@@ -50,7 +53,7 @@ def get_pipeline(content_type: str) -> list[Step] | None:
     the pipeline modules on first call so callers that never import them (e.g.
     the standalone batch collector) still get a populated registry.
     """
-    if not PIPELINES:
+    if not _all_imported:
         import_all_pipelines()
     return PIPELINES.get(content_type, PIPELINES.get("web"))
 
@@ -67,7 +70,7 @@ def get_pipeline_names(content_type: str, platform: str = "") -> list[str]:
     Step-object registry so there is a single source of truth. Auto-imports the
     pipeline modules on first call (same as :func:`get_pipeline`).
     """
-    if not PIPELINES:
+    if not _all_imported:
         import_all_pipelines()
     for key in (content_type, platform):
         if key and key in PIPELINES:

@@ -239,7 +239,7 @@ def _build_synthesis_prompt(source_url: str, slug: str, config: Config) -> str:
     template = template_path.read_text(encoding="utf-8") if template_path.exists() else ""
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
+    tailscale_base = config.minio_tailscale_base
 
     return f"""Tu es un curateur de base de connaissances spécialisé dans les conférences TDAH.
 La vidéo source est en FRANÇAIS. Tu DOIS rédiger TOUT le contenu ET TOUS les titres de sections en FRANÇAIS.
@@ -370,7 +370,7 @@ def _update_note_source_files(slug: str, config: Config, uploaded: list) -> None
     if not uploaded:
         return
 
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
+    tailscale_base = config.minio_tailscale_base
     content = note_path.read_text(encoding="utf-8")
 
     lines = ["source_files:"]

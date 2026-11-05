@@ -41,6 +41,7 @@ def config(tmp_path):
         article_min_quotes=2,  # Lower for testing
         article_min_size=100,   # Lower for testing
         firecrawl_url="http://localhost:3002/v2/scrape",
+        minio_tailscale_base="http://minio.test/base",
     )
 
 
@@ -554,7 +555,7 @@ def test_step_minio_upload_with_mock(config, task_dict):
         note_path.write_text("""---
 date: 2026-06-19
 source: test
-minio: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/placeholder/slug.md
+minio: http://minio.test/base/knowledge-base/placeholder/slug.md
 ---
 
 # Test
@@ -565,7 +566,7 @@ minio: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/placeholder/slug.
 
         result = step_minio_upload(task_dict, config)
 
-    assert "tail5c02a1.ts.net" in result
+    assert "minio.test/base" in result
 
     # Verify the placeholder was replaced with the real MinIO URL in frontmatter
     updated_content = note_path.read_text(encoding="utf-8")
