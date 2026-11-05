@@ -104,6 +104,7 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
     # 1. download all videos, staged per content type
     staged: dict[str, list[tuple[dict, Path]]] = {}
     for q in video_links:
+        update_ingest_status(conn, q["id"], "downloading")
         vp, err = _download_video(q, config)
         if vp is None:
             update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
@@ -114,6 +115,7 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
         bdir.mkdir(parents=True, exist_ok=True)
         dest = bdir / f"{q['slug']}{vp.suffix.lower()}"
         shutil.copy(vp, dest)
+        update_ingest_status(conn, q["id"], "staged")
         staged.setdefault(ctype, []).append((q, dest))
 
     if not staged:
