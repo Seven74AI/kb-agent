@@ -65,7 +65,22 @@ class ContentChangeResult:
 
 
 def normalize_content(content: str | bytes) -> str:
-    """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
+    """Normalize text for stable SHA-256 fingerprinting (see module docstring).
+
+    Accepts ``str``; ``bytes`` are decoded as strict UTF-8 (invalid bytes raise
+    ``UnicodeDecodeError``, unlike :func:`normalize_source_content` which uses
+    ``errors="replace"``). Normalization, in order: CRLF/lone CR folded to LF;
+    trailing whitespace stripped per line; runs of 3+ LF collapsed to exactly 2;
+    volatile header lines dropped when they start with ``Date:``,
+    ``Last-Modified:``, ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``
+    (case-sensitive, anchored at line start).
+
+    Unlike :func:`normalize_source_content`, leading blank lines are kept and
+    volatile-looking lines are dropped even without an ``HTTP/...`` status line.
+    Prefer :func:`normalize_source_content` for fetched source bodies (it strips a
+    real HTTP envelope and preserves body ``word: value`` lines); use this for
+    standalone payloads where volatile headers must not perturb the fingerprint.
+    """
     if isinstance(content, bytes):
         text = content.decode("utf-8")
     else:
@@ -85,7 +100,14 @@ def normalize_content(content: str | bytes) -> str:
 
 
 def sha256_fingerprint(content: str | bytes) -> str:
-    """Return lowercase hex SHA-256 of :func:`normalize_content` UTF-8 bytes."""
+    """Return lowercase hex SHA-256 of :func:`normalize_content` UTF-8 bytes.
+
+    Returns bare 64-char hex, unlike :func:`content_fingerprint` which prefixes
+    ``sha256:``. Both digest the SHA-256 of normalized text but over different
+    normalizers (:func:`normalize_content` vs :func:`normalize_source_content`),
+    so the two are not interchangeable and must not be mixed at a persistence
+    boundary.
+    """
     normalized = normalize_content(content)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
