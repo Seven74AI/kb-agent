@@ -173,6 +173,11 @@ def detect_content_subtype(url: str, platform: str) -> str:
         - substack -> 'substack_text' / 'substack_video' / 'substack_image'
         - mega -> 'mega_video' / 'book' / 'book_batch'
     """
+    # A comment deep-link (?comment_id=) is a comment ON a post — capture the
+    # comment + parent, not the parent alone.
+    if "comment_id" in url:
+        return "instagram_comment"
+
     if platform in SIMPLE_PLATFORMS:
         return platform
 

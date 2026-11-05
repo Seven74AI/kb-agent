@@ -19,7 +19,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
@@ -681,6 +681,18 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
     if content_type == "instagram_reel":
         passed, rounds = run_video_quality_gate(note_path, config, task["id"])
         return json.dumps({"passed": passed, "rounds": rounds})
+    elif content_type == "instagram_comment":
+        # Comment note: must capture the comment + parent context.
+        content = note_path.read_text(encoding="utf-8")
+        size = len(content)
+        failures = []
+        if size < 1500:
+            failures.append(f"Note too short: {size} chars < 1500")
+        if "## The Comment" not in content:
+            failures.append("Missing The Comment section")
+        if "## Parent Context" not in content:
+            failures.append("Missing Parent Context section")
+        return json.dumps({"passed": not failures, "failures": failures, "rounds": 1})
     else:
         # Carousel: simple size + section check
         content = note_path.read_text(encoding="utf-8")
@@ -795,6 +807,182 @@ def _format_transcript_for_llm(merged: dict) -> str:
     return format_transcript_for_llm(merged, style="seconds")
 
 
+# ── Comment Steps (comment_id deep-links) ────────────────────────────────────
+
+IG_WEB_APP_ID = "936619743392459"
+IG_APP_UA = (
+    "Instagram 275.0.0.27.98 Android (30/11; 420dpi; 1080x2340; samsung; "
+    "SM-G991B; o1s; exynos2100; en_US; 458229258)"
+)
+_IG_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def _shortcode_to_media_id(shortcode: str) -> int:
+    """Decode an Instagram shortcode to its numeric media id."""
+    media_id = 0
+    for ch in shortcode:
+        media_id = media_id * 64 + _IG_SHORTCODE_ALPHABET.index(ch)
+    return media_id
+
+
+def _read_ig_cookies(cookie_dir: Path) -> dict[str, str]:
+    """Parse the Netscape-format ig_cookies.txt into {name: value}."""
+    cookies: dict[str, str] = {}
+    for line in (cookie_dir / "ig_cookies.txt").read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            cookies[parts[5]] = parts[6]
+    return cookies
+
+
+def _fetch_ig_comment(url: str, config: Config) -> dict:
+    """Fetch a specific Instagram comment + its parent reel caption.
+
+    Hits the web API (www.instagram.com/api/v1/media/{id}/comments/) with the
+    sessionid cookie + x-ig-app-id header. The parent caption rides in the same
+    response, so one call yields both the comment and its parent context.
+    """
+    parsed = urlparse(url)
+    shortcode = parsed.path.rstrip("/").split("/")[-1]
+    qs = parse_qs(parsed.query)
+    comment_id = (qs.get("comment_id") or [""])[0]
+    if not comment_id:
+        raise StepError(
+            "No comment_id in URL", error_type=ErrorType.FAIL, step_name="ig_comment_fetch"
+        )
+
+    cookies = _read_ig_cookies(config.cookie_dir)
+    if "sessionid" not in cookies:
+        raise StepError(
+            "Instagram sessionid missing — re-export cookies",
+            error_type=ErrorType.PAUSE, step_name="ig_comment_fetch",
+        )
+    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    media_id = _shortcode_to_media_id(shortcode)
+
+    result = subprocess.run(
+        [
+            "curl", "-s", "--max-time", "25",
+            "-H", f"Cookie: {cookie_header}",
+            "-H", f"x-ig-app-id: {IG_WEB_APP_ID}",
+            "-H", f"x-csrftoken: {cookies.get('csrftoken', '')}",
+            "-H", f"User-Agent: {IG_APP_UA}",
+            f"https://www.instagram.com/api/v1/media/{media_id}/comments/?can_support_threading=true",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise StepError(
+            f"Comment API returned non-JSON: {result.stdout[:200]}",
+            error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
+        )
+    if data.get("status") == "fail":
+        raise StepError(
+            f"Comment API failed: {data.get('message', '')}",
+            error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
+        )
+
+    comment = next(
+        (c for c in data.get("comments", []) if str(c.get("pk")) == comment_id),
+        None,
+    )
+    if comment is None:
+        raise StepError(
+            f"comment_id {comment_id} not found in first comment page",
+            error_type=ErrorType.FAIL, step_name="ig_comment_fetch",
+        )
+
+    caption = data.get("caption") or {}
+    return {
+        "comment_id": comment_id,
+        "comment_text": comment.get("text", ""),
+        "comment_author": (comment.get("user") or {}).get("username", "unknown"),
+        "comment_created_at": comment.get("created_at"),
+        "parent_shortcode": shortcode,
+        "parent_url": f"https://www.instagram.com/reel/{shortcode}/",
+        "parent_caption": caption.get("text", ""),
+        "parent_author": (caption.get("user") or {}).get("username", "unknown"),
+    }
+
+
+def step_ig_comment_fetch(task: dict, config: Config) -> str:
+    """Fetch the comment + parent reel context and write it to a raw JSON file."""
+    url = task["source_url"]
+    slug = task.get("slug", task["id"][:8])
+    info = _fetch_ig_comment(url, config)
+    raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_ig_comment.json"
+    raw_path.write_text(json.dumps(info, indent=2, ensure_ascii=False))
+    return str(raw_path)
+
+
+def step_ig_comment_synthesize(task: dict, config: Config) -> str:
+    """Synthesize a note from the comment + its parent reel context."""
+    slug = task.get("slug", task["id"][:8])
+    safe_slug = _slug_path(slug)
+    source_url = task.get("source_url", "")
+
+    raw_path = Path(config.temp_dir) / f"{safe_slug}_ig_comment.json"
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Comment raw not found: {raw_path}")
+    info = json.loads(raw_path.read_text())
+
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
+    llm = get_llm_client(config)
+    llm.set_task_context(task["id"], logs_conn)
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    comment_author = info["comment_author"]
+    parent_author = info["parent_author"]
+    parent_caption = info["parent_caption"]
+    comment_text = info["comment_text"]
+
+    system_prompt = f"""You are a knowledge base curator. Capture an Instagram comment in the context of its parent reel.
+
+SOURCE: a comment by @{comment_author} on a reel by @{parent_author}.
+
+SECTIONS:
+1. YAML frontmatter:
+   date: {date_str}
+   source: instagram comment (@{comment_author})
+   source_url: {source_url}
+   source_files:
+     raw: <filled by archival step>
+   confidence: plausible
+   tags: [instagram, comment]
+2. # Title — the comment's claim or topic
+3. ## The Comment — the exact comment text as a blockquote (>), with author and date
+4. ## Parent Context — the reel's caption, uploader, and link
+5. ## Analysis — what the comment adds (claim / advice / reaction), and reliability
+
+Keep it proportionate — one comment, not a thesis."""
+
+    user_prompt = f"""COMMENT (by @{comment_author}):
+{comment_text}
+
+PARENT REEL (by @{parent_author}):
+Caption: {parent_caption}
+Link: {info['parent_url']}
+
+=== END ===
+
+Write the note following the template."""
+
+    response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
+    note_content = response.content
+
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(note_content, encoding="utf-8")
+    append_note_tags(note_path, task.get("tags"))
+
+    return str(note_path)
+
+
 # ── Pipeline Registration ────────────────────────────────────────────────────
 
 # Instagram reel pipeline: validate → download → audio → diarize → transcribe → merge → synthesize → quality → cleanup → minio → git
@@ -829,6 +1017,17 @@ register_pipeline("instagram_post", [
     Step(name="ig_carousel_synthesize", fn=step_ig_carousel_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
     Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
+])
+
+# Instagram comment pipeline: fetch comment + parent caption → synthesize → quality → minio → git
+register_pipeline("instagram_comment", [
+    Step(name="ig_comment_fetch", fn=step_ig_comment_fetch, on_error="retry"),
+    Step(name="ig_comment_synthesize", fn=step_ig_comment_synthesize, on_error="retry"),
+    Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
+    Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])
