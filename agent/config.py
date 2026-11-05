@@ -86,6 +86,10 @@ class Config:
     transcription_backend: str = "cpu"  # cpu | modal
     modal_cli: str = "/root/modal/venv/bin/modal"
 
+    # ── Notifications (Telegram) ──
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
 
 def _env_or_default(raw_value, env_key: str, default, convert=None):
     """Merge env var into a config value — env takes priority."""
@@ -218,4 +222,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
             _env_or_default(raw.get("transcription_backend"), "KB_TRANSCRIPTION_BACKEND", "cpu")
         ),
         modal_cli=str(_env_or_default(raw.get("modal_cli"), "KB_MODAL_CLI", "/root/modal/venv/bin/modal")),
+        # Notifications (Telegram)
+        telegram_bot_token=str(_env_or_default(raw.get("telegram_bot_token"), "KB_TELEGRAM_BOT_TOKEN", "")),
+        telegram_chat_id=str(_env_or_default(raw.get("telegram_chat_id"), "KB_TELEGRAM_CHAT_ID", "")),
     )

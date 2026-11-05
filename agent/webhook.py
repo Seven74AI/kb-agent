@@ -23,7 +23,7 @@ from agent.core import (
     submit_plan,
 )
 from agent.core.resume import normalize_reason_pattern
-from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db, list_ingest_queue
+from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, init_db, list_ingest_queue, remove_ingest
 
 app = Flask(__name__)
 config: Config = load_config()
@@ -188,7 +188,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KB Agent — Dashboard</title>
+    <title>KB Agent — Dashboard{% if failure_count %} ⚠ {{ failure_count }}{% endif %}</title>
     <style>
         :root {
             --bg: #fafafa; --text: #222; --border: #ddd;
@@ -239,11 +239,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .empty-state { color: #888; font-style: italic; padding: 2rem 0; text-align: center; }
         .step-detail-row { background: #fafaff; }
         .step-detail-row td { font-size: 0.8rem; padding: 0.3rem 0.6rem 0.3rem 2rem; }
+        .failure-banner { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 0.75rem 1rem; border-radius: 6px; font-weight: 600; margin-bottom: 1rem; }
     </style>
 </head>
 <body>
     <h1>KB Agent Dashboard</h1>
-    <p class="subtitle">Tailscale-only · Auto-refresh: 60s · {{ now }}</p>
+    <p class="subtitle">Cloudflare Access · Auto-refresh: 60s · {{ now }}</p>
+
+    {% if failure_count %}
+    <div class="failure-banner">⚠ {{ failure_count }} failure(s) — failed/paused tasks + errored ingest items below</div>
+    {% endif %}
 
     <!-- Status counts -->
     <div class="status-bar">
@@ -253,6 +258,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         {% endfor %}
         <div class="status-badge" style="background:#e8e8ff;color:#333;">Total: {{ counts.get('total', 0) }}</div>
     </div>
+
+    <!-- Last batch run -->
+    <p class="subtitle" style="margin-bottom:0.5rem;">Last batch run:
+    {% if last_run %}
+        <span class="status-badge {{ last_run.status }}">{{ last_run.status }}</span>
+        {{ last_run.finished_at or last_run.started_at }}
+        · {{ last_run.failed }} failed · {{ last_run.dispatched }} dispatched
+        {% if last_run.summary %} · {{ last_run.summary }}{% endif %}
+    {% else %}never{% endif %}
+    </p>
 
     <!-- Actions: Resume buttons + Cookie upload -->
     <div class="actions">
@@ -289,6 +304,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <th>Status</th>
                 <th>Error</th>
                 <th>Created</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -299,6 +315,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <td><span class="status-badge {{ q.status }}">{{ q.status }}</span></td>
                 <td style="font-size:0.75rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;" title="{{ q.error or '' }}">{{ q.error or '—' }}</td>
                 <td style="font-size:0.8rem;">{{ q.created_at }}</td>
+                <td><form method="POST" action="/remove-ingest" onsubmit="return confirm('Remove this ingest item?');"><input type="hidden" name="ingest_id" value="{{ q.id }}"><button type="submit" class="btn" style="font-size:0.75rem;padding:0.15rem 0.4rem;">Remove</button></form></td>
             </tr>
             {% endfor %}
         </tbody>
@@ -399,6 +416,20 @@ PAUSE_REASON_LABELS: list[tuple[str, str]] = [
 ]
 
 
+@app.route("/remove-ingest", methods=["POST"])
+def remove_ingest_item():
+    """Delete an ingest-queue row (escape hatch for permanently-broken links)."""
+    ingest_id = (request.form.get("ingest_id") or "").strip()
+    if not ingest_id:
+        return jsonify({"error": "ingest_id required"}), 400
+    conn = _get_agent_conn()
+    removed = remove_ingest(conn, ingest_id)
+    conn.close()
+    if removed:
+        return redirect(url_for("dashboard"))
+    return jsonify({"error": "not found"}), 404
+
+
 @app.route("/dashboard")
 def dashboard():
     """Show task queue status with step detail, elapsed time, and logs."""
@@ -408,6 +439,7 @@ def dashboard():
     db_path = _agent_db_path()
     tasks: list[dict] = []
     ingest: list[dict] = []
+    last_run: dict | None = None
     counts = {"pending": 0, "in_progress": 0, "done": 0, "paused": 0, "failed": 0, "total": 0}
 
     if db_path.exists():
@@ -417,14 +449,27 @@ def dashboard():
         tasks = state["tasks"]
         counts = state["counts"]
         ingest = list_ingest_queue(conn, limit=100)
+        last_run = get_last_batch_run(conn)
         conn.close()
         logs_conn.close()
+
+    # Failure-first ordering + a single failure count for the banner/tab title.
+    bad = {"failed", "paused"}
+    tasks.sort(key=lambda t: 0 if t["status"] in bad else 1)
+    ingest.sort(key=lambda q: 0 if (q.get("error") or q["status"] in bad) else 1)
+    failure_count = (
+        counts.get("failed", 0)
+        + counts.get("paused", 0)
+        + sum(1 for q in ingest if q.get("error") or q["status"] in bad)
+    )
 
     return render_template_string(
         DASHBOARD_HTML,
         tasks=tasks,
         counts=counts,
         ingest=ingest,
+        last_run=last_run,
+        failure_count=failure_count,
         now=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         pause_reasons=PAUSE_REASON_LABELS,
         cookie_types=ALLOWED_COOKIE_FILES,

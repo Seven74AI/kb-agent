@@ -52,6 +52,10 @@ firecrawl_url: http://localhost:3002/v2/scrape
 webhook_host: 0.0.0.0
 webhook_port: 5000
 
+# Notifications (Telegram) — set the real values in .env (KB_TELEGRAM_BOT_TOKEN / KB_TELEGRAM_CHAT_ID)
+telegram_bot_token: ""
+telegram_chat_id: ""
+
 # MCP tracer (stateless streamable HTTP)
 mcp_host: 0.0.0.0
 mcp_port: 8002
