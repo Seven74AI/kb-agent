@@ -8,9 +8,46 @@ from agent.core.diff import (
     ContentChangeStatus,
     check_content_change,
     content_fingerprint,
+    normalize_content,
     normalize_etag,
     normalize_source_content,
+    sha256_fingerprint,
 )
+
+
+def test_normalize_content_line_endings_and_trailing_whitespace():
+    a = "alpha\r\nbeta\r\n"
+    b = "alpha\nbeta\n"
+    c = "alpha\nbeta  \n"
+    assert normalize_content(a) == normalize_content(b) == normalize_content(c)
+    assert sha256_fingerprint(a) == sha256_fingerprint(c)
+
+
+def test_normalize_content_collapses_excess_blank_lines():
+    assert normalize_content("a\n\n\n\nb") == "a\n\nb"
+
+
+def test_normalize_content_drops_volatile_header_lines():
+    raw = (
+        "Date: Wed, 05 Nov 2026 00:00:00 GMT\n"
+        "Last-Modified: Tue, 04 Nov 2026 12:00:00 GMT\n"
+        "ETag: \"abc\"\n"
+        "Server: nginx\n"
+        "X-Cache: HIT\n"
+        "X-Cache-Hits: 3\n"
+        "Title: keep me\n"
+        "body line   \n"
+    )
+    assert normalize_content(raw) == "Title: keep me\nbody line\n"
+
+
+def test_sha256_fingerprint_differs_on_substantive_change():
+    assert sha256_fingerprint("version one") != sha256_fingerprint("version two")
+
+
+def test_sha256_fingerprint_bytes_and_str_match():
+    text = "same payload"
+    assert sha256_fingerprint(text) == sha256_fingerprint(text.encode("utf-8"))
 
 
 def test_content_fingerprint_is_stable():
