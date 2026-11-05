@@ -305,7 +305,10 @@ def _is_login_wall(html: str) -> bool:
 def step_threads_detect(task: dict, config: Config) -> str:
     """Detect whether a Threads post is text or video.
 
-    Fetches the page, checks for video_versions in the JSON.
+    Fetches the page, checks for video_versions in the JSON. Also extracts
+    author, captions, and reply/parent context into the raw metadata file so
+    the VIDEO pipeline has it — it has no extract_text step, and without this a
+    video reply loses both its author and its parent.
 
     Args:
         task: Task dict with source_url.
@@ -315,6 +318,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
         JSON string: {"content_type": "threads_text" | "threads_video", "raw_page": "..."}
     """
     url = task["source_url"]
+    slug = task.get("slug", task["id"][:8])
 
     html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
@@ -329,6 +333,39 @@ def step_threads_detect(task: dict, config: Config) -> str:
 
     has_video = _has_video_versions(html)
     content_type = "threads_video" if has_video else "threads_text"
+
+    # Reply/parent context: a comment is the reply + its parent. Extract both so
+    # the video pipeline (and synthesis) keeps them instead of dropping the
+    # parent on video replies.
+    author = _extract_author(html)
+    is_reply = _is_reply_post(html)
+    parent_url = None
+    parent_context = None
+    if is_reply:
+        parent_match = re.search(
+            r'"parent_post"\s*:\s*\{[^}]*"code"\s*:\s*"([^"]+)"',
+            html,
+        )
+        if parent_match:
+            parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
+            parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
+
+    raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_threads_raw.json"
+    raw_path.write_text(
+        json.dumps(
+            {
+                "url": url,
+                "author": author,
+                "captions": _extract_all_captions(html),
+                "is_reply": is_reply,
+                "parent_url": parent_url,
+                "parent_context": parent_context,
+                "extracted_at": datetime.now().isoformat(),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
 
     return json.dumps({
         "content_type": content_type,
