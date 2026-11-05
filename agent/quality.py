@@ -243,6 +243,40 @@ def quality_gate_youtube(note_path: Path, config, vault_path: Path | None = None
     return len(failures) == 0, failures
 
 
+def quality_gate_threads_video(note_path: Path, config, vault_path: Path | None = None) -> tuple[bool, list[str]]:
+    """Run quality gates on a Threads video note.
+
+    Threads notes are short-form social-media posts — they have Key Points, not
+    the Concepts section YouTube lectures use. Check key-point count only.
+    """
+    failures: list[str] = []
+
+    if not note_path.exists():
+        return False, [f"Note not found: {note_path}"]
+
+    lines = note_path.read_text(encoding="utf-8").split("\n")
+
+    key_points_count = 0
+    in_points = False
+    for line in lines:
+        if line.startswith("## ") and ("point" in line.lower() or "key points" in line.lower()):
+            in_points = True
+            continue
+        if in_points and line.startswith("## "):
+            in_points = False
+        if in_points and (
+            line.strip().startswith(("- ", "* "))
+            or re.match(r"^\d+[.)]\s", line.strip())
+        ):
+            key_points_count += 1
+
+    min_kp = getattr(config, "threads_video_min_key_points", 3)
+    if key_points_count < min_kp:
+        failures.append(f"Too few key points: {key_points_count} < {min_kp} required")
+
+    return len(failures) == 0, failures
+
+
 def _resynthesize(note_path: Path, config, llm, failures: list[str]) -> bool:
     """Re-synthesize the note from source + failure feedback (best-effort).
 
