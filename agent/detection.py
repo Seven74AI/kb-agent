@@ -6,6 +6,7 @@ Deterministic URL pattern matching (no ML, no external calls except health check
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from agent.config import REPO_ROOT, load_config
 from agent.router import SIMPLE_PLATFORMS, route_jev
@@ -36,21 +37,35 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-def normalize_url(url: str) -> str:
-    """Collapse Instagram/Threads URLs to their canonical post (drop query string).
+# Query params that are pure tracking noise on Instagram/Threads. Dropped.
+_TRACKING_PARAMS = frozenset({
+    "igsh", "igsi", "rpxt", "xmt", "slof", "si", "fbclid", "gclid",
+    "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+})
 
-    The post id lives in the URL path, so the query string (``comment_id``,
-    ``igsh``, ``igsi``, ``rpxt``, ``xmt``, ``slof``) is tracking/comment-anchor
-    noise. A ``?comment_id=`` deep-link is a comment ON a post, not a distinct
-    source — it must resolve to the parent post or dedup breaks and the reel
-    double-ingests. YouTube is untouched: ``?v=`` is the identity.
+
+def normalize_url(url: str) -> str:
+    """Strip tracking query params from Instagram/Threads URLs; keep comment_id.
+
+    The post id lives in the URL path, so ``igsh``/``igsi``/``rpxt``/``xmt``/
+    ``slof`` (and ``utm_*``) are tracking noise and drop. But ``comment_id`` is
+    semantic — it points at a comment ON the post, which the user wants captured
+    alongside the parent — so it is preserved. YouTube is untouched: ``?v=`` is
+    the identity.
     """
     url = (url or "").strip()
     if not url:
         return url
     low = url.lower()
     if "instagram.com/" in low or "threads." in low:
-        return url.split("?")[0].split("#")[0]
+        parsed = urlparse(url)
+        if not parsed.query:
+            return parsed._replace(fragment="").geturl()
+        kept = [
+            (k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            if k.lower() not in _TRACKING_PARAMS
+        ]
+        return urlunparse(parsed._replace(query=urlencode(kept), fragment=""))
     return url
 
 
@@ -163,6 +178,14 @@ def detect_content_subtype(url: str, platform: str) -> str:
 
     # Ambiguous tail (threads/substack/mega/web) → Jev with fetched content.
     content = _fetch_content(url, platform)
+
+    # Deterministic video check before Jev: Jev sees only the first 1500 chars
+    # of content and can miss the video_versions marker deep in a Threads
+    # payload, misclassifying a video post as text. The signal is reliable and
+    # free — trust it ahead of the LLM.
+    if platform == "threads" and content and "video_versions" in content:
+        return "threads_video"
+
     try:
         return route_jev(url, content)
     except Exception:
