@@ -229,7 +229,10 @@ def quality_gate_youtube(note_path: Path, config, vault_path: Path | None = None
             continue
         if in_points and line.startswith("## "):
             in_points = False
-        if in_points and line.strip().startswith(("- ", "* ", "1. ")):
+        if in_points and (
+            line.strip().startswith(("- ", "* "))
+            or re.match(r"^\d+[.)]\s", line.strip())
+        ):
             key_points_count += 1
 
     if key_points_count < config.youtube_min_key_points:
