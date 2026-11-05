@@ -18,8 +18,8 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
     # YouTube — 6 URL patterns
     (r"youtube\.com/watch|youtu\.be/|youtube\.com/shorts|"
      r"m\.youtube\.com|youtube\.com/embed|music\.youtube\.com", "youtube"),
-    # Threads
-    (r"threads\.(net|com)/@", "threads"),
+    # Threads (handles @handle/post and /share/ short links)
+    (r"threads\.(net|com)/(@|share/)", "threads"),
     # Instagram
     (r"instagram\.com/reel/", "instagram_reel"),
     (r"instagram\.com/p/", "instagram_post"),
@@ -122,7 +122,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
         try:
             cookie_path = _resolve_threads_cookie_path()
             cmd = [
-                "curl", "-s", "--max-time", "15",
+                "curl", "-s", "-L", "--max-time", "15",
                 "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
                 "-H", "Accept: text/html,application/xhtml+xml",
             ]
@@ -136,7 +136,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
     elif platform == "substack":
         try:
             result = subprocess.run(
-                ["curl", "-s", "--max-time", "15", url],
+                ["curl", "-s", "-L", "--max-time", "15", url],
                 capture_output=True, text=True, timeout=20,
             )
             return result.stdout or None
@@ -218,7 +218,7 @@ def _detect_threads_subtype(url: str) -> str:
     try:
         cookie_path = _resolve_threads_cookie_path()
         cmd = [
-            "curl", "-s", "--max-time", "15",
+            "curl", "-s", "-L", "--max-time", "15",
             "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
             "-H", "Accept: text/html,application/xhtml+xml",
         ]
@@ -247,7 +247,7 @@ def _detect_substack_subtype(url: str) -> str:
     """
     try:
         result = subprocess.run(
-            ["curl", "-s", "--max-time", "15", url],
+            ["curl", "-s", "-L", "--max-time", "15", url],
             capture_output=True, text=True, timeout=20,
         )
         html = result.stdout
