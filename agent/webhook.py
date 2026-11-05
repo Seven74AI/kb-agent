@@ -394,16 +394,5 @@ def dashboard():
     )
 
 
-@app.route("/review")
-def review_dashboard():
-    """Serve the review & state report dashboard (kba.sevend.io/review)."""
-    from pathlib import Path
-
-    p = Path(__file__).resolve().parent.parent / "review_dashboard.html"
-    if p.exists():
-        return p.read_text(encoding="utf-8"), 200, {"Content-Type": "text/html; charset=utf-8"}
-    return "review dashboard not found", 404
-
-
 if __name__ == "__main__":
     app.run(host=config.webhook_host, port=config.webhook_port, debug=False)
