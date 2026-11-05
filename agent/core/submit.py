@@ -3,7 +3,7 @@
 import sqlite3
 
 from agent.config import Config
-from agent.core.pipelines import steps_for_content_type
+from agent.pipelines import get_pipeline_names
 from agent.core.slugify import slugify
 from agent.db import create_task, queue_ingest
 from agent.detection import dedup_check, detect_content_subtype, detect_platform, preflight_health
@@ -41,7 +41,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
     ok, reason = preflight_health(platform)
     slug = slugify(url)
     subtype = detect_content_subtype(url, platform)
-    steps = steps_for_content_type(subtype, platform)
+    steps = get_pipeline_names(subtype, platform)
 
     return {
         "status": "paused" if not ok else "pending",
@@ -151,7 +151,7 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
         return {"status": "error", "http_status": 400, "error": "url required"}
 
     platform = detect_platform(url)
-    steps = steps_for_content_type(content_type, platform)
+    steps = get_pipeline_names(content_type, platform)
     task_id = create_task(agent_conn, url, content_type, slug, steps, tags=tags)
 
     return {

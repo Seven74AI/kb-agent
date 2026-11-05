@@ -16,7 +16,6 @@ from agent.core.diff import (
     sha256_fingerprint,
 )
 from agent.core.note import get_note
-from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
 from agent.core.resume import normalize_reason_pattern, resume_tasks, retry_task
 from agent.core.search import search_notes
 from agent.core.slugify import slugify
@@ -35,7 +34,6 @@ from agent.core.watch_source import (
 )
 
 __all__ = [
-    "PIPELINE_STEPS",
     "ContentChangeResult",
     "ContentChangeStatus",
     "check_content_change",
@@ -65,7 +63,6 @@ __all__ = [
     "retry_task",
     "search_notes",
     "slugify",
-    "steps_for_content_type",
     "submit_plan",
     "submit_url",
     "bulk_import",
