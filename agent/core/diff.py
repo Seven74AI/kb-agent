@@ -20,15 +20,21 @@ per source.
 ----------------------------------------------
 :func:`normalize_content` prepares arbitrary text for stable hashing:
 
-* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8 with ``errors="replace"``
+  (invalid bytes become U+FFFD, matching :func:`normalize_source_content`).
 * Normalize CRLF and lone CR to LF.
 * Strip trailing whitespace on each line.
 * Collapse three or more consecutive LF characters to two.
-* Drop volatile header lines that start exactly with ``Date:``, ``Last-Modified:``,
-  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
+* Drop volatile header lines that start exactly (column 0) with ``Date:``,
+  ``Last-Modified:``, ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
+  This is intentional and applies to *any* line, including body text — a
+  ``Date:`` line in prose is treated as a volatile header and dropped, so do not
+  use this helper on content where such lines are meaningful.
+* Strip leading and trailing blank lines so a trailing newline does not change
+  the result (``"alpha\\nbeta"`` and ``"alpha\\nbeta\\n"`` normalize identically).
 
-:func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest of
-``normalize_content(content)`` encoded as UTF-8 bytes.
+:func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest (bare hex,
+no ``sha256:`` prefix) of ``normalize_content(content)`` encoded as UTF-8 bytes.
 """
 
 from __future__ import annotations
@@ -70,7 +76,7 @@ class ContentChangeResult:
 def normalize_content(content: str | bytes) -> str:
     """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
     if isinstance(content, bytes):
-        text = content.decode("utf-8")
+        text = content.decode("utf-8", errors="replace")
     else:
         text = content
 
@@ -84,6 +90,13 @@ def normalize_content(content: str | bytes) -> str:
         if line.startswith(_VOLATILE_HEADER_PREFIXES):
             continue
         filtered.append(line)
+
+    # EOF newline stability: strip leading/trailing blank lines so a trailing
+    # newline does not change the fingerprint (mirrors normalize_source_content).
+    while filtered and filtered[0] == "":
+        filtered.pop(0)
+    while filtered and filtered[-1] == "":
+        filtered.pop()
     return "\n".join(filtered)
 
 

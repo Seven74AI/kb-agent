@@ -111,6 +111,20 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+Generic, line-oriented text normalization for stable hashing — a separate family from
+the `sha256:`-prefixed `content_fingerprint`. `normalize_content` accepts `str` or
+`bytes` (UTF-8, invalid bytes replaced with U+FFFD), normalizes CRLF/CR to LF, strips
+per-line trailing whitespace, collapses 3+ newlines to 2, drops column-0 volatile
+header lines (`Date:`, `Last-Modified:`, `ETag:`, `Server:`, `X-Cache:`,
+`X-Cache-Hits:`), and strips leading/trailing blank lines so a trailing newline does
+not change the result.
+
+`sha256_fingerprint` returns the **bare** lowercase hex SHA-256 of the normalized
+UTF-8 bytes — no `sha256:` prefix. Do not mix it with `content_fingerprint` values
+(which are `sha256:<hex>`): the two are separate hash families.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -122,6 +136,7 @@ so a body that begins with a `word: value` line is left intact.
 | `dedup_check` | no | grep vault |
 | `slugify` | yes | — |
 | `check_content_change` / `content_fingerprint` | yes | — |
+| `normalize_content` / `sha256_fingerprint` | yes | — |
 | `resolve_pipeline_steps` | yes | — |
 | `submit_url` | orchestration | via `SubmitDependencies` |
 | `list_tasks` / `get_task` | no | SQLite |

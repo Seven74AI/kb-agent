@@ -54,6 +54,28 @@ def test_normalize_content_drops_volatile_header_lines():
     assert "body line" in normalized
 
 
+def test_normalize_content_stable_across_trailing_newline():
+    # A trailing newline (or blank line) must not change the fingerprint.
+    assert normalize_content("alpha\nbeta") == normalize_content("alpha\nbeta\n")
+    assert normalize_content("alpha\nbeta\n\n") == normalize_content("alpha\nbeta")
+    assert sha256_fingerprint("alpha\nbeta") == sha256_fingerprint("alpha\nbeta\n")
+
+
+def test_normalize_content_tolerates_invalid_utf8_bytes():
+    # Invalid UTF-8 decodes with U+FFFD (errors="replace"), matching
+    # normalize_source_content, instead of raising UnicodeDecodeError.
+    text = normalize_content(b"caf\xff\xfe")
+    assert "\ufffd" in text
+    assert sha256_fingerprint(b"caf\xff\xfe") == sha256_fingerprint("caf\ufffd\ufffd")
+
+
+def test_normalize_content_keeps_non_volatile_word_value_lines():
+    # Non-volatile `word: value` lines stay; volatile `Date:`/`ETag:` column-0
+    # lines are dropped even when they appear as body text (documented behavior).
+    body = "Title: meeting\nDate: tomorrow\n\nbody"
+    assert normalize_content(body) == "Title: meeting\n\nbody"
+
+
 def test_sha256_fingerprint_stable_for_equivalent_text():
     a = "same\r\ncontent  \n"
     b = "same\ncontent\n"
