@@ -22,11 +22,14 @@ from agent.pipelines.youtube import (
     step_merge_and_identify,
     step_transcribe,
     _format_transcript_for_llm,
-    MAX_QUALITY_RETRIES,
-    YOUTUBE_DENSITY_MIN,
 )
-from agent.pipelines.video_common import step_fetch_transcript
-from agent.quality import quality_gate_retry_loop, quality_gate_youtube
+from agent.pipelines.video_common import (
+    check_density,
+    run_video_quality_gate,
+    step_extract_audio,
+    step_fetch_transcript,
+    upload_video_artifacts,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -223,43 +226,6 @@ def step_download_video(task: dict, config: Config) -> str:
     return str(output_path)
 
 
-def step_extract_audio(task: dict, config: Config) -> str:
-    """Extract dual audio: 16kHz WAV (whisper) + 8kHz WAV (pyannote)."""
-    slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{slug}.mp4"
-    wav_16k_path = Path(config.temp_dir) / f"{slug}_16k.wav"
-    wav_8k_path = Path(config.temp_dir) / f"{slug}_8k.wav"
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-
-    result_16k = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video_path), "-vn",
-         "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(wav_16k_path)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result_16k.returncode != 0:
-        raise StepError(
-            f"16kHz audio extraction failed: {result_16k.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="extract_audio",
-        )
-
-    result_8k = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video_path), "-vn",
-         "-acodec", "pcm_s16le", "-ar", "8000", "-ac", "1", str(wav_8k_path)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result_8k.returncode != 0:
-        raise StepError(
-            f"8kHz audio extraction failed: {result_8k.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="extract_audio",
-        )
-
-    return json.dumps({"wav_16k": str(wav_16k_path), "wav_8k": str(wav_8k_path)})
-
-
 def _note_path(config: Config, slug: str) -> Path:
     base = config.vault_path / "Knowledge base"
     if VAULT_NOTE_SUBFOLDER:
@@ -371,13 +337,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
-    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
-    llm = get_llm_client(config)
-    llm.set_task_context(task["id"], logs_conn)
-
-    passed, rounds = quality_gate_retry_loop(
-        note_path, config, quality_gate_youtube, llm, max_rounds=MAX_QUALITY_RETRIES,
-    )
+    passed, rounds = run_video_quality_gate(note_path, config, task["id"])
 
     if not passed:
         content = note_path.read_text(encoding="utf-8")
@@ -388,65 +348,16 @@ def step_quality_gate(task: dict, config: Config) -> str:
             step_name="quality_gate",
         )
 
-    _check_density(note_path, config)
+    check_density(note_path, config)
     return "passed"
-
-
-def _check_density(note_path: Path, config: Config) -> None:
-    slug = note_path.stem
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
-    if not meta_path.exists():
-        return
-
-    meta = json.loads(meta_path.read_text())
-    duration_secs = meta.get("duration", 0)
-    if duration_secs < 60:
-        return
-
-    duration_min = duration_secs / 60
-    note_size = len(note_path.read_text(encoding="utf-8"))
-    density = note_size / duration_min
-    min_density = getattr(config, "youtube_min_density", YOUTUBE_DENSITY_MIN)
-
-    if density < min_density:
-        raise ValueError(
-            f"Note density too low: {density:.0f} chars/min < "
-            f"{min_density} required "
-            f"({note_size} chars / {duration_min:.1f} min)"
-        )
 
 
 def step_minio_upload(task: dict, config: Config) -> str:
     """Upload MP4, MP3, and merged transcript JSON to MinIO."""
-    from agent.archival import upload_file_to_minio
-
     slug = task.get("slug", task["id"][:8])
-    bucket = config.minio_bucket
-    uploaded = []
-
     video_path = Path(config.temp_dir) / f"{slug}.mp4"
-    if video_path.exists():
-        dest = f"{bucket}/videos/{slug}.mp4"
-        upload_file_to_minio(video_path, dest, timeout=120)
-        uploaded.append(f"videos/{slug}.mp4")
 
-    mp3_path = Path(config.temp_dir) / f"{slug}.mp3"
-    if video_path.exists():
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(video_path), "-vn",
-             "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0 and mp3_path.exists():
-            dest = f"{bucket}/videos/{slug}.mp3"
-            upload_file_to_minio(mp3_path, dest, timeout=120)
-            uploaded.append(f"videos/{slug}.mp3")
-
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
-    if merged_path.exists():
-        dest = f"{bucket}/transcripts/{slug}.json"
-        upload_file_to_minio(merged_path, dest, timeout=120)
-        uploaded.append(f"transcripts/{slug}.json")
+    uploaded = upload_video_artifacts(slug, config, video_path)
 
     _update_note_source_files(slug, config, uploaded)
     return f"Uploaded: {', '.join(uploaded)}"

@@ -773,7 +773,7 @@ The future of AI includes many opportunities.
     note_path.write_text(note_content)
     
     # Mock the LLM (needed for quality_gate_retry_loop Tier 2 check)
-    with patch("agent.pipelines.youtube.get_llm_client") as mock_get_llm:
+    with patch("agent.pipelines.video_common.get_llm_client") as mock_get_llm:
         mock_llm = MagicMock()
         mock_llm.call.return_value = LLMResponse(content="pass")
         mock_get_llm.return_value = mock_llm
