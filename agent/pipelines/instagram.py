@@ -14,6 +14,7 @@ Pitfalls handled:
 """
 
 import json
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -41,6 +42,10 @@ from agent.pipelines.video_common import (
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+
+# yt-dlp binary — resolved explicitly so it works regardless of PATH (the MCP
+# server runs in a separate venv with system PATH, no yt-dlp).
+YTDLP_BIN = shutil.which("yt-dlp") or "/usr/local/lib/hermes-agent/venv/bin/yt-dlp"
 
 # yt-dlp rate limiting for Instagram (per spec)
 IGDL_RATE_FLAGS = [
@@ -150,7 +155,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
 
     result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--output", str(output_path.with_suffix("")),
@@ -379,7 +384,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     # Extract metadata via yt-dlp print
     result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(title)s||%(uploader)s||%(like_count)s||%(playlist_count)s",
@@ -417,7 +422,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     # Also try to get caption via description
     caption_result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(description)s",
