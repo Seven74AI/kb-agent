@@ -111,6 +111,24 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+A second, simpler fingerprint family for arbitrary text. `normalize_content`
+decodes `bytes` as UTF-8 (invalid bytes replaced, matching
+`normalize_source_content`), normalizes CRLF/CR → LF, strips trailing whitespace
+per line, drops volatile header lines (`Date:`, `Last-Modified:`, `ETag:`,
+`Server:`, `X-Cache:`, `X-Cache-Hits:`), then collapses runs of 3+ newlines to a
+single blank line. `sha256_fingerprint` returns the lowercase hex SHA-256 of the
+normalized text, without the `sha256:` prefix.
+
+**Relationship to the body-polling family.** These helpers do **not** strip an
+HTTP envelope and do **not** collapse internal whitespace, so their hashes never
+match `normalize_source_content` / `content_fingerprint` output. Use
+`normalize_source_content` / `content_fingerprint` for watched-source body
+polling (the path driven by `check_content_change`); use `normalize_content` /
+`sha256_fingerprint` only when you need text normalization without
+HTTP-envelope handling.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -122,6 +140,7 @@ so a body that begins with a `word: value` line is left intact.
 | `dedup_check` | no | grep vault |
 | `slugify` | yes | — |
 | `check_content_change` / `content_fingerprint` | yes | — |
+| `normalize_content` / `sha256_fingerprint` | yes | — |
 | `resolve_pipeline_steps` | yes | — |
 | `submit_url` | orchestration | via `SubmitDependencies` |
 | `list_tasks` / `get_task` | no | SQLite |
