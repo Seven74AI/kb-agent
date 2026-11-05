@@ -109,8 +109,14 @@ def test_extract_video_url_all_null_is_none():
 
 def test_strip_code_fence_yaml():
     out = strip_code_fence("```yaml\ndate: 2026-11-05\n---\n# T\nbody\n```")
-    assert out.startswith("date: 2026-11-05")
+    assert out.startswith("---\ndate: 2026-11-05")
     assert "```" not in out
+
+
+def test_strip_code_fence_restores_missing_delimiter():
+    # the LLM emits the fence in place of the opening --- (no opening delimiter)
+    out = strip_code_fence("```yaml\ndate: 2026-11-05\nsource: x\n---\nbody")
+    assert out.startswith("---\ndate: 2026-11-05")
 
 
 def test_strip_code_fence_noop():
@@ -122,3 +128,13 @@ def test_strip_code_fence_noop():
 def test_shortcode_to_media_id():
     # base-64 decode over A-Za-z0-9-_ ; the comment-API media id
     assert _shortcode_to_media_id("DdnESNvo13o") == 3992178438581738984
+
+
+# ── Author extraction ───────────────────────────────────────────────────────
+
+def test_extract_author_uses_permalink_not_session_user():
+    # the first "username" is the logged-in session user, not the post author
+    from agent.pipelines.threads import _extract_author
+
+    html = '"username":"lieutarchitect","permalink":"https:\\/\\/www.threads.com\\/\\u0040tayjmcm\\/post\\/ABC"'
+    assert _extract_author(html) == "tayjmcm"

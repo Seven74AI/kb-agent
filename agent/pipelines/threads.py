@@ -225,9 +225,11 @@ def _extract_all_captions(html: str) -> list[str]:
 
 
 def _extract_author(html: str) -> str:
-    """Extract author username from the Threads page.
+    """Extract the POST author's username (not the logged-in session user).
 
-    Looks for username field in the page JSON.
+    The first ``"username"`` in the payload is the session user, so that field
+    is wrong. The post's own author rides in its ``permalink`` field
+    (``\\u0040<username>`` — ``@`` JSON-escaped). Parse that instead.
 
     Args:
         html: Raw Threads page HTML/JSON.
@@ -235,7 +237,7 @@ def _extract_author(html: str) -> str:
     Returns:
         Username string or 'unknown'.
     """
-    match = re.search(r'"username"\s*:\s*"([^"]+)"', html)
+    match = re.search(r'"permalink"\s*:\s*"[^"]*?(?:\\u0040|@)([A-Za-z0-9._]+)', html)
     return match.group(1) if match else "unknown"
 
 
