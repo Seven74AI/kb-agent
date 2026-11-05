@@ -8,8 +8,10 @@ from agent.core.diff import (
     ContentChangeStatus,
     check_content_change,
     content_fingerprint,
+    normalize_content,
     normalize_etag,
     normalize_source_content,
+    sha256_fingerprint,
 )
 
 
@@ -187,3 +189,49 @@ def test_poll_contract_caller_persists_hash_without_module_mutation():
     assert result.content_hash == content_fingerprint("body v2")
     last_content_hash = result.content_hash
     assert last_content_hash == content_fingerprint("body v2")
+
+
+def test_sha256_fingerprint_identical_for_line_endings_and_trailing_whitespace():
+    variants = [
+        "alpha\nbeta",
+        "alpha\r\nbeta",
+        "alpha\rbeta",
+        "alpha  \nbeta\t",
+    ]
+    fingerprints = {sha256_fingerprint(text) for text in variants}
+    assert len(fingerprints) == 1
+
+
+def test_sha256_fingerprint_differs_for_substantive_content():
+    assert sha256_fingerprint("version one") != sha256_fingerprint("version two")
+
+
+def test_normalize_content_and_sha256_fingerprint_are_deterministic():
+    sample = "stable\npayload"
+    assert normalize_content(sample) == normalize_content(sample)
+    assert sha256_fingerprint(sample) == sha256_fingerprint(sample)
+
+
+def test_normalize_content_bytes_matches_equivalent_str():
+    text = "hello\nworld"
+    assert normalize_content(text.encode("utf-8")) == normalize_content(text)
+    assert sha256_fingerprint(text.encode("utf-8")) == sha256_fingerprint(text)
+
+
+def test_normalize_content_drops_volatile_header_lines_at_line_start():
+    raw = (
+        "Date: Wed, 04 Nov 2026 12:00:00 GMT\n"
+        "Keep-Me: value\n"
+        "Last-Modified: Tue, 03 Nov 2026 11:00:00 GMT\n"
+        "ETag: \"abc123\"\n"
+        "Server: nginx\n"
+        "X-Cache: HIT\n"
+        "X-Cache-Hits: 42\n"
+        "body line"
+    )
+    assert normalize_content(raw) == "Keep-Me: value\nbody line"
+
+
+def test_normalize_content_collapses_three_or_more_consecutive_newlines():
+    assert normalize_content("a\n\n\n\nb") == "a\n\nb"
+    assert normalize_content("a\n\n\nb") == "a\n\nb"

@@ -15,6 +15,14 @@ Hash families
 Mixing families (a body ``sha256:`` hash later polled with ``etag``, or vice
 versa) always compares unequal and reports ``NEW``. Use one mode consistently
 per source.
+
+``normalize_content(content)`` accepts ``str`` or ``bytes``. If ``bytes``, decode
+UTF-8. Normalize as follows: convert CRLF and lone CR to LF; strip trailing
+whitespace per line; collapse runs of 3+ consecutive LF to exactly 2 LF; drop
+volatile header lines matching exactly at line start: ``Date:``,
+``Last-Modified:``, ``ETag:``, ``Server:``, ``X-Cache:``, ``X-Cache-Hits:``.
+Return normalized ``str``. ``sha256_fingerprint(content)`` returns lowercase hex
+SHA-256 digest of ``normalize_content(content).encode('utf-8')``.
 """
 
 from __future__ import annotations
@@ -23,6 +31,16 @@ import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+
+_VOLATILE_HEADER_PREFIXES = (
+    "Date:",
+    "Last-Modified:",
+    "ETag:",
+    "Server:",
+    "X-Cache:",
+    "X-Cache-Hits:",
+)
+_EXCESS_NEWLINES = re.compile(r"\n{3,}")
 
 
 class ContentChangeStatus(StrEnum):
@@ -51,6 +69,29 @@ def normalize_etag(etag: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] == '"':
         value = value[1:-1]
     return value
+
+
+def normalize_content(content: str | bytes) -> str:
+    """Return normalized text for stable fingerprinting."""
+    if isinstance(content, bytes):
+        text = content.decode("utf-8")
+    else:
+        text = content
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if any(line.startswith(prefix) for prefix in _VOLATILE_HEADER_PREFIXES):
+            continue
+        lines.append(line.rstrip())
+    normalized = "\n".join(lines)
+    return _EXCESS_NEWLINES.sub("\n\n", normalized)
+
+
+def sha256_fingerprint(content: str | bytes) -> str:
+    """Return lowercase hex SHA-256 of UTF-8 bytes of normalized *content*."""
+    normalized = normalize_content(content)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_source_content(raw: str | bytes) -> str:
