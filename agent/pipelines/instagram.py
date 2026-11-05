@@ -37,6 +37,7 @@ from agent.pipelines.video_common import (
     step_extract_audio,
     step_fetch_transcript,
     step_transcribe,
+    strip_code_fence,
     upload_note_archive,
     upload_video_source,
 )
@@ -351,7 +352,7 @@ Write a note following the template above.
 {'This is a music-only reel — prioritize any detected caption text over the transcript.' if music_only else 'Analyze the full transcript for key points.'}"""
 
     response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
-    note_content = response.content
+    note_content = strip_code_fence(response.content)
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -645,7 +646,7 @@ Write a note analyzing this carousel post.
 Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could be extracted (anti-bot limitation on slides 3+)."""
 
     response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
-    note_content = response.content
+    note_content = strip_code_fence(response.content)
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -973,7 +974,7 @@ Link: {info['parent_url']}
 Write the note following the template."""
 
     response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
-    note_content = response.content
+    note_content = strip_code_fence(response.content)
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)

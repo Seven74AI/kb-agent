@@ -189,7 +189,8 @@ def detect_content_subtype(url: str, platform: str) -> str:
     # and a 900KB payload would waste a full-content call for nothing.
     if platform == "threads":
         if content is not None:
-            return "threads_video" if "video_versions" in content else "threads_text"
+            has_video = re.search(r'"video_versions"\s*:\s*\[', content) is not None
+            return "threads_video" if has_video else "threads_text"
         return _detect_threads_subtype(url)
 
     # Remaining ambiguous tail (substack/mega/web) → Jev with FULL content.
@@ -229,7 +230,7 @@ def _detect_threads_subtype(url: str) -> str:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=20,
         )
-        if 'video_versions' in result.stdout:
+        if re.search(r'"video_versions"\s*:\s*\[', result.stdout):
             return "threads_video"
     except (subprocess.TimeoutExpired, Exception):
         pass
