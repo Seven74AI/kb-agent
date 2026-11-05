@@ -207,6 +207,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .paused { background: #fff3cd; color: #856404; }
         .failed { background: #f8d7da; color: #721c24; }
         .queued { background: #eee; color: #555; }
+        .downloading { background: #cce5ff; color: #004085; }
+        .staged { background: #d6d8f0; color: #3a3a6e; }
         .dispatching { background: #cce5ff; color: #004085; }
         .dispatched { background: #d4edda; color: #155724; }
         table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.85rem; }
