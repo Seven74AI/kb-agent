@@ -184,22 +184,22 @@ def detect_content_subtype(url: str, platform: str) -> str:
     # Ambiguous tail (threads/substack/mega/web) → Jev with fetched content.
     content = _fetch_content(url, platform)
 
-    # Deterministic video check before Jev: Jev sees only the first 1500 chars
-    # of content and can miss the video_versions marker deep in a Threads
-    # payload, misclassifying a video post as text. The signal is reliable and
-    # free — trust it ahead of the LLM.
-    if platform == "threads" and content and "video_versions" in content:
-        return "threads_video"
+    # Threads is fully deterministic: video_versions present/absent is the whole
+    # answer (video vs text). No Jev — an LLM misread this exact signal once,
+    # and a 900KB payload would waste a full-content call for nothing.
+    if platform == "threads":
+        if content is not None:
+            return "threads_video" if "video_versions" in content else "threads_text"
+        return _detect_threads_subtype(url)
 
+    # Remaining ambiguous tail (substack/mega/web) → Jev with FULL content.
     try:
         return route_jev(url, content)
     except Exception:
         pass
 
     # Legacy fallback (Jev unavailable or failed).
-    if platform == "threads":
-        return _detect_threads_subtype(url)
-    elif platform == "substack":
+    if platform == "substack":
         return _detect_substack_subtype(url)
     elif platform == "mega":
         return _detect_mega_subtype(url)

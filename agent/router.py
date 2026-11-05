@@ -63,7 +63,7 @@ def route_jev(url: str, content: str | None = None, api_key: str | None = None) 
 
     state = f"URL: {url}"
     if content:
-        state += f"\nContent: {content[:1500]}"
+        state += f"\nContent: {content}"
 
     try:
         r = httpx.post(
@@ -80,7 +80,7 @@ def route_jev(url: str, content: str | None = None, api_key: str | None = None) 
                     }
                 },
             },
-            timeout=30,
+            timeout=90,
         )
     except httpx.HTTPError as e:
         raise RuntimeError(f"OpenRouter request failed: {e}") from e
