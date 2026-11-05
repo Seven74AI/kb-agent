@@ -19,9 +19,6 @@ from agent.pipelines.instagram import (
     _slug_path,
     step_ig_reel_validate,
     step_ig_reel_download,
-    step_ig_reel_audio,
-    step_ig_reel_diarize,
-    step_ig_reel_transcribe,
     step_ig_reel_merge,
     step_ig_reel_synthesize,
     step_ig_carousel_metadata,
@@ -34,6 +31,7 @@ from agent.pipelines.instagram import (
     CAROUSEL_SLIDE_CAP,
     MUSIC_ONLY_CHAR_THRESHOLD,
 )
+from agent.pipelines.video_common import step_extract_audio
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -175,7 +173,7 @@ class TestReelDownload:
 
 
 class TestReelAudio:
-    """Tests for step_ig_reel_audio."""
+    """Tests for step_extract_audio (shared)."""
 
     @patch("subprocess.run")
     def test_audio_extraction_success(self, mock_run, config, reel_task):
@@ -195,7 +193,7 @@ class TestReelAudio:
             return result
         mock_run.side_effect = fake_run
 
-        result = step_ig_reel_audio(reel_task, config)
+        result = step_extract_audio(reel_task, config)
         data = json.loads(result)
         assert "16k.wav" in data["wav_16k"]
         assert "8k.wav" in data["wav_8k"]
@@ -522,10 +520,10 @@ class TestPipelineRegistration:
         step_names = [s.name for s in steps]
         assert "ig_reel_validate" in step_names
         assert "ig_reel_download" in step_names
-        assert "ig_reel_audio" in step_names
-        assert "ig_reel_diarize" in step_names
-        assert "ig_reel_transcribe" in step_names
-        assert "ig_reel_merge" in step_names
+        assert "extract_audio" in step_names
+        assert "diarize" in step_names
+        assert "transcribe" in step_names
+        assert "merge_and_identify" in step_names
         assert "ig_reel_synthesize" in step_names
         assert "ig_git_push" in step_names
 

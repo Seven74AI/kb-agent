@@ -15,7 +15,6 @@ Pitfalls handled:
 
 import json
 import re
-import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -29,9 +28,18 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import step_fetch_transcript
-from agent.quality import quality_gate_retry_loop, quality_gate_youtube
-from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
+from agent.pipelines.video_common import (
+    _slug_path,
+    format_transcript_for_llm,
+    merge_speaker_labels,
+    run_video_quality_gate,
+    step_diarize,
+    step_extract_audio,
+    step_fetch_transcript,
+    step_transcribe,
+    upload_note_archive,
+    upload_video_source,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -46,9 +54,6 @@ GOOGLEBOT_UA = (
 THREADS_SLEEP_MIN = 5
 THREADS_SLEEP_MAX = 10
 THREADS_MAX_POSTS_PER_SESSION = 3
-
-# Max quality gate retries
-MAX_QUALITY_RETRIES = 3
 
 # Density target for video notes
 THREADS_VIDEO_DENSITY_MIN = 100
@@ -295,11 +300,6 @@ def _is_login_wall(html: str) -> bool:
     return False
 
 
-def _slug_path(slug: str) -> str:
-    """Convert slug to a filesystem-safe path segment."""
-    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)
-
-
 # ── Step 1: Detection ─────────────────────────────────────────────────────────
 
 def step_threads_detect(task: dict, config: Config) -> str:
@@ -496,199 +496,6 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
     return str(output_path)
 
 
-# ── Step 3: Audio Extraction (dual WAV for video posts) ───────────────────────
-
-def step_threads_extract_audio(task: dict, config: Config) -> str:
-    """Extract dual WAV audio (16kHz + 8kHz) from downloaded video.
-
-    Reuses the same ffmpeg pattern as the YouTube pipeline.
-    16kHz for transcription, 8kHz for diarization.
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        JSON string with paths to both WAV files.
-    """
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
-
-    video_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
-    wav_16k_path = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
-    wav_8k_path = Path(config.temp_dir) / f"{safe_slug}_8k.wav"
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-
-    # Extract 16kHz mono WAV for transcription
-    result_16k = subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", str(video_path),
-            "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-            str(wav_16k_path),
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
-
-    if result_16k.returncode != 0:
-        raise StepError(
-            f"ffmpeg 16kHz extraction failed: {result_16k.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="extract_audio",
-        )
-
-    # Extract 8kHz mono WAV for diarization
-    result_8k = subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", str(video_path),
-            "-ar", "8000", "-ac", "1", "-sample_fmt", "s16",
-            str(wav_8k_path),
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
-
-    if result_8k.returncode != 0:
-        raise StepError(
-            f"ffmpeg 8kHz extraction failed: {result_8k.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="extract_audio",
-        )
-
-    return json.dumps({
-        "wav_16k": str(wav_16k_path),
-        "wav_8k": str(wav_8k_path),
-    })
-
-
-# ── Step 4: Diarization ───────────────────────────────────────────────────────
-
-def step_threads_diarize(task: dict, config: Config) -> str:
-    """Diarize audio via pyannote using the canonical script.
-
-    MUST run before transcription (sequential — RAM safety).
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        Path to the diarization JSON file.
-    """
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
-    audio_8k = Path(config.temp_dir) / f"{safe_slug}_8k.wav"
-    output_json = Path(config.temp_dir) / f"{safe_slug}_diarization.json"
-
-    if is_modal_backend(config):
-        audio_16k = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
-        if not audio_16k.exists():
-            raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
-        diar_modal, trans_modal = transcribe_modal(safe_slug, audio_16k, config)
-        install_modal_outputs(safe_slug, config, diar_modal, trans_modal)
-        return str(output_json)
-
-    if not audio_8k.exists():
-        raise FileNotFoundError(f"8kHz audio not found: {audio_8k}")
-
-    script_path = config.kb_agent_dir / "scripts" / "diarize.py"
-    if not script_path.exists():
-        raise StepError(
-            f"Diarize script not found: {script_path}",
-            error_type=ErrorType.FAIL,
-            step_name="diarize",
-        )
-
-    result = subprocess.run(
-        ["python3", str(script_path), str(audio_8k), str(output_json)],
-        capture_output=True, text=True, timeout=7200,
-    )
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "401" in stderr or "403" in stderr:
-            raise StepError(
-                "Pyannote model access denied — check HF_TOKEN",
-                error_type=ErrorType.PAUSE,
-                step_name="diarize",
-                details=stderr[:500],
-            )
-        raise StepError(
-            f"Diarization failed: {stderr[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="diarize",
-        )
-
-    if not output_json.exists():
-        raise StepError(
-            f"Diarization claimed success but output missing: {output_json}",
-            error_type=ErrorType.RETRY,
-            step_name="diarize",
-        )
-
-    return str(output_json)
-
-
-# ── Step 5: Transcription ─────────────────────────────────────────────────────
-
-def step_threads_transcribe(task: dict, config: Config) -> str:
-    """Transcribe audio via faster-whisper using the canonical script.
-
-    MUST run after diarization (sequential — RAM safety).
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        Path to the transcript JSON file.
-    """
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
-    audio_16k = Path(config.temp_dir) / f"{safe_slug}_16k.wav"
-    output_json = Path(config.temp_dir) / f"{safe_slug}_transcript.json"
-
-    if is_modal_backend(config):
-        if not output_json.exists():
-            if not audio_16k.exists():
-                raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
-            _, trans_modal = transcribe_modal(safe_slug, audio_16k, config)
-            shutil.copy2(trans_modal, output_json)
-        return str(output_json)
-
-    if not audio_16k.exists():
-        raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
-
-    script_path = config.kb_agent_dir / "scripts" / "transcribe.py"
-    if not script_path.exists():
-        raise StepError(
-            f"Transcribe script not found: {script_path}",
-            error_type=ErrorType.FAIL,
-            step_name="transcribe",
-        )
-
-    result = subprocess.run(
-        ["python3", str(script_path), str(audio_16k), str(output_json), "0"],
-        capture_output=True, text=True, timeout=7200,
-    )
-
-    if result.returncode != 0:
-        raise StepError(
-            f"Transcription failed: {result.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="transcribe",
-        )
-
-    if not output_json.exists():
-        raise StepError(
-            f"Transcription claimed success but output missing: {output_json}",
-            error_type=ErrorType.RETRY,
-            step_name="transcribe",
-        )
-
-    return str(output_json)
-
-
 # ── Step 6: Merge Diarization + Transcript ────────────────────────────────────
 
 def step_threads_merge(task: dict, config: Config) -> str:
@@ -717,32 +524,7 @@ def step_threads_merge(task: dict, config: Config) -> str:
     diar = json.loads(diar_path.read_text())
     trans = json.loads(trans_path.read_text())
 
-    dia_segments = diar.get("segments", [])
-    if not dia_segments:
-        raise StepError(
-            "Diarization produced zero segments",
-            error_type=ErrorType.FAIL,
-            step_name="merge",
-        )
-
-    # Merge: assign speaker to each transcript segment at midpoint
-    for seg in trans.get("segments", []):
-        seg_mid = (seg.get("start", 0) + seg.get("end", 0)) / 2
-
-        best_speaker = None
-        for dia in dia_segments:
-            if dia.get("start", 0) <= seg_mid <= dia.get("end", 0):
-                speaker = dia.get("speaker", "Unknown")
-                if "|" in speaker:
-                    if best_speaker is None:
-                        best_speaker = speaker
-                else:
-                    if best_speaker is None or "|" in best_speaker:
-                        best_speaker = speaker
-
-        seg["speaker"] = best_speaker if best_speaker else "Unknown"
-        if "|" in str(seg.get("speaker", "")):
-            seg["overlap"] = True
+    merge_speaker_labels(diar, trans)
 
     # Count distinct speakers
     speakers = set(
@@ -1037,12 +819,7 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
     if "video" in content_type:
-        logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
-        llm = get_llm_client(config)
-        llm.set_task_context(task["id"], logs_conn)
-        passed, rounds = quality_gate_retry_loop(
-            note_path, config, quality_gate_youtube, llm, MAX_QUALITY_RETRIES,
-        )
+        passed, rounds = run_video_quality_gate(note_path, config, task["id"])
         if not passed:
             content = note_path.read_text(encoding="utf-8")
             raise StepError(
@@ -1082,57 +859,26 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
 # ── MinIO Upload ──────────────────────────────────────────────────────────────
 
 def step_threads_minio_upload(task: dict, config: Config) -> str:
-    """Upload the generated note to MinIO.
+    """Upload the generated video/text artifacts to MinIO.
 
-    Delegates to archival.upload_file_to_minio then updates the note
-    frontmatter with the MinIO URL.
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        MinIO URL of the uploaded note.
+    Video: source-archival (video + transcript). Text: note-archival.
     """
-    from agent.archival import upload_file_to_minio, write_source_files_block
-
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
     content_type = task.get("content_type", "threads_text")
-    bucket = config.minio_bucket
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
 
     if content_type == "threads_video":
         # Source-archival: video + transcript (matches the batch collector).
-        uploaded = []
         video_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
-        if video_path.exists():
-            upload_file_to_minio(video_path, f"{bucket}/videos/{safe_slug}.mp4", timeout=120)
-            uploaded.append(f"videos/{safe_slug}.mp4")
-        merged = Path(config.temp_dir) / f"{safe_slug}_merged.json"
-        if merged.exists():
-            upload_file_to_minio(merged, f"{bucket}/transcripts/{safe_slug}.json", timeout=120)
-            uploaded.append(f"transcripts/{safe_slug}.json")
-        write_source_files_block(note_path, uploaded, config)
+        uploaded = upload_video_source(safe_slug, config, video_path, "mp4", note_path)
         return f"Uploaded: {', '.join(uploaded)}"
 
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found: {note_path}")
 
     # Note-archival: text post.
-    note_key = f"threads/{safe_slug}.md"
-    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}")
-
-    # Update note frontmatter with minio URL
-    content = note_path.read_text(encoding="utf-8")
-    updated = re.sub(
-        r"raw:\s*<filled by archival step>",
-        f"raw: {minio_url}",
-        content,
-    )
-    note_path.write_text(updated, encoding="utf-8")
-
-    return minio_url
+    return upload_note_archive(safe_slug, config, note_path, "threads")
 
 
 # ── Step 11: Git Push ─────────────────────────────────────────────────────────
@@ -1166,14 +912,7 @@ def step_threads_git_push(task: dict, config: Config) -> str:
 
 def _format_transcript_for_llm(merged: dict) -> str:
     """Format merged transcript as compact text for LLM consumption."""
-    lines = []
-    for seg in merged.get("segments", []):
-        start = seg.get("start", 0)
-        speaker = seg.get("speaker", "Unknown")
-        text = seg.get("text", "").strip()
-        if text:
-            lines.append(f"({start:.1f}s) {speaker}: {text}")
-    return "\n".join(lines)
+    return format_transcript_for_llm(merged, style="seconds")
 
 
 # ── Pipeline Registration ────────────────────────────────────────────────────
@@ -1182,10 +921,10 @@ def _format_transcript_for_llm(merged: dict) -> str:
 register_pipeline("threads_video", [
     Step(name="threads_detect", fn=step_threads_detect, on_error="pause"),
     Step(name="threads_extract_video", fn=step_threads_extract_video, on_error="retry"),
-    Step(name="threads_extract_audio", fn=step_threads_extract_audio, on_error="retry"),
-    Step(name="threads_diarize", fn=step_threads_diarize, on_error="retry"),
-    Step(name="threads_transcribe", fn=step_threads_transcribe, on_error="retry"),
-    Step(name="threads_merge", fn=step_threads_merge, on_error="retry"),
+    Step(name="extract_audio", fn=step_extract_audio, on_error="retry"),
+    Step(name="diarize", fn=step_diarize, on_error="retry"),
+    Step(name="transcribe", fn=step_transcribe, on_error="retry"),
+    Step(name="merge_and_identify", fn=step_threads_merge, on_error="retry"),
     Step(name="threads_video_synthesize", fn=step_threads_video_synthesize, on_error="retry"),
     Step(name="threads_quality_gate", fn=step_threads_quality_gate, on_error="retry"),
     Step(name="threads_minio_upload", fn=step_threads_minio_upload, on_error="retry"),

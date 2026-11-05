@@ -26,9 +26,19 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import step_fetch_transcript
-from agent.quality import quality_gate_retry_loop, quality_gate_youtube
-from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
+from agent.pipelines.video_common import (
+    MAX_QUALITY_RETRIES,
+    VIDEO_DENSITY_MIN,
+    check_density as _check_density,
+    format_transcript_for_llm as _format_transcript_for_llm,
+    merge_speaker_labels,
+    run_video_quality_gate,
+    step_diarize,
+    step_extract_audio,
+    step_fetch_transcript,
+    step_transcribe,
+    upload_video_artifacts,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -47,11 +57,11 @@ YTDL_RATE_FLAGS = [
     "--limit-rate", "4M",
 ]
 
-# Max retry rounds for quality gate
-MAX_QUALITY_RETRIES = 3
+# Max retry rounds for quality gate (re-exported from video_common)
+# MAX_QUALITY_RETRIES is imported above.
 
-# Density target for YouTube notes (chars/min)
-YOUTUBE_DENSITY_MIN = 100
+# Density target for YouTube notes (chars/min) — re-exported for bunny_stream.
+YOUTUBE_DENSITY_MIN = VIDEO_DENSITY_MIN
 
 # Approximate token ratio
 CHARS_PER_TOKEN = 4
@@ -309,263 +319,13 @@ def step_download_video(task: dict, config: Config) -> str:
 
 
 # ── Audio Extraction ─────────────────────────────────────────────────────────
-
-def step_extract_audio(task: dict, config: Config) -> str:
-    """Extract dual audio: 16kHz WAV (whisper) + 8kHz WAV (pyannote).
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        JSON string with paths to both WAV files.
-    """
-    slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{slug}.webm"
-    wav_16k_path = Path(config.temp_dir) / f"{slug}_16k.wav"
-    wav_8k_path = Path(config.temp_dir) / f"{slug}_8k.wav"
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-
-    # Extract 16kHz WAV for whisper
-    result_16k = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video_path), "-vn",
-         "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(wav_16k_path)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result_16k.returncode != 0:
-        raise StepError(
-            f"16kHz audio extraction failed: {result_16k.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="extract_audio",
-        )
-
-    # Extract 8kHz WAV for pyannote
-    result_8k = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video_path), "-vn",
-         "-acodec", "pcm_s16le", "-ar", "8000", "-ac", "1", str(wav_8k_path)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result_8k.returncode != 0:
-        raise StepError(
-            f"8kHz audio extraction failed: {result_8k.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="extract_audio",
-        )
-
-    paths = {
-        "wav_16k": str(wav_16k_path),
-        "wav_8k": str(wav_8k_path),
-    }
-    return json.dumps(paths)
-
+# (step_extract_audio is imported from video_common)
 
 # ── Diarization ──────────────────────────────────────────────────────────────
-
-def step_diarize(task: dict, config: Config) -> str:
-    """Diarize audio via pyannote using the canonical script.
-
-    MUST run before transcription (sequential — RAM safety).
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        Path to the diarization JSON file.
-    """
-    slug = task.get("slug", task["id"][:8])
-    audio_8k = Path(config.temp_dir) / f"{slug}_8k.wav"
-    output_json = Path(config.temp_dir) / f"{slug}_diarization.json"
-
-    if is_modal_backend(config):
-        audio_16k = Path(config.temp_dir) / f"{slug}_16k.wav"
-        if not audio_16k.exists():
-            raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
-
-        logs_conn = task.get("_logs_conn")
-        task_id = task.get("_task_id", "")
-        step_name = task.get("_step_name", "diarize")
-        if logs_conn:
-            from agent.streaming import log_progress
-            log_progress(logs_conn, task_id, step_name,
-                         f"Starting Modal GPU diarization+transcription for {slug}")
-
-        diar_modal, trans_modal = transcribe_modal(slug, audio_16k, config)
-        install_modal_outputs(slug, config, diar_modal, trans_modal)
-
-        if logs_conn:
-            from agent.streaming import log_progress
-            log_progress(logs_conn, task_id, step_name,
-                         "Modal diarization complete")
-
-        return str(output_json)
-
-    if not audio_8k.exists():
-        raise FileNotFoundError(f"8kHz audio not found: {audio_8k}")
-
-    # Use canonical script from kb-agent scripts dir
-    script_path = config.kb_agent_dir / "scripts" / "diarize.py"
-    if not script_path.exists():
-        raise StepError(
-            f"Diarize script not found: {script_path}",
-            error_type=ErrorType.FAIL,
-            step_name="diarize",
-        )
-
-    # ── Progress logging ─────────────────────────────────────────────
-    logs_conn = task.get("_logs_conn")
-    task_id = task.get("_task_id", "")
-    step_name = task.get("_step_name", "diarize")
-    if logs_conn:
-        from agent.streaming import log_progress
-        log_progress(logs_conn, task_id, step_name,
-                     f"Starting pyannote diarization for {slug}")
-
-    result = subprocess.run(
-        ["python3", str(script_path), str(audio_8k), str(output_json)],
-        capture_output=True, text=True, timeout=7200,
-    )
-
-    if result.returncode != 0:
-        if logs_conn:
-            log_progress(logs_conn, task_id, step_name,
-                         f"Diarization FAILED (rc={result.returncode})",
-                         stream="stderr")
-        stderr = result.stderr.strip()
-        if "401" in stderr or "403" in stderr:
-            raise StepError(
-                "Pyannote model access denied — check HF_TOKEN",
-                error_type=ErrorType.PAUSE,
-                step_name="diarize",
-                details=stderr[:500],
-            )
-        raise StepError(
-            f"Diarization failed: {stderr[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="diarize",
-        )
-
-    if not output_json.exists():
-        raise StepError(
-            f"Diarization claimed success but output missing: {output_json}",
-            error_type=ErrorType.RETRY,
-            step_name="diarize",
-        )
-
-    # Log completion with segment count
-    if logs_conn:
-        segment_count = "?"
-        try:
-            data = json.loads(output_json.read_text())
-            segment_count = str(len(data.get("segments", [])))
-        except Exception:
-            pass
-        log_progress(logs_conn, task_id, step_name,
-                     f"Diarization complete: {segment_count} segments")
-
-    return str(output_json)
-
+# (step_diarize is imported from video_common)
 
 # ── Transcription ────────────────────────────────────────────────────────────
-
-def step_transcribe(task: dict, config: Config) -> str:
-    """Transcribe audio via faster-whisper using the canonical script.
-
-    MUST run after diarization (sequential — RAM safety).
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        Path to the transcript JSON file.
-    """
-    slug = task.get("slug", task["id"][:8])
-    audio_16k = Path(config.temp_dir) / f"{slug}_16k.wav"
-    output_json = Path(config.temp_dir) / f"{slug}_transcript.json"
-
-    if is_modal_backend(config):
-        if not output_json.exists():
-            if not audio_16k.exists():
-                raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
-            _, trans_modal = transcribe_modal(slug, audio_16k, config)
-            shutil.copy2(trans_modal, output_json)
-        logs_conn = task.get("_logs_conn")
-        task_id = task.get("_task_id", "")
-        step_name = task.get("_step_name", "transcribe")
-        if logs_conn:
-            from agent.streaming import log_progress
-            log_progress(logs_conn, task_id, step_name,
-                         f"Modal transcription ready for {slug}")
-        return str(output_json)
-
-    # Get duration from metadata
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
-    duration_secs = "0"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        duration_secs = str(meta.get("duration", 0))
-
-    if not audio_16k.exists():
-        raise FileNotFoundError(f"16kHz audio not found: {audio_16k}")
-
-    # Use canonical script
-    script_path = config.kb_agent_dir / "scripts" / "transcribe.py"
-    if not script_path.exists():
-        raise StepError(
-            f"Transcribe script not found: {script_path}",
-            error_type=ErrorType.FAIL,
-            step_name="transcribe",
-        )
-
-    # ── Progress logging ─────────────────────────────────────────────
-    logs_conn = task.get("_logs_conn")
-    task_id = task.get("_task_id", "")
-    step_name = task.get("_step_name", "transcribe")
-    if logs_conn:
-        from agent.streaming import log_progress
-        dur_info = f" (~{float(duration_secs)/60:.0f}min)" if duration_secs != "0" else ""
-        log_progress(logs_conn, task_id, step_name,
-                     f"Starting faster-whisper transcription for {slug}{dur_info}")
-
-    result = subprocess.run(
-        ["python3", str(script_path), str(audio_16k), str(output_json), duration_secs],
-        capture_output=True, text=True, timeout=7200,
-    )
-
-    if result.returncode != 0:
-        if logs_conn:
-            log_progress(logs_conn, task_id, step_name,
-                         f"Transcription FAILED (rc={result.returncode})",
-                         stream="stderr")
-        raise StepError(
-            f"Transcription failed: {result.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="transcribe",
-        )
-
-    if not output_json.exists():
-        raise StepError(
-            f"Transcription claimed success but output missing: {output_json}",
-            error_type=ErrorType.RETRY,
-            step_name="transcribe",
-        )
-
-    # Log completion
-    if logs_conn:
-        seg_count = "?"
-        try:
-            data = json.loads(output_json.read_text())
-            seg_count = str(len(data.get("segments", [])))
-        except Exception:
-            pass
-        log_progress(logs_conn, task_id, step_name,
-                     f"Transcription complete: {seg_count} segments")
-
-    return str(output_json)
-
+# (step_transcribe is imported from video_common)
 
 # ── Merge Diarization + Transcript ───────────────────────────────────────────
 
@@ -596,35 +356,7 @@ def step_merge_and_identify(task: dict, config: Config) -> str:
     diar = json.loads(diar_path.read_text())
     trans = json.loads(trans_path.read_text())
 
-    dia_segments = diar.get("segments", [])
-    if not dia_segments:
-        raise StepError(
-            "Diarization produced zero segments",
-            error_type=ErrorType.FAIL,
-            step_name="merge",
-        )
-
-    # Merge: assign speaker to each transcript segment at midpoint
-    for seg in trans.get("segments", []):
-        seg_mid = (seg.get("start", 0) + seg.get("end", 0)) / 2
-
-        best_speaker = None
-        best_overlap = 0
-        for dia in dia_segments:
-            if dia.get("start", 0) <= seg_mid <= dia.get("end", 0):
-                speaker = dia.get("speaker", "Unknown")
-                # Check for overlap composite labels (SPEAKER_00 | SPEAKER_01)
-                if "|" in speaker:
-                    best_overlap = max(best_overlap, 1)
-                    if best_speaker is None:
-                        best_speaker = speaker
-                else:
-                    if best_speaker is None or "|" in best_speaker:
-                        best_speaker = speaker
-
-        seg["speaker"] = best_speaker if best_speaker else "Unknown"
-        if "|" in str(seg.get("speaker", "")):
-            seg["overlap"] = True
+    merge_speaker_labels(diar, trans)
 
     # --- Speaker Identification (heuristic) ---
     speaker_names = {}
@@ -877,28 +609,6 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
     return str(note_path)
 
 
-def _format_transcript_for_llm(merged: dict) -> str:
-    """Format merged transcript as compact text for LLM consumption.
-
-    Format: (start) SPEAKER: text
-    """
-    lines = []
-    for seg in merged.get("segments", []):
-        start = seg.get("start", 0)
-        speaker = seg.get("speaker", "Unknown")
-        text = seg.get("text", "")
-        overlap = " [OVERLAP]" if seg.get("overlap") else ""
-
-        h = int(start // 3600)
-        m = int((start % 3600) // 60)
-        s = int(start % 60)
-        ts = f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
-
-        lines.append(f"({ts}) {speaker}{overlap}: {text}")
-
-    return "\n".join(lines)
-
-
 def _pass1_extract_concepts(
     transcript: str,
     target_range: tuple[int, int],
@@ -1137,16 +847,6 @@ def step_quality_gate(task: dict, config: Config) -> str:
     """Run YouTube-specific quality gates on the synthesized note.
 
     Gates: concept_count >= 3, key_points >= 8, density >= 100 chars/min.
-
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        'passed' if all gates pass.
-
-    Raises:
-        StepError: If quality gates fail after max retries.
     """
     slug = task.get("slug", task["id"][:8])
     note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
@@ -1154,14 +854,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
-    # Run standard YouTube quality gates (concepts + key points)
-    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
-    llm = get_llm_client(config)
-    llm.set_task_context(task["id"], logs_conn)
-
-    passed, rounds = quality_gate_retry_loop(
-        note_path, config, quality_gate_youtube, llm, max_rounds=MAX_QUALITY_RETRIES,
-    )
+    passed, rounds = run_video_quality_gate(note_path, config, task["id"])
 
     if not passed:
         content = note_path.read_text(encoding="utf-8")
@@ -1178,82 +871,20 @@ def step_quality_gate(task: dict, config: Config) -> str:
     return "passed"
 
 
-def _check_density(note_path: Path, config: Config) -> None:
-    """Verify note density meets minimum chars/min threshold."""
-    slug = note_path.stem
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
-
-    if not meta_path.exists():
-        return  # Can't check density without metadata
-
-    meta = json.loads(meta_path.read_text())
-    duration_secs = meta.get("duration", 0)
-    if duration_secs < 60:
-        return  # Skip for very short videos
-
-    duration_min = duration_secs / 60
-    note_size = len(note_path.read_text(encoding="utf-8"))
-    density = note_size / duration_min
-    min_density = getattr(config, "youtube_min_density", YOUTUBE_DENSITY_MIN)
-
-    if density < min_density:
-        raise ValueError(
-            f"Note density too low: {density:.0f} chars/min < "
-            f"{min_density} required "
-            f"({note_size} chars / {duration_min:.1f} min)"
-        )
-
-
 # ── MinIO Upload ─────────────────────────────────────────────────────────────
 
 def step_minio_upload(task: dict, config: Config) -> str:
     """Upload video, audio, and transcript to MinIO.
-    
-    Uploads .webm, extracted .mp3, and transcript JSON.
-    Delegates upload to archival.upload_file_to_minio.
-    Updates note frontmatter with MinIO URLs.
 
-    Args:
-        task: Task dict with slug.
-        config: Config dataclass.
-
-    Returns:
-        Status message listing uploaded files.
+    Uploads .webm, extracted .mp3, and transcript JSON. Delegates upload to
+    archival.upload_file_to_minio and updates note frontmatter with MinIO URLs.
     """
-    from agent.archival import upload_file_to_minio
-
     slug = task.get("slug", task["id"][:8])
-    bucket = config.minio_bucket
-    uploaded = []
-
-    # 1. Upload video (.webm)
     video_path = Path(config.temp_dir) / f"{slug}.webm"
-    if video_path.exists():
-        dest = f"{bucket}/videos/{slug}.webm"
-        upload_file_to_minio(video_path, dest, timeout=120)
-        uploaded.append(f"videos/{slug}.webm")
 
-    # 2. Extract and upload MP3
-    mp3_path = Path(config.temp_dir) / f"{slug}.mp3"
-    if video_path.exists():
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(video_path), "-vn",
-             "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0 and mp3_path.exists():
-            dest = f"{bucket}/videos/{slug}.mp3"
-            upload_file_to_minio(mp3_path, dest, timeout=120)
-            uploaded.append(f"videos/{slug}.mp3")
+    uploaded = upload_video_artifacts(slug, config, video_path)
 
-    # 3. Upload merged transcript JSON
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
-    if merged_path.exists():
-        dest = f"{bucket}/transcripts/{slug}.json"
-        upload_file_to_minio(merged_path, dest, timeout=120)
-        uploaded.append(f"transcripts/{slug}.json")
-
-    # 4. Update note frontmatter with MinIO URLs
+    # Update note frontmatter with MinIO URLs
     _update_note_minio_urls(slug, config, uploaded)
 
     return f"Uploaded: {', '.join(uploaded)}"

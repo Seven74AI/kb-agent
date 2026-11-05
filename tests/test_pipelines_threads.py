@@ -24,9 +24,6 @@ from agent.pipelines.threads import (
     step_threads_detect,
     step_threads_extract_text,
     step_threads_extract_video,
-    step_threads_extract_audio,
-    step_threads_diarize,
-    step_threads_transcribe,
     step_threads_merge,
     step_threads_video_synthesize,
     step_threads_text_synthesize,
@@ -35,6 +32,11 @@ from agent.pipelines.threads import (
     step_threads_minio_upload,
     step_threads_git_push,
     GOOGLEBOT_UA,
+)
+from agent.pipelines.video_common import (
+    step_diarize,
+    step_extract_audio,
+    step_transcribe,
 )
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -317,7 +319,7 @@ class TestVideoExtraction:
 # ── Step Tests: Audio Extraction ─────────────────────────────────────────────
 
 class TestAudioExtraction:
-    """Tests for step_threads_extract_audio."""
+    """Tests for step_extract_audio (shared)."""
 
     @patch("subprocess.run")
     def test_extract_audio_success(self, mock_run, config, task_dict, tmp_path):
@@ -338,7 +340,7 @@ class TestAudioExtraction:
             return result
         mock_run.side_effect = fake_run
 
-        result = step_threads_extract_audio(task_dict, config)
+        result = step_extract_audio(task_dict, config)
         data = json.loads(result)
         assert "16k.wav" in data["wav_16k"]
         assert "8k.wav" in data["wav_8k"]
@@ -347,7 +349,7 @@ class TestAudioExtraction:
 # ── Step Tests: Diarization ──────────────────────────────────────────────────
 
 class TestDiarization:
-    """Tests for step_threads_diarize."""
+    """Tests for step_diarize (shared)."""
 
     @patch("subprocess.run")
     def test_diarize_success(self, mock_run, config, task_dict):
@@ -364,18 +366,18 @@ class TestDiarization:
             return result
         mock_run.side_effect = fake_run
 
-        result = step_threads_diarize(task_dict, config)
+        result = step_diarize(task_dict, config)
         assert "diarization.json" in result
 
     def test_diarize_missing_audio(self, config, task_dict):
         with pytest.raises(FileNotFoundError):
-            step_threads_diarize(task_dict, config)
+            step_diarize(task_dict, config)
 
 
 # ── Step Tests: Transcription ────────────────────────────────────────────────
 
 class TestTranscription:
-    """Tests for step_threads_transcribe."""
+    """Tests for step_transcribe (shared)."""
 
     @patch("subprocess.run")
     def test_transcribe_success(self, mock_run, config, task_dict):
@@ -391,12 +393,12 @@ class TestTranscription:
             return result
         mock_run.side_effect = fake_run
 
-        result = step_threads_transcribe(task_dict, config)
+        result = step_transcribe(task_dict, config)
         assert "transcript.json" in result
 
     def test_transcribe_missing_audio(self, config, task_dict):
         with pytest.raises(FileNotFoundError):
-            step_threads_transcribe(task_dict, config)
+            step_transcribe(task_dict, config)
 
 
 # ── Step Tests: Merge ────────────────────────────────────────────────────────
@@ -632,6 +634,6 @@ class TestPipelineRegistration:
         step_names = [s.name for s in steps]
         assert "threads_detect" in step_names
         assert "threads_extract_video" in step_names
-        assert "threads_diarize" in step_names
-        assert "threads_transcribe" in step_names
+        assert "diarize" in step_names
+        assert "transcribe" in step_names
         assert "threads_video_synthesize" in step_names
