@@ -30,6 +30,7 @@ from agent.db import (
     init_db, pause_task, update_step,
 )
 from agent.exceptions import ErrorType, StepError
+from agent.notify import notify_task
 from agent.streaming import log_progress
 
 # ── Pipeline step registry ───────────────────────────────────────────────────
@@ -300,6 +301,19 @@ class Consumer:
         except Exception:  # noqa: BLE001 — logging must never break error handling
             pass
 
+    def _alert_failure(self, task: dict, status: str, msg: str) -> None:
+        """Best-effort Telegram alert for a task failure/pause."""
+        try:
+            notify_task(
+                self.config,
+                task.get("slug") or task["id"][:8],
+                task.get("content_type", ""),
+                status,
+                msg,
+            )
+        except Exception:  # noqa: BLE001 — alerting must never break the consumer
+            pass
+
     async def _execute_task(self, task: dict):
         """Execute all steps for a single task.
 
@@ -347,12 +361,14 @@ class Consumer:
                     print(f"[consumer] Step '{step_name}' FAILED: {error_msg}")
                     fail_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "failed", error_msg)
+                    self._alert_failure(task, "failed", error_msg)
                     return
 
                 elif error_type == "pause":
                     print(f"[consumer] Step '{step_name}' PAUSED: {error_msg}")
                     pause_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "paused", error_msg)
+                    self._alert_failure(task, "paused", error_msg)
                     return
 
                 else:  # retry
@@ -365,6 +381,7 @@ class Consumer:
                         pause_msg = f"Exhausted {retries} retries: {error_msg}"
                         pause_task(self.agent_conn, task_id, pause_msg)
                         update_step(self.agent_conn, step_id, "paused", pause_msg)
+                        self._alert_failure(task, "paused", pause_msg)
                         return
 
                     delay = self.config.retry_delays[
@@ -389,12 +406,14 @@ class Consumer:
                     print(f"[consumer] Step '{step_name}' FAILED (unexpected): {error_msg}")
                     fail_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "failed", error_msg)
+                    self._alert_failure(task, "failed", error_msg)
                     return
 
                 elif default_on_error == "pause":
                     print(f"[consumer] Step '{step_name}' PAUSED (unexpected): {error_msg}")
                     pause_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "paused", error_msg)
+                    self._alert_failure(task, "paused", error_msg)
                     return
 
                 else:  # default retry
@@ -407,6 +426,7 @@ class Consumer:
                         pause_msg = f"Exhausted {retries} retries: {error_msg}"
                         pause_task(self.agent_conn, task_id, pause_msg)
                         update_step(self.agent_conn, step_id, "paused", pause_msg)
+                        self._alert_failure(task, "paused", pause_msg)
                         return
 
                     delay = self.config.retry_delays[

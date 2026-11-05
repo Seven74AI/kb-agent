@@ -34,8 +34,10 @@ from agent.config import load_config  # noqa: E402
 sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
+    finish_batch_run,
     init_db,
     list_ingest_by_status,
+    record_batch_run,
     update_ingest_status,
 )
 from agent.core.batch_lock import acquire, release  # noqa: E402
@@ -98,7 +100,14 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
     return None, "no video file found after download"
 
 
-def _process_videos(video_links: list[dict], config, conn) -> None:
+def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, list[str]]:
+    """Download + batch-transcribe + dispatch video links.
+
+    Returns (failed, dispatched, causes) for the batch-run summary.
+    """
+    failed = 0
+    dispatched = 0
+    causes: list[str] = []
     base = Path(config.temp_dir)
 
     # 1. download all videos, staged per content type
@@ -108,6 +117,8 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
         vp, err = _download_video(q, config)
         if vp is None:
             update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
+            failed += 1
+            causes.append(f"{q['slug']}: {err}")
             print(f"  [failed] {q['slug']}: {err}")
             continue
         ctype = q["content_type"]
@@ -120,7 +131,7 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
 
     if not staged:
         print("No videos downloaded; nothing to transcribe.")
-        return
+        return failed, dispatched, causes
 
     # 2. one Modal run per content type (per-type language/hotwords)
     for ctype, items in staged.items():
@@ -138,6 +149,8 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
         if r.returncode != 0:
             for q, _ in items:
                 update_ingest_status(conn, q["id"], "queued", error=f"batch_transcribe failed (exit {r.returncode})")
+            failed += len(items)
+            causes.append(f"{ctype}: batch_transcribe exit {r.returncode}")
             print(f"  [error] batch_transcribe failed ({r.returncode}); leaving {ctype} queued")
             continue
 
@@ -146,6 +159,8 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
             merged = out_dir / f"{q['slug']}.json"
             if not merged.exists():
                 update_ingest_status(conn, q["id"], "queued", error="no merged transcript produced")
+                failed += 1
+                causes.append(f"{q['slug']}: no merged transcript")
                 print(f"  [warn] {q['slug']}: no merged transcript; leaving queued")
                 continue
             try:
@@ -153,6 +168,8 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
                 upload_file_to_minio(merged, f"{config.minio_bucket}/transcripts/{q['slug']}.json")
             except Exception as exc:  # noqa: BLE001
                 update_ingest_status(conn, q["id"], "queued", error=f"upload failed: {exc}")
+                failed += 1
+                causes.append(f"{q['slug']}: upload failed")
                 print(f"  [warn] {q['slug']}: upload failed ({exc}); leaving queued")
                 continue
             update_ingest_status(conn, q["id"], "dispatching")
@@ -162,7 +179,10 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
                 tags=q.get("tags"),
             )
             update_ingest_status(conn, q["id"], "dispatched")
+            dispatched += 1
             print(f"  [dispatch] {q['slug']} -> {rr.get('task_id', rr.get('status'))}")
+
+    return failed, dispatched, causes
 
 
 def main() -> None:
@@ -170,35 +190,55 @@ def main() -> None:
     if not acquire(config):
         print("Another batch run is in progress; exiting.")
         return
+    conn = None
+    run_id = None
+    total = 0
+    failed = 0
+    dispatched = 0
+    causes: list[str] = []
     try:
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
-        try:
-            queued = list_ingest_by_status(conn, "queued")
-            if not queued:
-                print("No queued ingest links.")
-                return
+        run_id = record_batch_run(conn)
+        queued = list_ingest_by_status(conn, "queued")
+        if not queued:
+            print("No queued ingest links.")
+            finish_batch_run(conn, run_id, "ok", 0, 0, 0, "no queued items")
+            return
 
-            print(f"Queued: {len(queued)} link(s)")
-            video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
-            non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
+        total = len(queued)
+        print(f"Queued: {total} link(s)")
+        video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
+        non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
 
-            for q in non_video:
-                r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
-                status = r.get("status")
-                if status in ("pending", "paused", "skipped"):
-                    update_ingest_status(conn, q["id"], "dispatched")
-                    print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
-                else:
-                    update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
-                    print(f"  [failed] {q['slug']} -> {status}")
+        for q in non_video:
+            r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
+            status = r.get("status")
+            if status in ("pending", "paused", "skipped"):
+                update_ingest_status(conn, q["id"], "dispatched")
+                dispatched += 1
+                print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
+            else:
+                update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
+                failed += 1
+                causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or status}")
+                print(f"  [failed] {q['slug']} -> {status}")
 
-            if video:
-                _process_videos(video, config, conn)
+        if video:
+            vf, vd, vcauses = _process_videos(video, config, conn)
+            failed += vf
+            dispatched += vd
+            causes += vcauses
 
-            print(f"DONE: {len(non_video)} non-video + {len(video)} video processed")
-        finally:
-            conn.close()
+        summary = "; ".join(dict.fromkeys(causes[:5])) or None
+        finish_batch_run(conn, run_id, "failed" if failed else "ok", total, failed, dispatched, summary)
+        print(f"DONE: {total} processed ({failed} failed, {dispatched} dispatched)")
+    except Exception as exc:  # noqa: BLE001 — record the crash, then re-raise for the cron
+        if conn is not None and run_id is not None:
+            finish_batch_run(conn, run_id, "crashed", total, failed, dispatched, str(exc))
+        raise
     finally:
+        if conn is not None:
+            conn.close()
         release(config)
 
 

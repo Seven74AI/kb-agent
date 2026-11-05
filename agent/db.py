@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
     created_at TEXT DEFAULT (datetime('now')),
     dispatched_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS batch_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    total INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    dispatched INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    summary TEXT
+);
 """
 
 LOGS_SCHEMA = """
@@ -277,6 +288,30 @@ def list_ingest_queue(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def record_batch_run(conn: sqlite3.Connection) -> int:
+    """Insert a new batch run (status='running') and return its id."""
+    with conn:
+        return conn.execute("INSERT INTO batch_runs (status) VALUES ('running')").lastrowid
+
+
+def finish_batch_run(conn: sqlite3.Connection, run_id: int, status: str,
+                     total: int, failed: int, dispatched: int, summary: str | None = None) -> None:
+    """Mark a batch run complete with its outcome."""
+    with conn:
+        conn.execute(
+            "UPDATE batch_runs SET status=?, total=?, failed=?, dispatched=?, "
+            "summary=?, finished_at=datetime('now') WHERE id=?",
+            (status, total, failed, dispatched, summary, run_id),
+        )
+
+
+def get_last_batch_run(conn: sqlite3.Connection) -> dict | None:
+    """Return the most recent batch run (for the dashboard)."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM batch_runs ORDER BY id DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
 def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                          error: str | None = None) -> None:
     """Transition an ingest-queue row to a new status."""
@@ -291,6 +326,12 @@ def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                 "UPDATE ingest_queue SET status = ?, error = ? WHERE id = ?",
                 (status, error, ingest_id),
             )
+
+
+def remove_ingest(conn: sqlite3.Connection, ingest_id: str) -> bool:
+    """Delete an ingest-queue row (the dashboard's escape hatch). Returns True if removed."""
+    with conn:
+        return conn.execute("DELETE FROM ingest_queue WHERE id = ?", (ingest_id,)).rowcount > 0
 
 
 def claim_task(conn: sqlite3.Connection) -> dict | None:
