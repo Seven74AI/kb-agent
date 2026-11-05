@@ -111,6 +111,24 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+Stable-content helpers for comparing raw HTTP bodies. `normalize_content` applies, in
+order: CRLF/CR → LF, volatile-header-line removal, trailing-whitespace strip per line,
+collapse of 3+ consecutive newlines to two, and trailing empty-line removal. Leading
+blank lines are kept. `sha256_fingerprint` returns the lowercase hex SHA-256 of the
+normalized UTF-8 bytes.
+
+**Header stripping is name-prefix based.** Any line whose start (after optional
+whitespace) is a volatile header name — `Date`, `Last-Modified`, `ETag`, `Server`,
+`X-Cache`, `X-Cache-Hits` (case-insensitive) — followed by `:` is removed, including
+such lines in body text. Use it for raw HTTP bodies, not arbitrary prose.
+
+**Not yet wired into polling.** Body polling (`content_fingerprint`) still uses
+`normalize_source_content`, which strips leading *and* trailing blank lines and
+collapses internal whitespace runs to a single space. These helpers are available for
+the follow-up that moves stable watch polling onto `normalize_content`.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -122,6 +140,7 @@ so a body that begins with a `word: value` line is left intact.
 | `dedup_check` | no | grep vault |
 | `slugify` | yes | — |
 | `check_content_change` / `content_fingerprint` | yes | — |
+| `normalize_content` / `sha256_fingerprint` | yes | — |
 | `resolve_pipeline_steps` | yes | — |
 | `submit_url` | orchestration | via `SubmitDependencies` |
 | `list_tasks` / `get_task` | no | SQLite |

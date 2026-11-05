@@ -262,3 +262,37 @@ def test_normalize_content_accepts_utf8_decoded_text():
 )
 def test_normalize_content_drops_volatile_headers_case_insensitive(header_line: str):
     assert normalize_content(f"{header_line}\ncontent") == "content"
+
+
+def test_normalize_content_drops_trailing_blank_lines():
+    assert normalize_content("hello\n\n\n") == "hello"
+    assert normalize_content("x\n\n") == "x"
+    assert normalize_content("a\nb\n") == "a\nb"
+
+
+def test_normalize_content_newline_only_input():
+    assert normalize_content("") == ""
+    assert normalize_content("\n") == ""
+    assert normalize_content("\n\n\n") == ""
+
+
+def test_normalize_content_keeps_leading_blank_lines():
+    # Unlike normalize_source_content, leading empty lines are preserved.
+    assert normalize_content("\n\nhello") == "\n\nhello"
+
+
+def test_normalize_content_drops_whitespace_indented_volatile_headers():
+    # _VOLATILE_HEADER allows optional leading whitespace before the name.
+    assert normalize_content("  Date: now\ncontent") == "content"
+    assert normalize_content("\tETag: x\ncontent") == "content"
+
+
+def test_normalize_content_all_volatile_headers_becomes_empty():
+    raw = "Date: now\nETag: x\nServer: nginx\n"
+    assert normalize_content(raw) == ""
+
+
+def test_normalize_content_strips_volatile_names_in_body_text():
+    # Header stripping is name-prefix based: a body line beginning with a
+    # volatile header name is removed too. Documented, not an accident.
+    assert normalize_content("Date: fictional timeline\nbody") == "body"

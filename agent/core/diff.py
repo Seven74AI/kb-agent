@@ -16,6 +16,14 @@ Applied in order:
    matching ``name:`` at the start of a line (optional leading whitespace).
 4. Strip trailing whitespace on each remaining line.
 5. Collapse runs of three or more consecutive ``LF`` characters to exactly two.
+6. Drop trailing empty lines.
+
+Header stripping (step 3) is name-prefix based: any line that begins with a
+volatile header name followed by ``:`` is removed, including such lines in body
+text. Leading empty lines are kept. This differs from
+:func:`normalize_source_content`, which strips leading *and* trailing blank lines
+and collapses internal whitespace runs to a single space; body polling
+(:func:`content_fingerprint`) still uses that older path.
 
 :func:`sha256_fingerprint` returns the lowercase hexadecimal SHA-256 digest of
 the UTF-8 encoding of the normalized string. These helpers are pure: no I/O and
