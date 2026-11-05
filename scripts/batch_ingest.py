@@ -22,6 +22,11 @@ os.environ.pop("PYTHONPATH", None)
 
 _bootstrap_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_bootstrap_root))
+# The cron runs a COPY of this script under ~/.hermes/scripts/, so parents[1]
+# points at ~/.hermes, not the repo. Add the known install dir so `agent.*`
+# imports resolve there too; load_config().kb_agent_dir below is authoritative
+# for non-default installs.
+sys.path.insert(0, "/root/kb-agent")
 
 from agent.archival import upload_file_to_minio  # noqa: E402
 from agent.config import load_config  # noqa: E402
