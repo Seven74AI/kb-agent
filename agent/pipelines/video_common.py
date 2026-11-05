@@ -20,7 +20,7 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client
-from agent.quality import quality_gate_retry_loop, quality_gate_youtube
+from agent.quality import quality_gate_retry_loop, quality_gate_threads_video, quality_gate_youtube
 from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
 
 # Density target for video notes (chars/min)
@@ -382,6 +382,18 @@ def run_video_quality_gate(note_path: Path, config: Config, task_id: str,
 
     return quality_gate_retry_loop(
         note_path, config, quality_gate_youtube, llm, max_rounds=max_rounds,
+    )
+
+
+def run_threads_video_quality_gate(note_path: Path, config: Config, task_id: str,
+                                   max_rounds: int = MAX_QUALITY_RETRIES) -> tuple[bool, int]:
+    """Run the Threads video quality gate (key points only) with LLM retry."""
+    logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
+    llm = get_llm_client(config)
+    llm.set_task_context(task_id, logs_conn)
+
+    return quality_gate_retry_loop(
+        note_path, config, quality_gate_threads_video, llm, max_rounds=max_rounds,
     )
 
 

@@ -32,7 +32,7 @@ from agent.pipelines.video_common import (
     _slug_path,
     format_transcript_for_llm,
     merge_speaker_labels,
-    run_video_quality_gate,
+    run_threads_video_quality_gate,
     step_diarize,
     step_extract_audio,
     step_fetch_transcript,
@@ -877,7 +877,7 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         raise FileNotFoundError(f"Note not found for quality gate: {note_path}")
 
     if "video" in content_type:
-        passed, rounds = run_video_quality_gate(note_path, config, task["id"])
+        passed, rounds = run_threads_video_quality_gate(note_path, config, task["id"])
         if not passed:
             content = note_path.read_text(encoding="utf-8")
             raise StepError(
