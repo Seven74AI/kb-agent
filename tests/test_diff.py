@@ -84,6 +84,31 @@ def test_sha256_fingerprint_is_lowercase_hex_of_normalized_utf8():
     assert len(sha256_fingerprint(content)) == 64
 
 
+def test_sha256_fingerprint_stable_when_only_volatile_headers_change():
+    # Volatile headers must not perturb the fingerprint: same body with different
+    # Date/ETag values hashes identically.
+    body = "article body\nline two"
+    a = "Date: Mon, 02 Nov 2026 00:00:00 GMT\nETag: \"old\"\n" + body
+    b = "Date: Tue, 03 Nov 2026 12:00:00 GMT\nETag: \"new\"\n" + body
+    assert sha256_fingerprint(a) == sha256_fingerprint(b)
+
+
+def test_normalize_content_invalid_utf8_raises():
+    # normalize_content decodes bytes as strict UTF-8; invalid bytes raise
+    # (unlike normalize_source_content, which uses errors="replace").
+    with pytest.raises(UnicodeDecodeError):
+        normalize_content(b"\xff\xfe invalid utf-8")
+
+
+def test_normalizers_diverge_on_volatile_looking_body_line():
+    # Documented divergence: normalize_content drops any volatile-looking line,
+    # while normalize_source_content preserves it when no HTTP status line is
+    # present.
+    body = "Date: 2026-11-04\nhello world"
+    assert normalize_content(body) == "hello world"
+    assert normalize_source_content(body) == body
+
+
 def test_content_fingerprint_is_stable():
     body = "Hello, watched source."
     assert content_fingerprint(body) == content_fingerprint(body.encode("utf-8"))

@@ -10,8 +10,10 @@ from agent.core.diff import (
     ContentChangeStatus,
     check_content_change,
     content_fingerprint,
+    normalize_content,
     normalize_etag,
     normalize_source_content,
+    sha256_fingerprint,
 )
 from agent.core.note import get_note
 from agent.core.pipelines import PIPELINE_STEPS, steps_for_content_type
@@ -49,6 +51,7 @@ __all__ = [
     "items_to_urls",
     "list_tasks",
     "list_watch_sources",
+    "normalize_content",
     "normalize_etag",
     "normalize_reason_pattern",
     "normalize_source_content",
@@ -60,6 +63,7 @@ __all__ = [
     "run_watch_scheduler",
     "retry_task",
     "search_notes",
+    "sha256_fingerprint",
     "slugify",
     "steps_for_content_type",
     "submit_plan",

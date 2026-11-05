@@ -111,6 +111,30 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+Standalone helpers for fingerprinting literal content (not HTTP envelopes).
+`normalize_content` accepts `str` (or `bytes`, decoded as strict UTF-8 — invalid
+bytes raise `UnicodeDecodeError`) and, in order: folds CRLF/lone CR to LF, drops
+volatile header lines (`Date:`, `Last-Modified:`, `ETag:`, `Server:`, `X-Cache:`,
+`X-Cache-Hits:`, case-insensitive, anchored at line start), strips trailing
+whitespace per line, removes trailing empty lines, and collapses runs of 3+ LF to
+exactly 2. `sha256_fingerprint` returns the bare lowercase hex SHA-256 of the
+normalized text.
+
+**When to use which.** `normalize_source_content` is for fetched source bodies: it
+strips a genuine `HTTP/...` status line + envelope headers, collapses internal
+whitespace, and trims leading blank lines. `normalize_content` is for standalone
+payloads where volatile header lines must not perturb the fingerprint and literal
+line structure matters — it drops any volatile-looking line (even without a status
+line), keeps leading blank lines, and preserves internal whitespace. The two
+normalizers intentionally diverge on body text that begins with a volatile-looking
+line, so do not conflate them.
+
+**Hash format.** `sha256_fingerprint` returns bare hex; `content_fingerprint`
+returns `sha256:<hex>`. Both are SHA-256 over normalized text but over different
+normalizers — do not mix the two formats at a persistence boundary.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |

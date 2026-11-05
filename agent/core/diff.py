@@ -44,7 +44,23 @@ _EXCESS_NEWLINES = re.compile(r"\n{3,}")
 
 
 def normalize_content(content: str | bytes) -> str:
-    """Return normalized text for stable comparison and fingerprinting."""
+    """Return normalized text for stable comparison and fingerprinting.
+
+    Accepts ``str``; ``bytes`` are decoded as strict UTF-8 (invalid bytes raise
+    ``UnicodeDecodeError``, unlike :func:`normalize_source_content` which uses
+    ``errors="replace"``). Normalization, in order: CRLF/lone CR folded to LF;
+    volatile header lines dropped (``Date:``, ``Last-Modified:``, ``ETag:``,
+    ``Server:``, ``X-Cache:``, ``X-Cache-Hits:``, case-insensitive, anchored at
+    line start); trailing whitespace stripped per line; trailing empty lines
+    removed; runs of 3+ LF collapsed to exactly 2.
+
+    Unlike :func:`normalize_source_content`, leading blank lines are kept,
+    internal whitespace is not collapsed, and volatile-looking lines are dropped
+    even without an ``HTTP/...`` status line. Prefer
+    :func:`normalize_source_content` for fetched source bodies (it strips a real
+    HTTP envelope and preserves body ``word: value`` lines); use this for
+    standalone payloads where volatile headers must not perturb the fingerprint.
+    """
     if isinstance(content, bytes):
         text = content.decode("utf-8")
     else:
@@ -63,7 +79,14 @@ def normalize_content(content: str | bytes) -> str:
 
 
 def sha256_fingerprint(content: str | bytes) -> str:
-    """Return lowercase hex SHA-256 of UTF-8 bytes of normalized *content*."""
+    """Return lowercase hex SHA-256 of UTF-8 bytes of normalized *content*.
+
+    Returns bare 64-char hex, unlike :func:`content_fingerprint` which prefixes
+    ``sha256:``. Both digest the SHA-256 of normalized text but over different
+    normalizers (:func:`normalize_content` vs :func:`normalize_source_content`),
+    so the two are not interchangeable and must not be mixed at a persistence
+    boundary.
+    """
     normalized = normalize_content(content)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
