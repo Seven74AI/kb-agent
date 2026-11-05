@@ -411,6 +411,22 @@ def check_density(note_path: Path, config: Config) -> None:
         )
 
 
+def strip_code_fence(content: str) -> str:
+    """Strip a leading ```yaml/``` fence and trailing ``` from LLM note output.
+
+    The synthesis LLM sometimes wraps the YAML frontmatter in a ```yaml code
+    fence, which breaks the frontmatter parser + quality gate. Strip it.
+    """
+    content = (content or "").strip()
+    for prefix in ("```yaml", "```markdown", "```"):
+        if content.startswith(prefix):
+            content = content[len(prefix):].lstrip()
+            break
+    if content.endswith("```"):
+        content = content[:-3].rstrip()
+    return content.strip() + "\n"
+
+
 # ── MinIO Upload ─────────────────────────────────────────────────────────────
 
 def upload_video_artifacts(slug: str, config: Config, video_path: Path) -> list[str]:
