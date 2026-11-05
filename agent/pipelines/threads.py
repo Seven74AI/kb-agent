@@ -26,6 +26,7 @@ from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
+from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
@@ -890,14 +891,7 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
     else:
         # Text posts: simple size + quote check
         content = note_path.read_text(encoding="utf-8")
-        quote_count = 0
-        for line in content.split("\n"):
-            s = line.strip()
-            # strip a leading bullet marker (notes use "- > quote" as well as "> quote")
-            if s.startswith("- ") or s.startswith("* "):
-                s = s[2:].strip()
-            if s.startswith("> "):
-                quote_count += 1
+        quote_count = count_quotes(content.split("\n"))
         size = len(content)
 
         passed = quote_count >= 2 and size >= 2000
