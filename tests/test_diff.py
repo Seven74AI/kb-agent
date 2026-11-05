@@ -46,6 +46,28 @@ def test_normalize_content_keeps_non_volatile_colon_lines():
     assert normalize_content(body) == body
 
 
+def test_normalize_content_strips_remaining_volatile_headers():
+    with_headers = (
+        "Last-Modified: Tue, 04 Nov 2026 00:00:00 GMT\n"
+        "X-Cache: HIT\n"
+        "X-Cache-Hits: 7\n"
+        "Body line"
+    )
+    assert normalize_content(with_headers) == "Body line"
+
+
+def test_normalize_content_keeps_indented_header_like_lines():
+    # Matching is exact (no leading whitespace): an indented line is body
+    # content, not a volatile header, so it must survive normalization.
+    body = " Date: 2026-01-01\n\nActual body"
+    assert normalize_content(body) == body
+
+
+def test_normalize_content_decodes_invalid_utf8_bytes_with_replacement():
+    assert normalize_content(b"bad \xff bytes") == "bad \ufffd bytes"
+    assert sha256_fingerprint(b"bad \xff bytes") == sha256_fingerprint("bad \ufffd bytes")
+
+
 def test_sha256_fingerprint_differs_on_substantive_change():
     assert sha256_fingerprint("version one") != sha256_fingerprint("version two")
 

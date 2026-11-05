@@ -12,12 +12,15 @@ Content normalization (``normalize_content``)
 ---------------------------------------------
 Applied before :func:`sha256_fingerprint`:
 
-* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8, replacing invalid byte
+  sequences with U+FFFD (same policy as :func:`normalize_source_content`).
 * Normalize CRLF and lone CR to LF.
 * Strip trailing whitespace on each line.
 * Collapse runs of three or more consecutive LF to two.
-* Drop lines that start with any of: ``Date:``, ``Last-Modified:``, ``ETag:``,
-  ``Server:``, ``X-Cache:``, ``X-Cache-Hits:``.
+* Drop lines that begin exactly (case-sensitive, no leading whitespace) with any
+  of: ``Date:``, ``Last-Modified:``, ``ETag:``, ``Server:``, ``X-Cache:``,
+  ``X-Cache-Hits:``. Indented body lines such as ``" Date: 2026-01-01"`` are
+  kept.
 
 Hash families
 -------------
@@ -80,7 +83,7 @@ def normalize_etag(etag: str) -> str:
 def normalize_content(content: str | bytes) -> str:
     """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
     if isinstance(content, bytes):
-        text = content.decode("utf-8")
+        text = content.decode("utf-8", errors="replace")
     else:
         text = content
 

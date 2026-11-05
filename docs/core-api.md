@@ -111,6 +111,18 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+Lighter normalization for generic content comparison (distinct from
+`normalize_source_content`, which is used for body polling). Applied in order:
+decode `bytes` as UTF-8 with invalid sequences replaced by U+FFFD; normalize
+CRLF/lone CR to LF; drop lines that begin exactly (case-sensitive, no leading
+whitespace) with a volatile header name (`Date:`, `Last-Modified:`, `ETag:`,
+`Server:`, `X-Cache:`, `X-Cache-Hits:`); strip trailing whitespace; collapse runs
+of 3+ newlines to two. `sha256_fingerprint` returns the lowercase hex SHA-256 of
+the normalized UTF-8 text (no `sha256:` prefix — a distinct hash family from
+`content_fingerprint`).
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
@@ -122,6 +134,7 @@ so a body that begins with a `word: value` line is left intact.
 | `dedup_check` | no | grep vault |
 | `slugify` | yes | — |
 | `check_content_change` / `content_fingerprint` | yes | — |
+| `normalize_content` / `sha256_fingerprint` | yes | — |
 | `resolve_pipeline_steps` | yes | — |
 | `submit_url` | orchestration | via `SubmitDependencies` |
 | `list_tasks` / `get_task` | no | SQLite |
