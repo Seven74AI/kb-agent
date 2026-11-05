@@ -474,7 +474,7 @@ def upload_note_archive(slug: str, config: Config, note_path: Path, folder: str)
 
     bucket = config.minio_bucket
     note_key = f"{folder}/{slug}.md"
-    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}")
+    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}", tailscale_base=config.minio_tailscale_base)
 
     content = note_path.read_text(encoding="utf-8")
     updated = re.sub(

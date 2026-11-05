@@ -2,7 +2,7 @@
 date: YYYY
 source: Author Name — Book Title (YYYY, Publisher, XXXp.)
 source_url: <optional URL>
-source_file: <MinIO URL — http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/books/<slug>.epub>
+source_file: <MinIO URL — http://minio.example.com/knowledge-base/books/<slug>.epub>
 confidence: verified | plausible | emerging | debunked | untested
 tags: [tag1, tag2, tag3]
 ---

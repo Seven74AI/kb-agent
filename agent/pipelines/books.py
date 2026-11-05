@@ -1048,7 +1048,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
         except StepError:
             pass  # Source file upload is best-effort
 
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
+    tailscale_base = config.minio_tailscale_base
 
     # Update note frontmatter with source_files URLs
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
