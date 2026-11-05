@@ -54,6 +54,27 @@ def test_normalize_content_drops_volatile_header_lines():
     assert "body line" in normalized
 
 
+def test_normalize_content_collapses_blanks_left_by_header_removal():
+    # A dropped volatile header line must not leave adjacent blank lines as an
+    # excess run: collapse runs *after* header removal.
+    raw = "a\n\n\nDate: Mon\n\n\nb"
+    assert normalize_content(raw) == "a\n\nb"
+
+
+def test_normalize_content_keeps_indented_volatile_header():
+    # Lines with leading whitespace do not "start exactly with" the prefix, so
+    # they are kept as content.
+    raw = "  Date: Mon\nbody"
+    assert normalize_content(raw) == raw
+
+
+def test_normalize_content_replaces_invalid_utf8_bytes():
+    # Matches normalize_source_content: invalid UTF-8 bytes decode with a
+    # replacement character instead of raising UnicodeDecodeError.
+    raw = b"prefix\xff\xfesuffix"
+    assert normalize_content(raw) == "prefix\ufffd\ufffdsuffix"
+
+
 def test_sha256_fingerprint_stable_for_equivalent_text():
     a = "same\r\ncontent  \n"
     b = "same\ncontent\n"

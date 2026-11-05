@@ -20,12 +20,16 @@ per source.
 ----------------------------------------------
 :func:`normalize_content` prepares arbitrary text for stable hashing:
 
-* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8 with ``errors="replace"``
+  (matching :func:`normalize_source_content`).
 * Normalize CRLF and lone CR to LF.
 * Strip trailing whitespace on each line.
-* Collapse three or more consecutive LF characters to two.
 * Drop volatile header lines that start exactly with ``Date:``, ``Last-Modified:``,
-  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
+  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``. A line with leading
+  whitespace (``  Date: ...``) is *not* dropped.
+* Collapse three or more consecutive LF characters to two. Collapse runs after
+  header removal, so a dropped header line does not leave an excess blank line
+  behind.
 
 :func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest of
 ``normalize_content(content)`` encoded as UTF-8 bytes.
@@ -70,21 +74,25 @@ class ContentChangeResult:
 def normalize_content(content: str | bytes) -> str:
     """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
     if isinstance(content, bytes):
-        text = content.decode("utf-8")
+        text = content.decode("utf-8", errors="replace")
     else:
         text = content
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in text.split("\n")]
     text = "\n".join(lines)
-    text = re.sub(r"\n{3,}", "\n\n", text)
 
+    # Drop volatile header lines before collapsing blank runs, so a removed
+    # header does not leave two blank lines adjacent (an excess blank run).
     filtered: list[str] = []
     for line in text.split("\n"):
         if line.startswith(_VOLATILE_HEADER_PREFIXES):
             continue
         filtered.append(line)
-    return "\n".join(filtered)
+    text = "\n".join(filtered)
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
 
 
 def sha256_fingerprint(content: str | bytes) -> str:

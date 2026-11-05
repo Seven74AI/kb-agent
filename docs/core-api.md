@@ -111,6 +111,25 @@ polled.
 with a status line; header stripping only applies to a genuine `HTTP/...` status line,
 so a body that begins with a `word: value` line is left intact.
 
+### `normalize_content` / `sha256_fingerprint`
+
+Lower-level helpers for stable hashing of already-separated text (not a full HTTP
+response). `normalize_content` normalizes CRLF/CR → LF, strips trailing whitespace per
+line, drops volatile header lines (`Date:`, `Last-Modified:`, `ETag:`, `Server:`,
+`X-Cache:`, `X-Cache-Hits:`), and collapses runs of 3+ blank lines to 2. Blank-line
+collapse runs *after* header removal so a dropped header does not leave an excess blank
+line. `bytes` input decodes as UTF-8 with `errors="replace"` (same as
+`normalize_source_content`); `str` is accepted as-is. `sha256_fingerprint` returns the
+bare lowercase hex digest (no `sha256:` prefix) of the normalized text.
+
+**When to use which.** Use `check_content_change` / `content_fingerprint` /
+`normalize_source_content` for the watch-source poll flow: they handle raw HTTP envelopes
+and produce the `sha256:<hex>` family stored in `last_content_hash`. Use
+`normalize_content` / `sha256_fingerprint` for standalone text normalization or hashing
+when you have no HTTP envelope and want the bare hex digest. The two pairs are separate
+hash families (bare hex vs `sha256:` prefix) — do not mix their outputs in the same
+`last_content_hash` field.
+
 ## Pure vs I/O-bound inventory
 
 | Function | Pure? | External deps |
