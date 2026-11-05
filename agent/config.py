@@ -51,6 +51,7 @@ class Config:
     youtube_min_key_points: int = 8
     youtube_min_density: int = 100
     threads_video_min_density: int = 100
+    threads_video_min_key_points: int = 3
     threads_text_min_quotes: int = 2
     threads_text_min_size: int = 2000
     ig_reel_min_concepts: int = 2
