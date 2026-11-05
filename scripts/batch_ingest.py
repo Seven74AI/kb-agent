@@ -69,8 +69,8 @@ TRANSCRIBE_ARGS = {
 }
 
 
-def _download_video(q: dict, config) -> Path | None:
-    """Run one link's download-phase steps and return the produced video file."""
+def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
+    """Run one link's download-phase steps. Returns (video_path, error)."""
     from agent.pipelines import get_pipeline
 
     pipeline = get_pipeline(q["content_type"])
@@ -84,21 +84,18 @@ def _download_video(q: dict, config) -> Path | None:
     for name in VIDEO_DOWNLOAD_STEPS[q["content_type"]]:
         fn = step_fns.get(name)
         if fn is None:
-            print(f"  [warn] {q['slug']}: download step '{name}' not found")
-            return None
+            return None, f"download step '{name}' not found"
         try:
             fn(task, config)
         except Exception as exc:  # noqa: BLE001 — download is best-effort per link
-            print(f"  [skip] {q['slug']}: {name} failed ({exc})")
-            return None
+            return None, f"{name} failed: {exc}"
 
     slug = q["slug"]
     tmp = Path(config.temp_dir)
     for p in tmp.iterdir():
         if p.name.startswith(slug) and p.suffix.lower() in VIDEO_EXTS:
-            return p
-    print(f"  [warn] {q['slug']}: no video file found after download")
-    return None
+            return p, None
+    return None, "no video file found after download"
 
 
 def _process_videos(video_links: list[dict], config, conn) -> None:
@@ -107,8 +104,10 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
     # 1. download all videos, staged per content type
     staged: dict[str, list[tuple[dict, Path]]] = {}
     for q in video_links:
-        vp = _download_video(q, config)
+        vp, err = _download_video(q, config)
         if vp is None:
+            update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
+            print(f"  [failed] {q['slug']}: {err}")
             continue
         ctype = q["content_type"]
         bdir = base / "batch_videos" / ctype
@@ -135,6 +134,8 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
         )
         print((r.stdout or r.stderr)[-1500:])
         if r.returncode != 0:
+            for q, _ in items:
+                update_ingest_status(conn, q["id"], "queued", error=f"batch_transcribe failed (exit {r.returncode})")
             print(f"  [error] batch_transcribe failed ({r.returncode}); leaving {ctype} queued")
             continue
 
@@ -142,12 +143,14 @@ def _process_videos(video_links: list[dict], config, conn) -> None:
         for q, vdest in items:
             merged = out_dir / f"{q['slug']}.json"
             if not merged.exists():
+                update_ingest_status(conn, q["id"], "queued", error="no merged transcript produced")
                 print(f"  [warn] {q['slug']}: no merged transcript; leaving queued")
                 continue
             try:
                 upload_file_to_minio(vdest, f"{config.minio_bucket}/videos/{q['slug']}{vdest.suffix.lower()}")
                 upload_file_to_minio(merged, f"{config.minio_bucket}/transcripts/{q['slug']}.json")
             except Exception as exc:  # noqa: BLE001
+                update_ingest_status(conn, q["id"], "queued", error=f"upload failed: {exc}")
                 print(f"  [warn] {q['slug']}: upload failed ({exc}); leaving queued")
                 continue
             update_ingest_status(conn, q["id"], "dispatching")

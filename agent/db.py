@@ -268,6 +268,15 @@ def list_ingest_by_status(conn: sqlite3.Connection, status: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_ingest_queue(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    """List all ingest-queue rows (any status), newest first — for the dashboard."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM ingest_queue ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                          error: str | None = None) -> None:
     """Transition an ingest-queue row to a new status."""
