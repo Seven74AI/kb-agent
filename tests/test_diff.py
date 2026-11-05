@@ -54,6 +54,22 @@ def test_normalize_content_drops_volatile_header_lines():
     assert "body line" in normalized
 
 
+def test_normalize_content_collapses_blank_lines_left_by_header_removal():
+    # Header filtering happens before blank-line collapse; otherwise removing a
+    # volatile line can leave 3+ newlines that are never re-collapsed, so two
+    # payloads equivalent modulo a `Date:` header would fingerprint differently.
+    with_header = "one\n\nDate: Mon\n\n\ntwo"
+    without_header = "one\n\n\ntwo"
+    assert normalize_content(with_header) == normalize_content(without_header)
+    assert normalize_content(with_header) == "one\n\ntwo"
+
+
+def test_normalize_content_replaces_invalid_utf8_bytes():
+    # Matches normalize_source_content decode policy: invalid bytes are
+    # replaced, never raised.
+    assert normalize_content(b"ok \xff") == "ok \ufffd"
+
+
 def test_sha256_fingerprint_stable_for_equivalent_text():
     a = "same\r\ncontent  \n"
     b = "same\ncontent\n"

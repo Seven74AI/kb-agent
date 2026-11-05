@@ -20,15 +20,26 @@ per source.
 ----------------------------------------------
 :func:`normalize_content` prepares arbitrary text for stable hashing:
 
-* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8, replacing invalid bytes
+  (same policy as :func:`normalize_source_content`).
 * Normalize CRLF and lone CR to LF.
 * Strip trailing whitespace on each line.
-* Collapse three or more consecutive LF characters to two.
 * Drop volatile header lines that start exactly with ``Date:``, ``Last-Modified:``,
   ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
+* Collapse three or more consecutive LF characters to two.
 
 :func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest of
-``normalize_content(content)`` encoded as UTF-8 bytes.
+``normalize_content(content)`` encoded as UTF-8 bytes, without the ``sha256:``
+prefix used by :func:`content_fingerprint`.
+
+These helpers form a second, distinct fingerprint family from
+:func:`normalize_source_content` / :func:`content_fingerprint`: they do **not**
+strip an HTTP envelope and do **not** collapse internal whitespace, so hashes
+from one family never match the other. Use ``normalize_source_content`` /
+``content_fingerprint`` for watched-source body polling (the path driven by
+:func:`check_content_change`); use ``normalize_content`` /
+``sha256_fingerprint`` only when text normalization without HTTP-envelope
+handling is wanted.
 """
 
 from __future__ import annotations
@@ -70,21 +81,22 @@ class ContentChangeResult:
 def normalize_content(content: str | bytes) -> str:
     """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
     if isinstance(content, bytes):
-        text = content.decode("utf-8")
+        text = content.decode("utf-8", errors="replace")
     else:
         text = content
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in text.split("\n")]
-    text = "\n".join(lines)
-    text = re.sub(r"\n{3,}", "\n\n", text)
 
     filtered: list[str] = []
-    for line in text.split("\n"):
+    for line in lines:
         if line.startswith(_VOLATILE_HEADER_PREFIXES):
             continue
         filtered.append(line)
-    return "\n".join(filtered)
+
+    text = "\n".join(filtered)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
 
 
 def sha256_fingerprint(content: str | bytes) -> str:
