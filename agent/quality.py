@@ -9,6 +9,22 @@ from pathlib import Path
 import re
 
 
+def count_quotes(lines: list[str]) -> int:
+    """Count blockquote lines, tolerating a leading bullet marker.
+
+    Notes use ``> quote`` on its own line, indented ``  > quote``, or a
+    bullet-wrapped ``- > quote`` — count all three.
+    """
+    n = 0
+    for line in lines:
+        s = line.strip()
+        if s.startswith("- ") or s.startswith("* "):
+            s = s[2:].strip()
+        if s.startswith("> "):
+            n += 1
+    return n
+
+
 def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) -> tuple[bool, list[str]]:
     """Run quality gates on a web article note.
 
@@ -38,7 +54,7 @@ def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) ->
     lines = content.split("\n")
 
     # Quote count — count lines starting with '> '
-    quote_count = sum(1 for line in lines if line.strip().startswith("> "))
+    quote_count = count_quotes(lines)
     if quote_count < config.article_min_quotes:
         failures.append(
             f"Too few quotes: {quote_count} < {config.article_min_quotes} required"
@@ -112,7 +128,7 @@ def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -
     lines = content.split("\n")
 
     # Quote count — count lines starting with '> '
-    quote_count = sum(1 for line in lines if line.strip().startswith("> "))
+    quote_count = count_quotes(lines)
     if quote_count < config.book_min_quotes:
         failures.append(
             f"Too few quotes: {quote_count} < {config.book_min_quotes} required"

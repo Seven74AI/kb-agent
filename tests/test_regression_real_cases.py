@@ -138,3 +138,86 @@ def test_extract_author_uses_permalink_not_session_user():
 
     html = '"username":"lieutarchitect","permalink":"https:\\/\\/www.threads.com\\/\\u0040tayjmcm\\/post\\/ABC"'
     assert _extract_author(html) == "tayjmcm"
+
+
+# ── Quality gates (real note shapes) ────────────────────────────────────────
+
+# A Threads video note: Key Points with indented quotes, no Concepts section.
+THREADS_VIDEO_NOTE = """---
+date: 2026-11-05
+source: threads.net (@tayjmcm)
+---
+
+# A Threads Video Note
+
+## Summary
+Core message in a couple of sentences.
+
+## Key Points
+- First key point
+  > "First direct quote from the transcript"
+- Second key point
+  > "Second direct quote"
+- Third key point
+  > "Third direct quote"
+
+## Speaker Analysis
+Who is speaking and their perspective.
+
+## Full Transcript
+The complete transcript with speaker labels.
+
+## Context
+Platform context.
+
+## Critical Analysis
+What is new versus restated.
+
+## Reliability
+Confidence level with justification.
+"""
+
+# A Threads text note: bullet-wrapped quotes.
+THREADS_TEXT_NOTE = """---
+date: 2026-11-05
+source: threads.net (@exit.notes)
+---
+
+# A Threads Text Note
+
+## Summary
+Core message.
+
+## Key Claims
+- > first direct quote
+- > second direct quote
+- > third direct quote
+
+## Context
+Platform context.
+
+## Critical Analysis
+What is new versus restated.
+"""
+
+
+def test_threads_video_gate_accepts_valid_note(tmp_path):
+    from agent.config import Config
+    from agent.quality import quality_gate_threads_video
+
+    p = tmp_path / "note.md"
+    p.write_text(THREADS_VIDEO_NOTE)
+    passed, failures = quality_gate_threads_video(p, Config())
+    assert passed, failures
+
+
+def test_threads_text_note_quotes_are_counted():
+    from agent.quality import count_quotes
+
+    assert count_quotes(THREADS_TEXT_NOTE.split("\n")) >= 2
+
+
+def test_count_quotes_tolerates_bullet_marker():
+    from agent.quality import count_quotes
+
+    assert count_quotes(["> own line", "  > indented", "- > bullet"]) == 3
