@@ -334,8 +334,9 @@ def submit_routed(url: str, config: Config, conn: sqlite3.Connection, *, tags=No
     Modal cold-start per video. Non-video types submit immediately.
     """
     from agent.core.submit import submit_ingest, submit_url
-    from agent.detection import detect_content_subtype, detect_platform
+    from agent.detection import detect_content_subtype, detect_platform, normalize_url
 
+    url = normalize_url(url)
     platform = detect_platform(url)
     subtype = detect_content_subtype(url, platform)
     if subtype in VIDEO_CONTENT_TYPES:
