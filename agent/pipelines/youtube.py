@@ -734,7 +734,7 @@ def _pass2_build_note(
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     source_domain = urlparse(source_url).netloc or "youtube.com"
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
+    tailscale_base = config.minio_tailscale_base
 
     system_prompt = f"""You are a knowledge base curator specializing in video content synthesis.
 Follow the deep treatment standard for YouTube videos.
@@ -898,7 +898,7 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
     if not uploaded:
         return
 
-    tailscale_base = "http://vmi3304846.tail5c02a1.ts.net:9000"
+    tailscale_base = config.minio_tailscale_base
     content = note_path.read_text(encoding="utf-8")
 
     # Build source_files block

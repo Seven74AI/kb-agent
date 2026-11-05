@@ -56,9 +56,6 @@ def append_note_tags(note_path: Path, tags) -> None:
         note_path.write_text(new_text, encoding="utf-8")
 
 
-MINIO_TAILSCALE_BASE = "http://vmi3304846.tail5c02a1.ts.net:9000"
-
-
 def write_source_files_block(note_path: Path, uploaded: list[str], config) -> None:
     """Rewrite a note's ``source_files:`` frontmatter from uploaded MinIO object paths."""
     if not uploaded:
@@ -81,7 +78,7 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
             "epub": "epub",
             "pdf": "pdf",
         }.get(suffix, "raw")
-        lines.append(f"  {kind}: {MINIO_TAILSCALE_BASE}/{config.minio_bucket}/{u}")
+        lines.append(f"  {kind}: {config.minio_tailscale_base}/{config.minio_bucket}/{u}")
     block = "\n".join(lines)
     new = re.sub(
         r"source_files:.*?(?=\n---|\n[a-zA-Z_]+:|\Z)",
@@ -129,7 +126,7 @@ CONTENT_TYPE_TO_VAULT_FOLDER: dict[str, str] = {
 }
 
 
-def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str:
+def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60, tailscale_base: str = "") -> str:
     """Upload a single file to MinIO using mc cp.
 
     Args:
@@ -159,7 +156,7 @@ def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str
             step_name="minio_upload",
         )
 
-    tailscale_url = f"{MINIO_TAILSCALE_BASE}/{dest}"
+    tailscale_url = f"{tailscale_base}/{dest}"
     return tailscale_url
 
 
@@ -191,7 +188,7 @@ def step_minio_upload(task: dict, config, source_path: Path | None = None) -> st
     folder = CONTENT_TYPE_TO_MINIO_FOLDER.get(content_type, "articles")
     dest = f"{config.minio_bucket}/{folder}/{slug}.md"
 
-    return upload_file_to_minio(source_path, dest)
+    return upload_file_to_minio(source_path, dest, tailscale_base=config.minio_tailscale_base)
 
 
 # ── Step: Git Push ────────────────────────────────────────────────────────────

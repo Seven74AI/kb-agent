@@ -109,7 +109,7 @@ mc ls "minio/knowledge-base/articles/${SLUG}.md"
 
 ```yaml
 source_files:
-  text: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/articles/wikispooks-<slug>.md
+  text: http://minio.example.com/knowledge-base/articles/wikispooks-<slug>.md
 ```
 
 ### Phase 6 — Git push

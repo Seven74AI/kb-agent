@@ -59,6 +59,7 @@ def config(tmp_path):
         threads_text_min_size=100,  # Low for testing
         minio_bucket="kb-agent-archive",
         minio_endpoint="http://localhost:9000",
+        minio_tailscale_base="http://minio.test/base",
     )
 
 
@@ -550,7 +551,7 @@ raw: <filled by archival step>
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         result = step_threads_minio_upload(task_dict, config)
-        assert result.startswith("http://vmi3304846.tail5c02a1.ts.net:9000/")
+        assert result.startswith("http://minio.test/base/")
 
         content = note_path.read_text()
         assert f"raw: {result}" in content

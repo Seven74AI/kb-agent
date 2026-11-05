@@ -5,8 +5,8 @@ modified: YYYY-MM-DD HH:MM:SS
 source: "<Intervenant> — <Titre de la conférence> (<année>, Sommet TDAH Adulte — Jour N, Terr'à Grandir)"
 source_url: https://www.terragrandir.com/<slug>/
 source_files:
-  video: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/videos/<slug>.mp4
-  transcript: http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/transcripts/<slug>.json
+  video: http://minio.example.com/knowledge-base/videos/<slug>.mp4
+  transcript: http://minio.example.com/knowledge-base/transcripts/<slug>.json
 confidence: plausible
 tags: [tdah, adhd, conference, sommet-tdah-2026]
 ---
