@@ -6,11 +6,18 @@ Used by all pipelines (web, threads, instagram, books, youtube).
 
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 from agent.config import RETIRED_AB_VAULT_PATH
 from agent.db import normalize_tags
 from agent.exceptions import ErrorType, StepError
+
+# Serialize all Git operations on the shared vault repo. The consumer runs
+# several tasks in parallel, each ending in git_push; without this, concurrent
+# `git add` + `git commit` collide (one commits the other's staged note, the
+# other then gets "nothing to commit" -> exit 1 -> spurious retry/pause).
+_GIT_PUSH_LOCK = threading.Lock()
 
 
 def append_note_tags(note_path: Path, tags) -> None:
@@ -237,28 +244,39 @@ def step_git_push(
     commit_msg = f"{commit_prefix} {slug}"
 
     try:
-        # Stage the note
-        subprocess.run(
-            ["git", "-C", str(vault_path), "add", str(note_path)],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
+        with _GIT_PUSH_LOCK:
+            # Stage the note
+            subprocess.run(
+                ["git", "-C", str(vault_path), "add", str(note_path)],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
 
-        # Commit
-        commit_result = subprocess.run(
-            ["git", "-C", str(vault_path), "commit", "-m", commit_msg],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
+            # Commit (idempotent: a prior retry or concurrent task may have
+            # already committed the note — "nothing to commit" is success)
+            commit_result = subprocess.run(
+                ["git", "-C", str(vault_path), "commit", "-m", commit_msg],
+                capture_output=True, text=True, timeout=10,
+            )
+            if commit_result.returncode != 0:
+                out = (commit_result.stdout or "") + (commit_result.stderr or "")
+                if "nothing to commit" not in out:
+                    raise StepError(
+                        f"Git commit failed: {out.strip()[:200]}",
+                        error_type=ErrorType.RETRY,
+                        step_name="git_push",
+                    )
+                commit_result = None
 
-        # Push
-        subprocess.run(
-            ["git", "-C", str(vault_path), "push", "origin", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
+            # Push
+            subprocess.run(
+                ["git", "-C", str(vault_path), "push", "origin", "HEAD"],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
 
         # Extract commit hash
         commit_hash = (
             commit_result.stdout.strip().split()[-1]
-            if commit_result.stdout else "unknown"
+            if (commit_result and commit_result.stdout) else "unknown"
         )
         return commit_hash
 
