@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
     status TEXT NOT NULL DEFAULT 'queued',
     error TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    dispatched_at TEXT
+    dispatched_at TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS batch_runs (
@@ -314,16 +315,17 @@ def get_last_batch_run(conn: sqlite3.Connection) -> dict | None:
 
 def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                          error: str | None = None) -> None:
-    """Transition an ingest-queue row to a new status."""
+    """Transition an ingest-queue row to a new status (touches updated_at)."""
     with conn:
         if status == "dispatched":
             conn.execute(
-                "UPDATE ingest_queue SET status = ?, error = ?, dispatched_at = datetime('now') WHERE id = ?",
+                "UPDATE ingest_queue SET status = ?, error = ?, "
+                "dispatched_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
                 (status, error, ingest_id),
             )
         else:
             conn.execute(
-                "UPDATE ingest_queue SET status = ?, error = ? WHERE id = ?",
+                "UPDATE ingest_queue SET status = ?, error = ?, updated_at = datetime('now') WHERE id = ?",
                 (status, error, ingest_id),
             )
 
@@ -332,6 +334,37 @@ def remove_ingest(conn: sqlite3.Connection, ingest_id: str) -> bool:
     """Delete an ingest-queue row (the dashboard's escape hatch). Returns True if removed."""
     with conn:
         return conn.execute("DELETE FROM ingest_queue WHERE id = ?", (ingest_id,)).rowcount > 0
+
+
+def claim_ingest_items(conn: sqlite3.Connection) -> list[dict]:
+    """Atomically claim every queued ingest item (queued -> downloading) and return them.
+
+    One UPDATE ... RETURNING is a single SQLite write, so concurrent batch runs
+    each claim a disjoint set — a second run grabs only what the first didn't.
+    """
+    conn.row_factory = sqlite3.Row
+    with conn:
+        rows = conn.execute(
+            "UPDATE ingest_queue SET status='downloading', updated_at=datetime('now') "
+            "WHERE status='queued' RETURNING *"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def recover_stale_ingest(conn: sqlite3.Connection, max_age_minutes: int = 120) -> int:
+    """Reset in-flight items abandoned by a crashed batch back to queued.
+
+    A crash mid-run leaves items in downloading/staged/transcribing/dispatching.
+    Anything stuck in those states past max_age_minutes is stale -> queued + error.
+    """
+    with conn:
+        cur = conn.execute(
+            "UPDATE ingest_queue SET status='queued', error='recovered from stale batch run' "
+            "WHERE status IN ('downloading','staged','transcribing','dispatching') "
+            "AND updated_at IS NOT NULL AND updated_at < datetime('now', ?)",
+            (f"-{max_age_minutes} minutes",),
+        )
+        return cur.rowcount
 
 
 def claim_task(conn: sqlite3.Connection) -> dict | None:
