@@ -18,17 +18,14 @@ per source.
 
 ``normalize_content`` / ``sha256_fingerprint``
 ----------------------------------------------
-:func:`normalize_content` prepares arbitrary text for stable hashing:
+``normalize_content(content)`` accepts ``str`` or ``bytes``. If bytes input,
+decode UTF-8. Normalize CRLF and lone CR to LF. Strip trailing whitespace per
+line. Collapse runs of 3+ consecutive LF to exactly 2 LF. Drop volatile header
+lines matching exactly at line start: ``Date:``, ``Last-Modified:``, ``ETag:``,
+``Server:``, ``X-Cache:``, ``X-Cache-Hits:``. Return normalized str.
 
-* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
-* Normalize CRLF and lone CR to LF.
-* Strip trailing whitespace on each line.
-* Collapse three or more consecutive LF characters to two.
-* Drop volatile header lines that start exactly with ``Date:``, ``Last-Modified:``,
-  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
-
-:func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest of
-``normalize_content(content)`` encoded as UTF-8 bytes.
+``sha256_fingerprint(content)`` returns lowercase hex SHA-256 digest of
+``normalize_content(content).encode('utf-8')``.
 """
 
 from __future__ import annotations
