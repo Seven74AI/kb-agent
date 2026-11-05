@@ -99,12 +99,12 @@ def test_step_diarize_modal_backend(base_config, task_dict):
     diar_out = base_config.temp_dir / f"{slug}_diarization.json"
     trans_out = base_config.temp_dir / f"{slug}_transcript.json"
 
-    with patch("agent.pipelines.youtube.transcribe_modal") as mock_modal:
+    with patch("agent.pipelines.video_common.transcribe_modal") as mock_modal:
         mock_modal.return_value = (
             Path("/modal/out/diar.json"),
             Path("/modal/out/trans.json"),
         )
-        with patch("agent.pipelines.youtube.install_modal_outputs") as mock_install:
+        with patch("agent.pipelines.video_common.install_modal_outputs") as mock_install:
             mock_install.return_value = (diar_out, trans_out)
             out = step_diarize(task_dict, base_config)
 
