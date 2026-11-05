@@ -36,6 +36,24 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+def normalize_url(url: str) -> str:
+    """Collapse Instagram/Threads URLs to their canonical post (drop query string).
+
+    The post id lives in the URL path, so the query string (``comment_id``,
+    ``igsh``, ``igsi``, ``rpxt``, ``xmt``, ``slof``) is tracking/comment-anchor
+    noise. A ``?comment_id=`` deep-link is a comment ON a post, not a distinct
+    source — it must resolve to the parent post or dedup breaks and the reel
+    double-ingests. YouTube is untouched: ``?v=`` is the identity.
+    """
+    url = (url or "").strip()
+    if not url:
+        return url
+    low = url.lower()
+    if "instagram.com/" in low or "threads." in low:
+        return url.split("?")[0].split("#")[0]
+    return url
+
+
 def detect_platform(url: str) -> str:
     """Classify a URL by platform using regex patterns.
 

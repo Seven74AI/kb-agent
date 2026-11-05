@@ -6,7 +6,7 @@ from agent.config import Config
 from agent.pipelines import get_pipeline_names
 from agent.core.slugify import slugify
 from agent.db import create_task, queue_ingest
-from agent.detection import dedup_check, detect_content_subtype, detect_platform, preflight_health
+from agent.detection import dedup_check, detect_content_subtype, detect_platform, normalize_url, preflight_health
 
 
 def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> dict:
@@ -117,7 +117,7 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
     content-type-appropriate pipeline (including the synthesize-only variant for
     batch-transcribed video).
     """
-    url = (url or "").strip()
+    url = normalize_url((url or "").strip())
     if not url:
         return {"status": "error", "http_status": 400, "error": "url required"}
 
