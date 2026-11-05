@@ -23,7 +23,7 @@ from agent.core import (
     submit_plan,
 )
 from agent.core.resume import normalize_reason_pattern
-from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db
+from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db, list_ingest_queue
 
 app = Flask(__name__)
 config: Config = load_config()
@@ -206,6 +206,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .done { background: #d4edda; color: #155724; }
         .paused { background: #fff3cd; color: #856404; }
         .failed { background: #f8d7da; color: #721c24; }
+        .queued { background: #eee; color: #555; }
+        .dispatching { background: #cce5ff; color: #004085; }
+        .dispatched { background: #d4edda; color: #155724; }
         table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.85rem; }
         th, td { padding: 0.5rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
         th { background: var(--header-bg); font-weight: 600; position: sticky; top: 0; }
@@ -272,6 +275,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <button type="submit" class="btn">Upload</button>
         </form>
     </div>
+
+    <!-- Ingest Queue (pre-dispatch: batch collector) -->
+    <h2>Ingest Queue</h2>
+    {% if ingest %}
+    <table>
+        <thead>
+            <tr>
+                <th>Type</th>
+                <th>URL</th>
+                <th>Status</th>
+                <th>Error</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for q in ingest %}
+            <tr>
+                <td>{{ q.content_type }}</td>
+                <td><div class="url-cell" title="{{ q.url }}">{{ q.url[:50] }}{% if q.url|length > 50 %}…{% endif %}</div></td>
+                <td><span class="status-badge {{ q.status }}">{{ q.status }}</span></td>
+                <td style="font-size:0.75rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;" title="{{ q.error or '' }}">{{ q.error or '—' }}</td>
+                <td style="font-size:0.8rem;">{{ q.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><p>No ingest queue items.</p></div>
+    {% endif %}
 
     <!-- Tasks Table -->
     <h2>Tasks</h2>
@@ -373,6 +405,7 @@ def dashboard():
 
     db_path = _agent_db_path()
     tasks: list[dict] = []
+    ingest: list[dict] = []
     counts = {"pending": 0, "in_progress": 0, "done": 0, "paused": 0, "failed": 0, "total": 0}
 
     if db_path.exists():
@@ -381,6 +414,7 @@ def dashboard():
         state = list_tasks(conn, logs_conn=logs_conn, limit=100, now=now_naive)
         tasks = state["tasks"]
         counts = state["counts"]
+        ingest = list_ingest_queue(conn, limit=100)
         conn.close()
         logs_conn.close()
 
@@ -388,6 +422,7 @@ def dashboard():
         DASHBOARD_HTML,
         tasks=tasks,
         counts=counts,
+        ingest=ingest,
         now=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         pause_reasons=PAUSE_REASON_LABELS,
         cookie_types=ALLOWED_COOKIE_FILES,
