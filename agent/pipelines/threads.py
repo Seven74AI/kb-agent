@@ -37,6 +37,7 @@ from agent.pipelines.video_common import (
     step_extract_audio,
     step_fetch_transcript,
     step_transcribe,
+    strip_code_fence,
     upload_note_archive,
     upload_video_source,
 )
@@ -111,41 +112,59 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
 
 
 def _has_video_versions(html: str) -> bool:
-    """Check if the Threads page JSON contains video_versions."""
-    return 'video_versions' in html
+    """True if the payload has a NON-NULL video_versions array.
+
+    A bare ``video_versions`` substring matches ``"video_versions": null`` (a
+    post with no video) — a false positive. The real signal is the key followed
+    by an array bracket.
+    """
+    return re.search(r'"video_versions"\s*:\s*\[', html) is not None
 
 
 def _extract_json_array_after_key(html: str, key: str) -> str | None:
-    """Return a balanced JSON array literal that follows ``"key":`` in *html*."""
-    marker = f'"{key}"'
-    pos = html.find(marker)
-    if pos < 0:
-        return None
-    pos = html.find("[", pos + len(marker))
-    if pos < 0:
-        return None
+    """Return the first NON-NULL balanced JSON array that follows ``"key":``.
 
-    depth = 0
-    in_string = False
-    escape = False
-    i = pos
-    while i < len(html):
-        ch = html[i]
-        if escape:
+    Threads payloads repeat the key many times — earlier occurrences are often
+    ``"video_versions": null`` (related/suggested posts), with the post's own
+    video appearing later. Skip ``null`` and return the first real array.
+    """
+    marker = f'"{key}"'
+    search_from = 0
+    while True:
+        pos = html.find(marker, search_from)
+        if pos < 0:
+            return None
+        i = pos + len(marker)
+        while i < len(html) and html[i] in " \t\n":
+            i += 1
+        if i < len(html) and html[i] == ":":
+            i += 1
+            while i < len(html) and html[i] in " \t\n":
+                i += 1
+        if i < len(html) and html[i] == "[":
+            depth = 0
+            in_string = False
             escape = False
-        elif ch == "\\" and in_string:
-            escape = True
-        elif ch == '"':
-            in_string = not in_string
-        elif not in_string:
-            if ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    return html[pos : i + 1]
-        i += 1
-    return None
+            j = i
+            while j < len(html):
+                ch = html[j]
+                if escape:
+                    escape = False
+                elif ch == "\\" and in_string:
+                    escape = True
+                elif ch == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            return html[i : j + 1]
+                j += 1
+            return None
+        # null or other value — skip to the next occurrence
+        search_from = i
 
 
 def _extract_video_url(html: str) -> str | None:
@@ -688,7 +707,7 @@ Analyze the speaker's perspective and credibility.
 Note whether this appears to be an original post or a reaction."""
 
     response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
-    note_content = response.content
+    note_content = strip_code_fence(response.content)
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -781,7 +800,7 @@ Write a note following the template above.
 The confidence level is '{confidence}' — be appropriately cautious if it's 'untested'."""
 
     response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
-    note_content = response.content
+    note_content = strip_code_fence(response.content)
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)

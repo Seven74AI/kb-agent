@@ -48,10 +48,21 @@ def test_detect_content_subtype_simple_returns_platform():
     assert detection.detect_content_subtype("https://terragrandir.com/talk/", "bunny_stream") == "bunny_stream"
 
 
-def test_detect_content_subtype_threads_uses_jev(monkeypatch):
-    monkeypatch.setattr(detection, "_fetch_content", lambda url, p: "<html>video_versions</html>")
-    monkeypatch.setattr(detection, "route_jev", lambda url, content: "threads_video")
+def test_detect_content_subtype_threads_deterministic(monkeypatch):
+    # threads is fully deterministic: a non-null video_versions array == video,
+    # its absence == text. Jev is never called for threads.
+    monkeypatch.setattr(detection, "route_jev", lambda url, content: "UNREACHABLE")
+    monkeypatch.setattr(
+        detection, "_fetch_content",
+        lambda url, p: '<html>"video_versions":[{"url":"x"}]</html>',
+    )
     assert detection.detect_content_subtype("https://threads.net/@x/post/1", "threads") == "threads_video"
+    # null video_versions (no array) is NOT a video
+    monkeypatch.setattr(
+        detection, "_fetch_content",
+        lambda url, p: '<html>"video_versions":null</html>',
+    )
+    assert detection.detect_content_subtype("https://threads.net/@x/post/1", "threads") == "threads_text"
 
 
 def test_detect_content_subtype_jev_failure_falls_back(monkeypatch):
