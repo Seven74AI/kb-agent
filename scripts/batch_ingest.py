@@ -34,13 +34,13 @@ from agent.config import load_config  # noqa: E402
 sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
+    claim_ingest_items,
     finish_batch_run,
     init_db,
-    list_ingest_by_status,
     record_batch_run,
+    recover_stale_ingest,
     update_ingest_status,
 )
-from agent.core.batch_lock import acquire, release  # noqa: E402
 from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
 
 # content_type -> download-phase step names (everything before the ffmpeg audio
@@ -100,7 +100,7 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
     return None, "no video file found after download"
 
 
-def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, list[str]]:
+def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple[int, int, list[str]]:
     """Download + batch-transcribe + dispatch video links.
 
     Returns (failed, dispatched, causes) for the batch-run summary.
@@ -109,11 +109,12 @@ def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, li
     dispatched = 0
     causes: list[str] = []
     base = Path(config.temp_dir)
+    run_tag = f"run_{run_id}"
 
-    # 1. download all videos, staged per content type
+    # 1. download all videos, staged per content type (per-run dir so a
+    #    concurrent batch's staged videos don't get picked up)
     staged: dict[str, list[tuple[dict, Path]]] = {}
     for q in video_links:
-        update_ingest_status(conn, q["id"], "downloading")
         vp, err = _download_video(q, config)
         if vp is None:
             update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
@@ -122,7 +123,7 @@ def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, li
             print(f"  [failed] {q['slug']}: {err}")
             continue
         ctype = q["content_type"]
-        bdir = base / "batch_videos" / ctype
+        bdir = base / "batch_videos" / run_tag / ctype
         bdir.mkdir(parents=True, exist_ok=True)
         dest = bdir / f"{q['slug']}{vp.suffix.lower()}"
         shutil.copy(vp, dest)
@@ -135,8 +136,8 @@ def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, li
 
     # 2. one Modal run per content type (per-type language/hotwords)
     for ctype, items in staged.items():
-        bdir = base / "batch_videos" / ctype
-        out_dir = base / "batch_out" / ctype
+        bdir = base / "batch_videos" / run_tag / ctype
+        out_dir = base / "batch_out" / run_tag / ctype
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Batch-transcribing {len(items)} {ctype} video(s) in one Modal run...")
         for q, _ in items:
@@ -189,9 +190,6 @@ def _process_videos(video_links: list[dict], config, conn) -> tuple[int, int, li
 
 def main() -> None:
     config = load_config()
-    if not acquire(config):
-        print("Another batch run is in progress; exiting.")
-        return
     conn = None
     run_id = None
     total = 0
@@ -200,17 +198,18 @@ def main() -> None:
     causes: list[str] = []
     try:
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        recover_stale_ingest(conn)
         run_id = record_batch_run(conn)
-        queued = list_ingest_by_status(conn, "queued")
-        if not queued:
+        claimed = claim_ingest_items(conn)
+        if not claimed:
             print("No queued ingest links.")
             finish_batch_run(conn, run_id, "ok", 0, 0, 0, "no queued items")
             return
 
-        total = len(queued)
-        print(f"Queued: {total} link(s)")
-        video = [q for q in queued if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
-        non_video = [q for q in queued if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
+        total = len(claimed)
+        print(f"Claimed: {total} link(s)")
+        video = [q for q in claimed if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
+        non_video = [q for q in claimed if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
 
         for q in non_video:
             r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
@@ -226,7 +225,7 @@ def main() -> None:
                 print(f"  [failed] {q['slug']} -> {status}")
 
         if video:
-            vf, vd, vcauses = _process_videos(video, config, conn)
+            vf, vd, vcauses = _process_videos(video, config, conn, run_id)
             failed += vf
             dispatched += vd
             causes += vcauses
@@ -241,7 +240,6 @@ def main() -> None:
     finally:
         if conn is not None:
             conn.close()
-        release(config)
 
 
 if __name__ == "__main__":
