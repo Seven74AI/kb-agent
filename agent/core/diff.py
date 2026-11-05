@@ -5,6 +5,20 @@ without mutating registry state. Content fingerprints use SHA-256 over
 :func:`normalize_source_content`; optional HTTP ETag values compare after
 :func:`normalize_etag` when no body is available (for example 304 responses).
 
+``normalize_content`` / ``sha256_fingerprint`` apply a lighter normalization
+for generic content comparison (see below).
+
+Content normalization (``normalize_content``)
+---------------------------------------------
+Applied before :func:`sha256_fingerprint`:
+
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Normalize CRLF and lone CR to LF.
+* Strip trailing whitespace on each line.
+* Collapse runs of three or more consecutive LF to two.
+* Drop lines that start with any of: ``Date:``, ``Last-Modified:``, ``ETag:``,
+  ``Server:``, ``X-Cache:``, ``X-Cache-Hits:``.
+
 Hash families
 -------------
 ``last_content_hash`` must stay in a single family per source:
@@ -43,6 +57,16 @@ class ContentChangeResult:
     content_hash: str | None
 
 
+_VOLATILE_HEADER_PREFIXES: tuple[str, ...] = (
+    "Date:",
+    "Last-Modified:",
+    "ETag:",
+    "Server:",
+    "X-Cache:",
+    "X-Cache-Hits:",
+)
+
+
 def normalize_etag(etag: str) -> str:
     """Normalize an HTTP ETag for stable comparison."""
     value = (etag or "").strip()
@@ -51,6 +75,34 @@ def normalize_etag(etag: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] == '"':
         value = value[1:-1]
     return value
+
+
+def normalize_content(content: str | bytes) -> str:
+    """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
+    if isinstance(content, bytes):
+        text = content.decode("utf-8")
+    else:
+        text = content
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.rstrip(" \t")
+        if any(stripped.startswith(prefix) for prefix in _VOLATILE_HEADER_PREFIXES):
+            continue
+        lines.append(stripped)
+
+    normalized = "\n".join(lines)
+    while "\n\n\n" in normalized:
+        normalized = normalized.replace("\n\n\n", "\n\n")
+    return normalized
+
+
+def sha256_fingerprint(content: str | bytes) -> str:
+    """Return lowercase hex SHA-256 of UTF-8 :func:`normalize_content` output."""
+    normalized = normalize_content(content)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_source_content(raw: str | bytes) -> str:
