@@ -15,6 +15,20 @@ Hash families
 Mixing families (a body ``sha256:`` hash later polled with ``etag``, or vice
 versa) always compares unequal and reports ``NEW``. Use one mode consistently
 per source.
+
+``normalize_content`` / ``sha256_fingerprint``
+----------------------------------------------
+:func:`normalize_content` prepares arbitrary text for stable hashing:
+
+* Accept ``str`` as-is; decode ``bytes`` as UTF-8.
+* Normalize CRLF and lone CR to LF.
+* Strip trailing whitespace on each line.
+* Collapse three or more consecutive LF characters to two.
+* Drop volatile header lines that start exactly with ``Date:``, ``Last-Modified:``,
+  ``ETag:``, ``Server:``, ``X-Cache:``, or ``X-Cache-Hits:``.
+
+:func:`sha256_fingerprint` returns the lowercase hex SHA-256 digest of
+``normalize_content(content)`` encoded as UTF-8 bytes.
 """
 
 from __future__ import annotations
@@ -23,6 +37,16 @@ import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+
+
+_VOLATILE_HEADER_PREFIXES: tuple[str, ...] = (
+    "Date:",
+    "Last-Modified:",
+    "ETag:",
+    "Server:",
+    "X-Cache:",
+    "X-Cache-Hits:",
+)
 
 
 class ContentChangeStatus(StrEnum):
@@ -41,6 +65,32 @@ class ContentChangeResult:
 
     status: ContentChangeStatus
     content_hash: str | None
+
+
+def normalize_content(content: str | bytes) -> str:
+    """Normalize text for stable SHA-256 fingerprinting (see module docstring)."""
+    if isinstance(content, bytes):
+        text = content.decode("utf-8")
+    else:
+        text = content
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    filtered: list[str] = []
+    for line in text.split("\n"):
+        if line.startswith(_VOLATILE_HEADER_PREFIXES):
+            continue
+        filtered.append(line)
+    return "\n".join(filtered)
+
+
+def sha256_fingerprint(content: str | bytes) -> str:
+    """Return lowercase hex SHA-256 of :func:`normalize_content` UTF-8 bytes."""
+    normalized = normalize_content(content)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_etag(etag: str) -> str:
