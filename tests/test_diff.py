@@ -54,6 +54,18 @@ def test_normalize_content_drops_volatile_header_lines():
     assert "body line" in normalized
 
 
+def test_normalize_content_keeps_indented_header_like_lines():
+    # Matching is exact (case-sensitive, no leading whitespace): an indented
+    # line is body content, not a volatile header, so it must survive.
+    body = " Date: 2026-01-01\n\nActual body"
+    assert normalize_content(body) == body
+
+
+def test_normalize_content_decodes_invalid_utf8_bytes_with_replacement():
+    assert normalize_content(b"bad \xff bytes") == "bad \ufffd bytes"
+    assert sha256_fingerprint(b"bad \xff bytes") == sha256_fingerprint("bad \ufffd bytes")
+
+
 def test_sha256_fingerprint_stable_for_equivalent_text():
     a = "same\r\ncontent  \n"
     b = "same\ncontent\n"
