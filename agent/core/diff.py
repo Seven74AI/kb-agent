@@ -15,6 +15,18 @@ Hash families
 Mixing families (a body ``sha256:`` hash later polled with ``etag``, or vice
 versa) always compares unequal and reports ``NEW``. Use one mode consistently
 per source.
+
+Content normalization (:func:`normalize_content`)
+-------------------------------------------------
+Used by :func:`sha256_fingerprint` for stable body digests:
+
+* Decode UTF-8 when *content* is ``bytes``; accept ``str`` as-is.
+* Normalize CRLF and lone CR to LF.
+* Strip trailing whitespace on each line.
+* Collapse three or more consecutive LF characters to two.
+* Drop volatile header lines whose trimmed content starts with ``Date:``,
+  ``Last-Modified:``, ``ETag:``, ``Server:``, ``X-Cache:``, or
+  ``X-Cache-Hits:``.
 """
 
 from __future__ import annotations
@@ -41,6 +53,42 @@ class ContentChangeResult:
 
     status: ContentChangeStatus
     content_hash: str | None
+
+
+_VOLATILE_HEADER_PREFIXES = (
+    "Date:",
+    "Last-Modified:",
+    "ETag:",
+    "Server:",
+    "X-Cache:",
+    "X-Cache-Hits:",
+)
+
+
+def normalize_content(content: str | bytes) -> str:
+    """Normalize fetched text for stable :func:`sha256_fingerprint` digests."""
+    if isinstance(content, bytes):
+        text = content.decode("utf-8", errors="replace")
+    else:
+        text = content or ""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.rstrip(" \t")
+        if any(stripped.startswith(prefix) for prefix in _VOLATILE_HEADER_PREFIXES):
+            continue
+        lines.append(stripped)
+
+    normalized = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", normalized)
+
+
+def sha256_fingerprint(content: str | bytes) -> str:
+    """Return lowercase hex SHA-256 of UTF-8-encoded :func:`normalize_content` output."""
+    normalized = normalize_content(content)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_etag(etag: str) -> str:

@@ -8,9 +8,57 @@ from agent.core.diff import (
     ContentChangeStatus,
     check_content_change,
     content_fingerprint,
+    normalize_content,
     normalize_etag,
     normalize_source_content,
+    sha256_fingerprint,
 )
+
+
+def test_normalize_content_line_endings_and_trailing_whitespace():
+    variants = [
+        "alpha\r\nbeta  \r\n",
+        "alpha\nbeta\n",
+        "alpha\nbeta  \n",
+    ]
+    normalized = [normalize_content(v) for v in variants]
+    assert len(set(normalized)) == 1
+    assert sha256_fingerprint(variants[0]) == sha256_fingerprint(variants[1])
+
+
+def test_normalize_content_drops_volatile_header_lines():
+    with_headers = (
+        "Date: Wed, 05 Nov 2026 00:00:00 GMT\n"
+        "Last-Modified: Tue, 04 Nov 2026 12:00:00 GMT\n"
+        "ETag: \"abc\"\n"
+        "Server: nginx\n"
+        "X-Cache: HIT\n"
+        "X-Cache-Hits: 42\n"
+        "Body line\n"
+    )
+    bare = "Body line\n"
+    assert normalize_content(with_headers) == normalize_content(bare)
+    assert sha256_fingerprint(with_headers) == sha256_fingerprint(bare)
+
+
+def test_normalize_content_collapses_excess_blank_lines():
+    a = "one\n\n\n\n\ntwo"
+    b = "one\n\ntwo"
+    assert normalize_content(a) == normalize_content(b)
+
+
+def test_sha256_fingerprint_differs_on_substantive_change():
+    assert sha256_fingerprint("version one") != sha256_fingerprint("version two")
+
+
+def test_sha256_fingerprint_accepts_bytes_and_is_deterministic():
+    text = "stable payload"
+    once = sha256_fingerprint(text)
+    twice = sha256_fingerprint(text)
+    from_bytes = sha256_fingerprint(text.encode("utf-8"))
+    assert once == twice == from_bytes
+    assert once == once.lower()
+    assert not once.startswith("sha256:")
 
 
 def test_content_fingerprint_is_stable():
