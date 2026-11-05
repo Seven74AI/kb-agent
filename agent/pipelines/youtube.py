@@ -35,6 +35,10 @@ from agent.transcription import install_modal_outputs, is_modal_backend, transcr
 # yt-dlp cookie file — config.cookie_dir (uploaded via the kba.sevend.io dashboard)
 YT_COOKIES_FILE = "/root/kb-agent/cookies/yt_cookies.txt"
 
+# yt-dlp binary — resolved explicitly so it works regardless of PATH (the cron
+# and MCP run with a system PATH that lacks the py3.11 venv's bin).
+YTDLP_BIN = shutil.which("yt-dlp") or "/usr/local/lib/hermes-agent/venv/bin/yt-dlp"
+
 # yt-dlp rate limiting (per video-pipeline-global.md)
 YTDL_RATE_FLAGS = [
     "--sleep-requests", "1",
@@ -121,7 +125,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     # --- Metadata ---
     result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", YT_COOKIES_FILE,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
@@ -175,7 +179,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     # --- Chapters ---
     chapter_result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", YT_COOKIES_FILE,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
@@ -205,7 +209,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     # --- Description ---
     desc_result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", YT_COOKIES_FILE,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
@@ -255,7 +259,7 @@ def step_download_video(task: dict, config: Config) -> str:
 
     result = subprocess.run(
         [
-            "yt-dlp",
+            YTDLP_BIN,
             "--cookies", YT_COOKIES_FILE,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
@@ -273,7 +277,7 @@ def step_download_video(task: dict, config: Config) -> str:
         # Try fallback format
         result = subprocess.run(
             [
-                "yt-dlp",
+                YTDLP_BIN,
                 "--cookies", YT_COOKIES_FILE,
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
