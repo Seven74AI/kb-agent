@@ -32,6 +32,34 @@ def extract_items(html: str, item_pattern: str) -> frozenset[str]:
     )
 
 
+def extract_items_available(html: str, item_pattern: str, now: datetime | None = None) -> frozenset[str]:
+    """Extract items, skipping cards whose ``data-open`` is in the future.
+
+    Pages that pre-list not-yet-live content (the terragrandir TDAH summit) mark
+    each conference card with ``data-open=<ISO timestamp>``. Cards opening in the
+    future ("À venir") must not be treated as available items — otherwise a watch
+    baselines speakers for days that haven't happened yet. Cards without
+    ``data-open`` are always kept (not time-gated).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    def _drop_future(m: re.Match) -> str:
+        try:
+            opens = datetime.fromisoformat(m.group(1))
+        except ValueError:
+            return m.group(0)  # unparseable timestamp — keep the card
+        return "" if opens > now else m.group(0)
+
+    html = re.sub(
+        r'<li\b[^>]*data-open="([^"]+)"[^>]*>.*?</li>',
+        _drop_future,
+        html,
+        flags=re.DOTALL,
+    )
+    return extract_items(html, item_pattern)
+
+
 def diff_items(current: frozenset[str], last_seen: frozenset[str]) -> list[str]:
     """Sorted item ids present in *current* but not in *last_seen*."""
     return sorted(current - last_seen)
@@ -138,7 +166,7 @@ def register_watch_source(
     last_seen: frozenset[str] = frozenset()
     if baseline and fetch_html is not None:
         html = fetch_html(page_url)
-        last_seen = extract_items(html, item_pattern)
+        last_seen = extract_items_available(html, item_pattern)
 
     source_id = str(uuid.uuid4())
     with conn:
@@ -203,7 +231,7 @@ def poll_watch_source(
 
     submit = submit_fn or submit_routed
     html = fetch_html(page_url)
-    current = extract_items(html, row["item_pattern"])
+    current = extract_items_available(html, row["item_pattern"], now=now)
     last_seen = parse_last_seen(row["last_seen_json"])
     new_items = diff_items(current, last_seen)
     urls = items_to_urls(new_items, row["item_url_template"])
