@@ -217,6 +217,57 @@ def test_threads_video_gate_accepts_valid_note(tmp_path):
     assert passed, failures
 
 
+# A real music-only Instagram reel note: the audio was empty, so the caption is
+# the content, carried verbatim under "## Post Description".
+REEL_CAPTION_NOTE = """---
+date: 2026-11-06
+source: instagram.com
+source_url: https://www.instagram.com/reel/Da-vuxHN19S/
+confidence: plausible
+tags: [instagram, reel]
+---
+
+# Natural Deworming Routine Promoted with Neem and Senna
+
+## Summary
+A music-only reel whose post description promotes a natural deworming routine.
+
+## Post Description
+> Vu tout ce qu'on mange, se déparasiter régulièrement me semble nécessaire...
+>
+> Je vous partage ma routine régulière de déparasitage au naturel.
+
+## Key Points
+- Recommends a one-week plant-based vermifuge
+- Lists neem leaves, Artemisia, and soursop as the active plants
+- Directs viewers to a commercial site to buy the herbs
+
+## Speaker Analysis
+Music-only reel, no speech.
+
+## Reliability
+Low — caption is the only source.
+"""
+
+
+def test_music_only_reel_caption_note_passes_gate(tmp_path):
+    # The real failure: music-only reels produced empty notes. With the caption
+    # captured verbatim, the note must pass the short-form (key-point) gate.
+    from agent.config import Config
+    from agent.quality import quality_gate_threads_video
+
+    p = tmp_path / "note.md"
+    p.write_text(REEL_CAPTION_NOTE)
+    passed, failures = quality_gate_threads_video(p, Config())
+    assert passed, failures
+
+
+def test_reel_note_has_verbatim_post_description_section():
+    # The caption must be a dedicated verbatim section, not paraphrased away.
+    assert "## Post Description" in REEL_CAPTION_NOTE
+    assert "> Vu tout ce qu'on mange" in REEL_CAPTION_NOTE
+
+
 def test_threads_text_note_quotes_are_counted():
     from agent.quality import count_quotes
 
