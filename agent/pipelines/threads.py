@@ -630,10 +630,12 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     raw_path = Path(config.temp_dir) / f"{safe_slug}_threads_raw.json"
     author = "unknown"
     parent_context = None
+    captions: list[str] = []
     if raw_path.exists():
         raw = json.loads(raw_path.read_text())
         author = raw.get("author", "unknown")
         parent_context = raw.get("parent_context")
+        captions = raw.get("captions", []) or []
 
     logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
@@ -650,15 +652,22 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
         reply_line = f"- REPLY CONTEXT: {parent_context[:500]}"
     else:
         reply_line = "- This is an original post (not a reply)"
+    # Post description (caption) — often carries substantive claims the audio omits
+    caption_text = "\n".join(c.strip() for c in captions if c and c.strip())
+    if caption_text:
+        caption_line = f"- POST DESCRIPTION: {caption_text[:800]}"
+    else:
+        caption_line = "- POST DESCRIPTION: (none detected)"
 
     system_prompt = f"""You are a knowledge base curator specialized in Threads video content.
 
-SOURCE: A Threads video post transcript.
+SOURCE: A Threads video post transcript plus its post description (caption).
 
 THREADS CONTEXT:
 - Author: @{author}
 - This is short-form social media content — typically 1-5 minutes
 {reply_line}
+{caption_line}
 
 STRUCTURE (follow this template):
 # [Descriptive Title]
@@ -704,10 +713,15 @@ OUTPUT FORMAT:
 
 === END TRANSCRIPT ===
 
+POST DESCRIPTION (caption):
+{caption_text if caption_text else '(none detected)'}
+=== END POST DESCRIPTION ===
+
 Write a comprehensive note following the template above.
 Extract 3-5 key points with direct quotes.
 Analyze the speaker's perspective and credibility.
-Note whether this appears to be an original post or a reaction."""
+Note whether this appears to be an original post or a reaction.
+Incorporate the post description as a source alongside the transcript."""
 
     response = llm.call(system_prompt=system_prompt, user_prompt=user_prompt, role="synthesis")
     note_content = strip_code_fence(response.content)
