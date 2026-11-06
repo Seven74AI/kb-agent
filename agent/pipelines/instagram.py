@@ -131,6 +131,7 @@ def _fetch_ig_caption(url: str, config: Config) -> str:
                 YTDLP_BIN,
                 "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
                 "--js-runtimes", "node",
+                *IGDL_RATE_FLAGS,
                 "--print", "%(description)s",
                 url,
             ],
