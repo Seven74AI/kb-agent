@@ -30,6 +30,7 @@ from agent.pipelines.video_common import (
     MAX_QUALITY_RETRIES,
     VIDEO_DENSITY_MIN,
     check_density as _check_density,
+    ensure_h264,
     format_transcript_for_llm as _format_transcript_for_llm,
     merge_speaker_labels,
     run_video_quality_gate,
@@ -258,14 +259,14 @@ def step_download_video(task: dict, config: Config) -> str:
         config: Config dataclass.
 
     Returns:
-        Path to the downloaded .webm file.
+        Path to the downloaded .mp4 file.
 
     Raises:
         StepError(RETRY): On download failure.
     """
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
-    output_path = Path(config.temp_dir) / f"{slug}.webm"
+    output_path = Path(config.temp_dir) / f"{slug}.mp4"
 
     result = subprocess.run(
         [
@@ -274,8 +275,8 @@ def step_download_video(task: dict, config: Config) -> str:
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
-            "-f", "bestvideo[height<=720][vcodec^=vp9]+bestaudio[acodec^=opus]/bestvideo[height<=720]+bestaudio/best[height<=720]",
-            "--merge-output-format", "webm",
+            "-f", "bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=720]+bestaudio/best[height<=720]",
+            "--merge-output-format", "mp4",
             "-o", str(output_path),
             *YTDL_RATE_FLAGS,
             url,
@@ -293,7 +294,7 @@ def step_download_video(task: dict, config: Config) -> str:
                 "--remote-components", "ejs:github",
                 "--no-update",
                 "-f", "best[height<=720]",
-                "--merge-output-format", "webm",
+                "--merge-output-format", "mp4",
                 "-o", str(output_path),
                 *YTDL_RATE_FLAGS,
                 url,
@@ -314,6 +315,10 @@ def step_download_video(task: dict, config: Config) -> str:
             error_type=ErrorType.RETRY,
             step_name="download_video",
         )
+
+    # Some YouTube videos only offer VP9/AV1 at the chosen height — normalize
+    # to H.264 so the archived video plays in every browser (incl. Safari).
+    output_path = Path(ensure_h264(output_path))
 
     return str(output_path)
 
@@ -517,7 +522,7 @@ def _generate_chapters(meta_path: Path, transcript: dict) -> list[dict]:
 def step_cleanup_temp(task: dict, config: Config) -> str:
     """Remove temporary files: 8kHz/16kHz WAV + diarization JSON.
 
-    Keeps video (.webm) and merged transcript JSON.
+    Keeps video (.mp4) and merged transcript JSON.
 
     Args:
         task: Task dict with slug.
@@ -770,7 +775,7 @@ OUTPUT FORMAT:
   source: {source_domain} ({metadata.get('uploader', 'Unknown')})
   source_url: {source_url}
   source_files:
-    video: {tailscale_base}/{config.minio_bucket}/videos/{slug}.webm
+    video: {tailscale_base}/{config.minio_bucket}/videos/{slug}.mp4
     transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{slug}.json
   confidence: plausible
   tags: [tag1, tag2, tag3]
@@ -876,11 +881,11 @@ def step_quality_gate(task: dict, config: Config) -> str:
 def step_minio_upload(task: dict, config: Config) -> str:
     """Upload video, audio, and transcript to MinIO.
 
-    Uploads .webm, extracted .mp3, and transcript JSON. Delegates upload to
+    Uploads .mp4, extracted .mp3, and transcript JSON. Delegates upload to
     archival.upload_file_to_minio and updates note frontmatter with MinIO URLs.
     """
     slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{slug}.webm"
+    video_path = Path(config.temp_dir) / f"{slug}.mp4"
 
     uploaded = upload_video_artifacts(slug, config, video_path)
 

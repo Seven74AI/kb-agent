@@ -293,15 +293,16 @@ def test_step_extract_metadata_bot_detection(config, task_dict):
 
 def test_step_download_video_success(config, task_dict):
     """Test successful video download."""
-    video_path = Path(config.temp_dir) / f"{task_dict['slug']}.webm"
+    video_path = Path(config.temp_dir) / f"{task_dict['slug']}.mp4"
     
-    with patch("subprocess.run") as mock_run:
+    with patch("subprocess.run") as mock_run, \
+         patch("agent.pipelines.youtube.ensure_h264", side_effect=lambda p: p):
         result = MagicMock()
         result.returncode = 0
         mock_run.return_value = result
         
         # Create the file to simulate successful download
-        video_path.write_text("fake webm data")
+        video_path.write_text("fake mp4 data")
         
         output = step_download_video(task_dict, config)
     
@@ -658,7 +659,7 @@ date: 2026-06-19
 source: youtube.com (Test Channel)
 source_url: https://www.youtube.com/watch?v=dQw4w9WgXcQ
 source_files:
-  video: minio://kb-agent-archive/videos/test_channel_test-video.webm
+  video: minio://kb-agent-archive/videos/test_channel_test-video.mp4
   audio: minio://kb-agent-archive/videos/test_channel_test-video.mp3
   transcript: minio://kb-agent-archive/videos/test_channel_test-video.json
 confidence: plausible
@@ -821,8 +822,8 @@ def test_step_minio_upload(config, task_dict):
     slug = task_dict["slug"]
     
     # Create mock files
-    video_path = Path(config.temp_dir) / f"{slug}.webm"
-    video_path.write_text("fake webm")
+    video_path = Path(config.temp_dir) / f"{slug}.mp4"
+    video_path.write_text("fake mp4")
     
     merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
     merged_path.write_text('{"test": true}')
