@@ -118,6 +118,33 @@ def _is_music_only(transcript: dict) -> bool:
     return total_chars < MUSIC_ONLY_CHAR_THRESHOLD
 
 
+def _fetch_ig_caption(url: str, config: Config) -> str:
+    """Fetch an Instagram post caption via yt-dlp %(description)s.
+
+    The caption (post description) often carries the substantive content for
+    music-only reels and adds context for speech reels alike. Degrades to ""
+    on any failure (stale cookies, private post, timeout).
+    """
+    try:
+        result = subprocess.run(
+            [
+                YTDLP_BIN,
+                "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
+                "--js-runtimes", "node",
+                "--print", "%(description)s",
+                url,
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            caption = result.stdout.strip()
+            if caption and caption.lower() not in ("none", "null"):
+                return caption
+    except Exception:
+        pass
+    return ""
+
+
 # ── Reel Steps ────────────────────────────────────────────────────────────────
 
 def step_ig_reel_validate(task: dict, config: Config) -> str:
@@ -281,6 +308,10 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     merged = json.loads(merged_path.read_text())
     music_only = merged.get("music_only", False)
 
+    # Fetch the post caption/description — carries substantive content for
+    # music-only reels and adds context for speech reels alike.
+    caption = _fetch_ig_caption(source_url, config)
+
     logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
     llm.set_task_context(task["id"], logs_conn)
@@ -295,14 +326,15 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
 
 WARNING: This reel is music-only — the audio contains no meaningful speech.
 The transcript is provided for completeness but the primary content
-comes from the reel's caption/description.
+comes from the reel's caption/description, which is provided in the
+user prompt under "POST CAPTION / DESCRIPTION".
 
 SOURCE: Instagram reel ({source_url})
 DATE: {date_str}
 
 TASK: Write a note that:
 1. Notes this is a music/BGM reel with minimal speech
-2. If a caption was detected, analyze it as the primary content
+2. Analyze the provided caption as the primary content
 3. Describe what can be observed from the transcript (if any words were detected)
 
 OUTPUT FORMAT:
@@ -313,11 +345,12 @@ OUTPUT FORMAT:
     else:
         system_prompt = f"""You are a knowledge base curator specialized in Instagram reel content.
 
-SOURCE: An Instagram reel video transcript.
+SOURCE: An Instagram reel video transcript plus its post caption/description.
 
 INSTAGRAM CONTEXT:
 - This is short-form social media content — typically 15-90 seconds
 - Format: vertical video, often trending audio + visual content
+- The post caption/description is provided separately and may carry the primary message (hashtags, claims, links)
 
 TASK: Write a concise but thorough analysis note.
 
@@ -343,10 +376,17 @@ OUTPUT FORMAT:
   tags: [instagram, reel]
 - Then sections as above."""
 
+    caption_block = (
+        f"POST CAPTION / DESCRIPTION:\n{caption}\n=== END CAPTION ==="
+        if caption
+        else "POST CAPTION / DESCRIPTION: (none detected)"
+    )
     user_prompt = f"""TRANSCRIPT:
 {transcript_text}
 
 === END TRANSCRIPT ===
+
+{caption_block}
 
 Write a note following the template above.
 {'This is a music-only reel — prioritize any detected caption text over the transcript.' if music_only else 'Analyze the full transcript for key points.'}"""

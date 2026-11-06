@@ -474,6 +474,13 @@ Great content.""")
         merged_path = Path(config.temp_dir) / f"{task_dict['slug']}_merged.json"
         merged_path.write_text(json.dumps(merged))
 
+        # Raw extraction with a post caption — must reach the LLM prompt
+        raw_path = Path(config.temp_dir) / f"{task_dict['slug']}_threads_raw.json"
+        raw_path.write_text(json.dumps({
+            "author": "testuser",
+            "captions": ["Check out this video — the caption carries the real claim."],
+        }))
+
         mock_llm = MagicMock()
         mock_llm.call.return_value = LLMResponse(content="""---
 date: 2026-01-01
@@ -491,6 +498,10 @@ Video content.""")
         result = step_threads_video_synthesize(task_dict, config)
         assert result.endswith(".md")
         assert Path(result).exists()
+
+        # Caption must be passed into the user prompt alongside the transcript
+        user_prompt = mock_llm.call.call_args.kwargs.get("user_prompt", "")
+        assert "the caption carries the real claim" in user_prompt
 
 
 # ── Step Tests: Quality Gate ─────────────────────────────────────────────────
