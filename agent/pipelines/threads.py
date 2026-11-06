@@ -31,6 +31,7 @@ from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
     _slug_path,
+    ensure_h264,
     format_transcript_for_llm,
     merge_speaker_labels,
     run_threads_video_quality_gate,
@@ -551,6 +552,9 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
             error_type=ErrorType.FAIL,
             step_name="extract_video",
         )
+
+    # Normalize to H.264 — Threads can serve VP9/HEVC in an .mp4 container.
+    output_path = ensure_h264(output_path)
 
     return str(output_path)
 

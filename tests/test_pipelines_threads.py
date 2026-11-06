@@ -286,7 +286,8 @@ class TestVideoExtraction:
 
     @patch("agent.pipelines.threads._curl_threads")
     @patch("subprocess.run")
-    def test_extract_video_success(self, mock_run, mock_curl, config, task_dict):
+    @patch("agent.pipelines.threads.ensure_h264", side_effect=lambda p: p)
+    def test_extract_video_success(self, mock_ensure_h264, mock_run, mock_curl, config, task_dict):
         html = '{"video_versions":[{"url":"https://v.cdn/v.mp4","height":1080}],"caption":{"text":"x"},"username":"x"}<div class="_ab6c">x</div>'
         mock_curl.return_value = html
 
