@@ -417,6 +417,19 @@ class TestQualityGate:
         assert data["passed"] is False
         assert any("Slide-by-Slide" in f for f in data.get("failures", []))
 
+    @patch("agent.pipelines.instagram.run_threads_video_quality_gate", return_value=(True, 1))
+    def test_quality_gate_reel_synthesize_uses_key_point_gate(self, mock_gate, config, reel_task):
+        # Re-synthesized reels carry content_type "instagram_reel_synthesize",
+        # which must route to the key-point gate, NOT the carousel slide check.
+        reel_task["content_type"] = "instagram_reel_synthesize"
+        note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{reel_task['slug']}.md"
+        note_path.write_text("## Post Description\n> caption\n\n## Key Points\n- a\n- b\n- c\n")
+
+        result = step_ig_quality_gate(reel_task, config)
+        data = json.loads(result)
+        assert data["passed"] is True
+        mock_gate.assert_called_once()
+
 
 # ── Cleanup ─────────────────────────────────────────────────────────────────
 

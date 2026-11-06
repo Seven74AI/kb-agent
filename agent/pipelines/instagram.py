@@ -32,6 +32,7 @@ from agent.pipelines.video_common import (
     _slug_path,
     format_transcript_for_llm,
     merge_speaker_labels,
+    run_threads_video_quality_gate,
     run_video_quality_gate,
     step_diarize,
     step_extract_audio,
@@ -722,8 +723,9 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
     if not note_path.exists():
         raise FileNotFoundError(f"Note not found: {note_path}")
 
-    if content_type == "instagram_reel":
-        passed, rounds = run_video_quality_gate(note_path, config, task["id"])
+    if content_type in ("instagram_reel", "instagram_reel_synthesize"):
+        # Reels are short-form — key points only, not the YouTube Concepts gate.
+        passed, rounds = run_threads_video_quality_gate(note_path, config, task["id"])
         return json.dumps({"passed": passed, "rounds": rounds})
     elif content_type == "instagram_comment":
         # Comment note: must capture the comment + parent context.
