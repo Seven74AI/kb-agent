@@ -251,7 +251,7 @@ exactly what failed. LLM re-reads source, writes fresh note. "Never push v1" enf
 programmatically — if gates pass, push immediately.
 
 **What we DON'T check:** No hallucination detection (LLM can't fact-check another LLM).
-Accept factual content at face value, same as Hermes today.
+Accept factual content at face value, same as Hermes.
 
 ### See Also
 - **NOT part of the main synthesis call.** Separate post-synthesis flow:

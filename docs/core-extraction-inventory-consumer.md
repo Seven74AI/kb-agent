@@ -23,7 +23,7 @@ same functions.
 | `agent/see_also.py` (via `agent/pipelines/see_also.py`) | Vault search during `see_also` step |
 | `scripts/tdah_daily_check.py` | Cron-style scheduled job (legacy Hermes kanban path; future `watch_source`) |
 | `scripts/rotate_logs.py` | Scheduled log archival (FTS on **logs**, not vault notes) |
-| `scripts/batch_transcribe.py`, `modal/kb_transcribe.py` | Batch transcription helpers (no submit/detect/status API today) |
+| `scripts/batch_transcribe.py`, `modal/kb_transcribe.py` | Batch transcription helpers (no submit/detect/status API) |
 
 **Out of scope for this doc (HTTP adapters):** `agent/webhook.py` (`POST /submit`,
 `POST /resume`, `GET /dashboard`), though those paths duplicate orchestration that
@@ -54,7 +54,7 @@ From the PRD, adapters should call:
 
 ## 1. Submit (enqueue)
 
-**Consumer today:** does **not** accept new URLs. Tasks are created on the HTTP
+**Consumer:** does **not** accept new URLs. Tasks are created on the HTTP
 `POST /submit` path (`agent/webhook.py` → `agent/db.create_task`). The consumer
 only **claims** existing `pending` rows.
 
@@ -63,18 +63,18 @@ only **claims** existing `pending` rows.
 | File | Symbol | Purity | Dependencies | Must switch to core |
 |------|--------|--------|--------------|---------------------|
 | `agent/pipelines/books.py` | `step_classify_content` | IO | Mega download dir, `_pdf_preflight`, JSON classification | When **delegate** creates child tasks, call `core.submit_url` / shared `enqueue_task` instead of inline `create_task` (not implemented yet; see FIXME on `delegate` step) |
-| `agent/pipelines/books.py` | `Step(name="delegate", …)` | — | Re-runs `step_classify_content` today | Replace with dispatcher that calls core enqueue per classified book |
+| `agent/pipelines/books.py` | `Step(name="delegate", …)` | — | Re-runs `step_classify_content` | Replace with dispatcher that calls core enqueue per classified book |
 | `scripts/tdah_daily_check.py` | `main()` | IO | curl, ffmpeg, Modal, MinIO, **Hermes kanban** | Future `watch_source` should call `core.submit_url` (Bunny/TDAH URLs) instead of Hermes tickets |
 
-### 1.2 Shared enqueue primitive (used by HTTP today; consumer will reuse)
+### 1.2 Shared enqueue primitive (used by HTTP; consumer will reuse)
 
 | File | Symbol | Purity | Dependencies | Must switch to core |
 |------|--------|--------|--------------|---------------------|
 | `agent/db.py` | `create_task` | IO | SQLite `agent.db`, step name list | **`core.submit_url`** (or `core.enqueue_task`) — single implementation; webhook + mega delegate + watch cron |
-| `agent/webhook.py` | `PIPELINE_STEPS` | Pure (data) | Step name lists per content type | **`core.pipeline_steps_for(content_type)`** — today duplicated conceptually vs `agent/pipelines` registry |
+| `agent/webhook.py` | `PIPELINE_STEPS` | Pure (data) | Step name lists per content type | **`core.pipeline_steps_for(content_type)`** — duplicated conceptually vs `agent/pipelines` registry |
 | `agent/webhook.py` | `slugify` | Pure | — | **`core.slugify_url`** |
-| `agent/detection.py` | `dedup_check` | IO | `grep` on vault | Part of **`core.submit_url`** pre-checks (also used on HTTP submit only today) |
-| `agent/detection.py` | `preflight_health` | IO | cookies, curl, `which megadl` | Part of **`core.submit_url`** (HTTP only today) |
+| `agent/detection.py` | `dedup_check` | IO | `grep` on vault | Part of **`core.submit_url`** pre-checks (also used on HTTP submit only) |
+| `agent/detection.py` | `preflight_health` | IO | cookies, curl, `which megadl` | Part of **`core.submit_url`** (HTTP only) |
 | `agent/detection.py` | `detect_platform`, `detect_content_subtype` | Mixed | `agent/router.route_jev`, legacy scrapers | Part of **`core.detect_type`** then submit |
 
 ### 1.3 Consumer call sites (claim only)
@@ -92,7 +92,7 @@ only **claims** existing `pending` rows.
 on **HTTP submit** only. **Consumer-side detect** re-classifies or validates during
 pipeline execution.
 
-### 2.1 Module: `agent/detection.py` (shared library; not invoked by consumer today)
+### 2.1 Module: `agent/detection.py` (shared library; not invoked by consumer)
 
 | Symbol | Purity | Dependencies | Consumer relevance |
 |--------|--------|--------------|-------------------|
@@ -111,7 +111,7 @@ pipeline execution.
 |------|--------|--------|--------------|---------------------|
 | `agent/pipelines/threads.py` | `step_threads_detect` | IO | `_curl_threads`, `_has_video_versions`, `_is_login_wall` | **`core.detect_threads_post_type`** or fold into `detect_type` with live HTML signal |
 | `agent/pipelines/threads.py` | `_has_video_versions`, `_is_login_wall`, `_curl_threads` | Mixed | cookies, curl | Helpers for detect step |
-| `agent/pipelines/books.py` | `step_classify_content` | IO | filesystem, `_pdf_preflight`, `quality_score` | **`core.classify_mega_books`** (post-download, consumer-only today) |
+| `agent/pipelines/books.py` | `step_classify_content` | IO | filesystem, `_pdf_preflight`, `quality_score` | **`core.classify_mega_books`** (post-download, consumer-only) |
 | `agent/pipelines/books.py` | `_pdf_preflight`, `quality_score`, `_quality_score` | Mixed | pymupdf | Book/PDF tier detection inside consumer |
 | `agent/pipelines/youtube.py` | `step_extract_metadata` (bot branch) | IO | yt-dlp stderr heuristics | Consumer re-validates cookies/IP at run time — overlap with **`core.preflight`** |
 | `agent/pipelines/youtube.py` | `_validate_cookies` | IO | cookie file | Duplicate of detection preflight — consolidate in core |
@@ -139,7 +139,7 @@ pipeline execution.
 ## 3. Status (task / step visibility)
 
 **Consumer** is the source of truth for **mutating** task/step state during
-execution. **Reading** queue state for humans/agents is HTTP today (`dashboard`).
+execution. **Reading** queue state for humans/agents is HTTP (`dashboard`).
 
 ### 3.1 Writes (consumer path)
 
@@ -153,9 +153,9 @@ execution. **Reading** queue state for humans/agents is HTTP today (`dashboard`)
 | `agent/db.py` | `pause_task` | IO | SQLite | Worker internal |
 | `agent/consumer.py` | `Consumer._execute_task` | IO | all DB fns above, `StepError` handling | Orchestration stays in consumer; **state transitions** → `core` task service |
 | `agent/consumer.py` | `Consumer._recover_orphans` | IO | SQL + `/proc` PID check | Crash recovery — **`core.recover_in_progress_tasks`** |
-| `run.py` | `_recover_orphans` | IO | duplicates consumer orphan logic | **Single core implementation** (today dual path) |
+| `run.py` | `_recover_orphans` | IO | duplicates consumer orphan logic | **Single core implementation** (dual path) |
 
-### 3.2 Reads (HTTP today; MCP `list_tasks` / `get_task`)
+### 3.2 Reads (HTTP; MCP `list_tasks` / `get_task`)
 
 | File | Symbol | Used by consumer? | Must switch to core |
 |------|--------|-------------------|---------------------|
@@ -182,7 +182,7 @@ Three distinct mechanisms:
 2. **Step retry** — transient failures inside consumer loop.
 3. **Crash resume** — orphan `in_progress` tasks/steps.
 
-### 4.1 Operator resume (HTTP only today)
+### 4.1 Operator resume (HTTP only)
 
 | File | Symbol | Purity | Dependencies | Must switch to core |
 |------|--------|--------|--------------|---------------------|
