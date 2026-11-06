@@ -243,7 +243,8 @@ class TestReelSynthesis:
     """Tests for step_ig_reel_synthesize."""
 
     @patch("agent.pipelines.instagram.get_llm_client")
-    def test_synthesize_normal(self, mock_get_llm, config, reel_task):
+    @patch("agent.pipelines.instagram._fetch_ig_caption", return_value="")
+    def test_synthesize_normal(self, mock_fetch_caption, mock_get_llm, config, reel_task):
         merged = {
             "segments": [
                 {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "text": "Hello everyone!"},
@@ -270,7 +271,8 @@ Good content.""")
         assert Path(result).exists()
 
     @patch("agent.pipelines.instagram.get_llm_client")
-    def test_synthesize_music_only(self, mock_get_llm, config, reel_task):
+    @patch("agent.pipelines.instagram._fetch_ig_caption", return_value="This caption carries the actual claim about the herbal remedy.")
+    def test_synthesize_music_only(self, mock_fetch_caption, mock_get_llm, config, reel_task):
         merged = {
             "segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "text": "🎵"}],
             "music_only": True,
@@ -292,6 +294,10 @@ Music-only reel.""")
 
         result = step_ig_reel_synthesize(reel_task, config)
         assert result.endswith(".md")
+
+        # Caption must reach the LLM prompt (primary content for music-only reels)
+        user_prompt = mock_llm.call.call_args.kwargs.get("user_prompt", "")
+        assert "the actual claim about the herbal remedy" in user_prompt
 
 
 # ── Carousel Steps ───────────────────────────────────────────────────────────
