@@ -119,6 +119,12 @@ def test_strip_code_fence_restores_missing_delimiter():
     assert out.startswith("---\ndate: 2026-11-05")
 
 
+def test_strip_code_fence_adds_closing_delimiter():
+    # frontmatter with opening --- but missing the closing --- before the heading
+    out = strip_code_fence("---\ndate: 2026-11-05\ntags: [x]\n\n# Title\nbody")
+    assert "---\ndate: 2026-11-05\ntags: [x]\n---" in out
+
+
 def test_strip_code_fence_noop():
     assert strip_code_fence("---\ndate: x\n---\nbody") == "---\ndate: x\n---\nbody\n"
 
