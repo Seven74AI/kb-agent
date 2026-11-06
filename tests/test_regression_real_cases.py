@@ -268,6 +268,53 @@ def test_reel_note_has_verbatim_post_description_section():
     assert "> Vu tout ce qu'on mange" in REEL_CAPTION_NOTE
 
 
+# ── Video codec normalization (browser compatibility) ────────────────────────
+
+def test_ensure_h264_transcodes_vp9(tmp_path):
+    # Real failure: an Instagram reel archived as VP9-in-.mp4 wouldn't play in
+    # the browser. ensure_h264 must normalize it to H.264.
+    import shutil
+    import subprocess as sp
+    from agent.pipelines.video_common import ensure_h264
+
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        import pytest as _pytest
+        _pytest.skip("ffmpeg/ffprobe not available")
+
+    vp9 = tmp_path / "reel.mp4"
+    sp.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black",
+         "-t", "1", "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", str(vp9)],
+        capture_output=True, check=True,
+    )
+    out = ensure_h264(vp9)
+    assert out != vp9
+    codec = sp.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert codec == "h264"
+
+
+def test_ensure_h264_passthrough_h264(tmp_path):
+    import shutil
+    import subprocess as sp
+    from agent.pipelines.video_common import ensure_h264
+
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        import pytest as _pytest
+        _pytest.skip("ffmpeg/ffprobe not available")
+
+    h264 = tmp_path / "reel.mp4"
+    sp.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black",
+         "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(h264)],
+        capture_output=True, check=True,
+    )
+    assert ensure_h264(h264) == h264
+
+
 def test_threads_text_note_quotes_are_counted():
     from agent.quality import count_quotes
 

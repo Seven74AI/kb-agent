@@ -48,6 +48,46 @@ def _resolve_slug(task: dict) -> str:
     return _slug_path(task.get("slug", task["id"][:8]))
 
 
+def ensure_h264(video_path: Path) -> Path:
+    """Transcode a downloaded video to H.264/MP4 if it isn't already.
+
+    Instagram (and some other sources) can deliver VP9/HEVC video in an .mp4
+    container, which browsers — Safari especially — cannot play. Probe the
+    video codec and transcode to libx264 when needed. Returns the (possibly
+    replaced) video path; falls back to the original on any probe/transcode
+    failure so a codec mismatch never blocks ingestion.
+    """
+    codec = ""
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if probe.returncode == 0:
+            codec = probe.stdout.strip().lower()
+    except Exception:
+        codec = ""
+
+    if codec in ("h264", "avc1"):
+        return video_path
+
+    out_path = video_path.with_name(video_path.stem + "_h264" + video_path.suffix)
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_path),
+             "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+             "-c:a", "aac", "-movflags", "+faststart", str(out_path)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode == 0:
+            return out_path
+    except Exception:
+        pass
+    return video_path
+
+
+
 # ── Audio Extraction ─────────────────────────────────────────────────────────
 
 def _find_video_file(config: Config, slug: str) -> Path:
