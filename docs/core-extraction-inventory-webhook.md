@@ -1,6 +1,6 @@
 # Core extraction inventory — Flask webhook layer
 
-Inventory of **submit**, **detect**, **status**, **resume**, **search**, and **note** behavior as implemented today in the Flask webhook (`agent/webhook.py`) and symbols it calls directly. Intended input for the core/adapter split described in `docs/prd-kb-mcp-consolidation.md`.
+Inventory of **submit**, **detect**, **status**, **resume**, **search**, and **note** behavior as implemented in the Flask webhook (`agent/webhook.py`) and symbols it calls directly. Intended input for the core/adapter split described in `docs/prd-kb-mcp-consolidation.md`.
 
 **Scope:** `agent/webhook.py` routes and module-level helpers, plus `agent/detection.py` / `agent/db.py` entry points invoked from the webhook (not consumer or pipeline code).
 
@@ -64,7 +64,7 @@ All locations where domain logic is tied to Flask or HTTP, to be thinned in a co
 
 ## Gaps vs planned MCP core tools
 
-| Planned core capability | Webhook coverage today |
+| Planned core capability | Webhook coverage |
 |-------------------------|-------------------------|
 | `submit_url` | `POST /submit` (+ inline detect/dedup/health) |
 | `detect_type` | Embedded only inside `submit`; no standalone detect endpoint |

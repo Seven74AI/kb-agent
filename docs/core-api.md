@@ -42,7 +42,7 @@ Deterministic regex classifier. No network I/O.
 ### `detect_type(url, *, subtype_detector=None) -> DetectTypeResult`
 
 - Always runs `detect_platform`.
-- If `subtype_detector` is provided, `content_type = subtype_detector(url, platform)` (today: `agent.detection.detect_content_subtype`).
+- If `subtype_detector` is provided, `content_type = subtype_detector(url, platform)`.
 - If omitted, `content_type == platform` (cheap probe for agents that only need platform).
 
 ### `submit_url(conn, url, *, vault_path, deps) -> SubmitResult`
@@ -58,7 +58,7 @@ Deterministic regex classifier. No network I/O.
 
 **Outcomes (`SubmitOutcome`):**
 
-| Outcome | HTTP (today) | Fields |
+| Outcome | HTTP | Fields |
 |---------|--------------|--------|
 | `SKIPPED` | 200 | `reason` (vault dedup) |
 | `PAUSED` | 200 | `task_id`, `reason` (health check) |

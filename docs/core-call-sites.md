@@ -1,14 +1,14 @@
 # Core migration — call-site inventory
 
-Every location that today implements (or partially implements) submit/detect/status/resume/search/note behavior and must switch to `core` during adapter refactors.
+Every location that implements (or partially implements) submit/detect/status/resume/search/note behavior and must switch to `core` during adapter refactors.
 
 ## Submit / enqueue
 
 | Location | What it does | Target core API |
 |----------|--------------|-----------------|
 | `agent/webhook.py` — `submit()` | Full enqueue flow | `core.submit.submit_url` + `SubmitDependencies` wired to `agent.detection` / `agent.db` |
-| `agent/webhook.py` — `PIPELINE_STEPS` | Step list dict | `core.pipelines.PIPELINE_STEPS` (duplicate today) |
-| `agent/webhook.py` — `slugify()` | URL → slug | `core.util.slugify` (duplicate today) |
+| `agent/webhook.py` — `PIPELINE_STEPS` | Step list dict | `core.pipelines.PIPELINE_STEPS` (duplicate) |
+| `agent/webhook.py` — `slugify()` | URL → slug | `core.util.slugify` (duplicate) |
 | `run.py` | Does not submit URLs | — |
 | `scripts/tdah_daily_check.py` | Hermes kanban tickets, not kb-agent queue | Out of scope (separate automation) |
 
@@ -19,7 +19,7 @@ Every location that today implements (or partially implements) submit/detect/sta
 
 **Injected deps (stay in `agent` until moved):**
 
-- `detect_platform` — today `agent.detection`; regex copy in `core.detect` ✓
+- `detect_platform` — `agent.detection`; regex copy in `core.detect` ✓
 - `detect_content_subtype`, `preflight_health`, `dedup_check` — `agent.detection`
 
 ## Detect
@@ -41,7 +41,7 @@ Every location that today implements (or partially implements) submit/detect/sta
 | `agent/db.py` — `get_all_tasks`, `get_task_steps`, `get_last_log_line` | SQLite reads | Used by core status layer (adapter passes `conn`) |
 | `agent/consumer.py` | `claim_task`, `get_next_step`, step state updates | Execution path — not MCP status tools (future extraction) |
 
-**Gap:** No HTTP route for single-task GET today; MCP `get_task` will use `core.status.get_task` directly.
+**Gap:** No HTTP route for single-task GET; MCP `get_task` will use `core.status.get_task` directly.
 
 ## Resume / retry
 
@@ -61,7 +61,7 @@ Every location that today implements (or partially implements) submit/detect/sta
 | `agent/pipelines/see_also.py` — `step_see_also` | Read note + LLM | Synthesis pipeline; `get_note` is read-only for agents |
 | Hermes / Obsidian plugins | N/A | — |
 
-**New surface (no Flask route today):**
+**New surface (no Flask route):**
 
 - `core.notes.search_notes`
 - `core.notes.get_note`

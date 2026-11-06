@@ -429,7 +429,7 @@ def strip_code_fence(content: str) -> str:
     The synthesis LLM sometimes wraps the YAML frontmatter in a ```yaml code
     fence — and uses the fence *in place of* the opening ``---`` delimiter —
     which breaks the frontmatter parser + quality gate. Strip the fence and
-    restore the opening ``---`` if it is missing.
+    ensure BOTH the opening and closing ``---`` delimiters are present.
     """
     content = (content or "").strip()
     for prefix in ("```yaml", "```markdown", "```"):
@@ -442,6 +442,15 @@ def strip_code_fence(content: str) -> str:
     # the LLM often emits the fence instead of the opening --- ; restore it
     if not content.startswith("---"):
         content = "---\n" + content
+    # ensure a closing --- before the first heading (frontmatter terminator)
+    lines = content.split("\n")
+    heading_idx = next((i for i, l in enumerate(lines) if l.startswith("#")), None)
+    if heading_idx is not None and not any(l.strip() == "---" for l in lines[1:heading_idx]):
+        while heading_idx > 1 and lines[heading_idx - 1].strip() == "":
+            heading_idx -= 1
+        lines.insert(heading_idx, "---")
+        lines.insert(heading_idx + 1, "")
+        content = "\n".join(lines)
     return content + "\n"
 
 
