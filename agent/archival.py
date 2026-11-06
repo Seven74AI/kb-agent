@@ -4,6 +4,7 @@ Deterministic shell commands for archiving source content and pushing notes.
 Used by all pipelines (web, threads, instagram, books, youtube).
 """
 
+import os
 import re
 import subprocess
 import threading
@@ -78,7 +79,7 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
             "epub": "epub",
             "pdf": "pdf",
         }.get(suffix, "raw")
-        lines.append(f"  {kind}: {config.minio_tailscale_base}/{config.minio_bucket}/{u}")
+        lines.append(f"  {kind}: {u}")
     block = "\n".join(lines)
     new = re.sub(
         r"source_files:.*?(?=\n---|\n[a-zA-Z_]+:|\Z)",
@@ -126,7 +127,7 @@ CONTENT_TYPE_TO_VAULT_FOLDER: dict[str, str] = {
 }
 
 
-def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60, tailscale_base: str = "") -> str:
+def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str:
     """Upload a single file to MinIO using mc cp.
 
     Args:
@@ -144,8 +145,9 @@ def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60, tailsc
     if not source_path.exists():
         raise FileNotFoundError(f"Source file not found: {source_path}")
 
+    alias = os.environ.get("STORAGE_ALIAS", "minio")
     result = subprocess.run(
-        ["mc", "cp", str(source_path), f"minio/{dest}"],
+        ["mc", "cp", str(source_path), f"{alias}/{dest}"],
         capture_output=True, text=True, timeout=timeout,
     )
 
@@ -156,8 +158,8 @@ def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60, tailsc
             step_name="minio_upload",
         )
 
-    tailscale_url = f"{tailscale_base}/{dest}"
-    return tailscale_url
+    # Return the object KEY (bucket stripped) — notes reference keys, not URLs.
+    return dest.split("/", 1)[1] if "/" in dest else dest
 
 
 # ── Step: MinIO Upload ────────────────────────────────────────────────────────
@@ -188,7 +190,7 @@ def step_minio_upload(task: dict, config, source_path: Path | None = None) -> st
     folder = CONTENT_TYPE_TO_MINIO_FOLDER.get(content_type, "articles")
     dest = f"{config.minio_bucket}/{folder}/{slug}.md"
 
-    return upload_file_to_minio(source_path, dest, tailscale_base=config.minio_tailscale_base)
+    return upload_file_to_minio(source_path, dest)
 
 
 # ── Step: Git Push ────────────────────────────────────────────────────────────

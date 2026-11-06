@@ -566,7 +566,7 @@ minio: http://minio.test/base/knowledge-base/placeholder/slug.md
 
         result = step_minio_upload(task_dict, config)
 
-    assert "minio.test/base" in result
+    assert result.startswith("articles/")
 
     # Verify the placeholder was replaced with the real MinIO URL in frontmatter
     updated_content = note_path.read_text(encoding="utf-8")
@@ -574,9 +574,9 @@ minio: http://minio.test/base/knowledge-base/placeholder/slug.md
         f"Real MinIO URL ({result}) not found in note frontmatter. "
         f"Placeholder was not replaced."
     )
-    # The minio: field in frontmatter must point to the real URL (not the placeholder path)
-    assert "knowledge-base/articles/" in updated_content, (
-        "MinIO URL should contain the real folder path (articles/...), not the template placeholder"
+    # The minio: field in frontmatter must point to the object key (not the placeholder path)
+    assert "articles/" in updated_content, (
+        "MinIO key should contain the real folder path (articles/...), not the template placeholder"
     )
 
 

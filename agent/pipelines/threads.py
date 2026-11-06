@@ -708,8 +708,8 @@ OUTPUT FORMAT:
   source: threads.net (@{author})
   source_url: {source_url}
   source_files:
-    video: {config.minio_tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
-    transcript: {config.minio_tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
+    video: videos/{safe_slug}.mp4
+    transcript: transcripts/{safe_slug}.json
   confidence: plausible
   tags: [threads, video]
 - Then the note sections as shown above.
