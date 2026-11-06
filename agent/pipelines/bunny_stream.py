@@ -28,6 +28,7 @@ from agent.pipelines.video_common import (
     run_video_quality_gate,
     step_extract_audio,
     step_fetch_transcript,
+    strip_code_fence,
     upload_video_artifacts,
 )
 
@@ -324,7 +325,7 @@ def step_synthesize_note(task: dict, config: Config) -> str:
 
     note_path = _note_path(config, slug)
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(response.content, encoding="utf-8")
+    note_path.write_text(strip_code_fence(response.content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 
