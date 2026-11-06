@@ -240,7 +240,6 @@ def _build_synthesis_prompt(source_url: str, slug: str, config: Config) -> str:
     template = template_path.read_text(encoding="utf-8") if template_path.exists() else ""
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    tailscale_base = config.minio_tailscale_base
 
     return f"""Tu es un curateur de base de connaissances spécialisé dans les conférences TDAH.
 La vidéo source est en FRANÇAIS. Tu DOIS rédiger TOUT le contenu ET TOUS les titres de sections en FRANÇAIS.
@@ -265,8 +264,8 @@ FORMAT DE SORTIE :
   source: "<Intervenant> — <Titre> (Sommet TDAH Adulte — Terr'à Grandir)"
   source_url: {source_url}
   source_files:
-    video: {tailscale_base}/{config.minio_bucket}/videos/{slug}.mp4
-    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{slug}.json
+    video: videos/{slug}.mp4
+    transcript: transcripts/{slug}.json
   confidence: plausible
   tags: [tdah, adhd, conference, sommet-tdah-2026]
 - Puis les sections dans l'ordre canonique du modèle (Métadonnées → … → Voir aussi).
@@ -371,20 +370,19 @@ def _update_note_source_files(slug: str, config: Config, uploaded: list) -> None
     if not uploaded:
         return
 
-    tailscale_base = config.minio_tailscale_base
     content = note_path.read_text(encoding="utf-8")
 
     lines = ["source_files:"]
     for u in uploaded:
         key = Path(u).suffix.lstrip(".")
         if u.startswith("transcripts/"):
-            lines.append(f"  transcript: {tailscale_base}/{config.minio_bucket}/{u}")
+            lines.append(f"  transcript: {u}")
         elif u.endswith(".mp4"):
-            lines.append(f"  video: {tailscale_base}/{config.minio_bucket}/{u}")
+            lines.append(f"  video: {u}")
         elif u.endswith(".mp3"):
-            lines.append(f"  audio: {tailscale_base}/{config.minio_bucket}/{u}")
+            lines.append(f"  audio: {u}")
         else:
-            lines.append(f"  {key}: {tailscale_base}/{config.minio_bucket}/{u}")
+            lines.append(f"  {key}: {u}")
 
     source_files_block = "\n".join(lines)
     if "source_files:" in content:

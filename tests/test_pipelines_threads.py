@@ -563,7 +563,7 @@ raw: <filled by archival step>
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         result = step_threads_minio_upload(task_dict, config)
-        assert result.startswith("http://minio.test/base/")
+        assert result.startswith("threads/")
 
         content = note_path.read_text()
         assert f"raw: {result}" in content

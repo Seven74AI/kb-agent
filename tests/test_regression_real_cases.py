@@ -325,3 +325,41 @@ def test_count_quotes_tolerates_bullet_marker():
     from agent.quality import count_quotes
 
     assert count_quotes(["> own line", "  > indented", "- > bullet"]) == 3
+
+
+# ── Storage seam: notes store keys, never absolute URLs (Tigris migration) ───
+
+def test_write_source_files_block_emits_keys(tmp_path):
+    """write_source_files_block must write object keys, not host-prefixed URLs."""
+    from agent.archival import write_source_files_block
+
+    note = tmp_path / "note.md"
+    note.write_text(
+        "---\ndate: 2026-01-01\nsource_files:\n"
+        "  video: http://old-host/knowledge-base/videos/x.mp4\n---\n# Note\n",
+        encoding="utf-8",
+    )
+
+    class _Cfg:
+        minio_tailscale_base = "http://old-host"
+        minio_bucket = "knowledge-base"
+
+    write_source_files_block(note, ["videos/x.mp4", "transcripts/x.json"], _Cfg())
+    content = note.read_text(encoding="utf-8")
+    assert "video: videos/x.mp4" in content
+    assert "transcript: transcripts/x.json" in content
+    assert "http://old-host" not in content
+
+
+def test_upload_file_to_minio_returns_key(tmp_path):
+    """upload_file_to_minio returns the bucket-stripped object key."""
+    from unittest.mock import MagicMock, patch
+
+    from agent.archival import upload_file_to_minio
+
+    src = tmp_path / "raw.md"
+    src.write_text("# hi", encoding="utf-8")
+    with patch("agent.archival.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        key = upload_file_to_minio(src, "knowledge-base/articles/slug.md")
+    assert key == "articles/slug.md"

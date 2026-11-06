@@ -379,8 +379,8 @@ OUTPUT FORMAT:
   source: instagram.com
   source_url: {source_url}
   source_files:
-    video: {config.minio_tailscale_base}/{config.minio_bucket}/videos/{safe_slug}.mp4
-    transcript: {config.minio_tailscale_base}/{config.minio_bucket}/transcripts/{safe_slug}.json
+    video: videos/{safe_slug}.mp4
+    transcript: transcripts/{safe_slug}.json
   confidence: plausible
   tags: [instagram, reel]
 - Then sections as above."""
