@@ -1048,7 +1048,6 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
         except StepError:
             pass  # Source file upload is best-effort
 
-    tailscale_base = config.minio_tailscale_base
 
     # Update note frontmatter with source_files URLs
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
@@ -1058,7 +1057,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
         for u in uploaded:
             suffix = Path(u).suffix.lower().lstrip(".")
             kind = "epub" if suffix == "epub" else ("pdf" if suffix == "pdf" else "text")
-            lines.append(f"  {kind}: {tailscale_base}/{config.minio_bucket}/{u}")
+            lines.append(f"  {kind}: {u}")
         block = "\n".join(lines)
         if "source_files:" in content:
             content = re.sub(
@@ -1070,7 +1069,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
 
     return json.dumps({
         "uploaded": uploaded,
-        "urls": [f"{tailscale_base}/{config.minio_bucket}/{u}" for u in uploaded],
+        "urls": [f"{u}" for u in uploaded],
     })
 
 

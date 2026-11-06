@@ -739,7 +739,6 @@ def _pass2_build_note(
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     source_domain = urlparse(source_url).netloc or "youtube.com"
-    tailscale_base = config.minio_tailscale_base
 
     system_prompt = f"""You are a knowledge base curator specializing in video content synthesis.
 Follow the deep treatment standard for YouTube videos.
@@ -775,8 +774,8 @@ OUTPUT FORMAT:
   source: {source_domain} ({metadata.get('uploader', 'Unknown')})
   source_url: {source_url}
   source_files:
-    video: {tailscale_base}/{config.minio_bucket}/videos/{slug}.mp4
-    transcript: {tailscale_base}/{config.minio_bucket}/transcripts/{slug}.json
+    video: videos/{slug}.mp4
+    transcript: transcripts/{slug}.json
   confidence: plausible
   tags: [tag1, tag2, tag3]
 - Then the note sections as shown in the template.
@@ -903,7 +902,6 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
     if not uploaded:
         return
 
-    tailscale_base = config.minio_tailscale_base
     content = note_path.read_text(encoding="utf-8")
 
     # Build source_files block
@@ -917,7 +915,7 @@ def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
             "mp3": "audio",
             "m4a": "audio",
         }.get(suffix, suffix)
-        source_files_lines.append(f"  {kind}: {tailscale_base}/{config.minio_bucket}/{u}")
+        source_files_lines.append(f"  {kind}: {u}")
     source_files_block = "\n".join(source_files_lines)
 
     # Replace placeholder source_files with real URLs

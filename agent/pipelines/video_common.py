@@ -11,6 +11,7 @@ transcript from MinIO and normalize it for downstream density checks.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -557,7 +558,7 @@ def upload_note_archive(slug: str, config: Config, note_path: Path, folder: str)
 
     bucket = config.minio_bucket
     note_key = f"{folder}/{slug}.md"
-    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}", tailscale_base=config.minio_tailscale_base)
+    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}")
 
     content = note_path.read_text(encoding="utf-8")
     updated = re.sub(
@@ -610,8 +611,9 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
     merged_path.parent.mkdir(parents=True, exist_ok=True)
 
     dest = f"{config.minio_bucket}/transcripts/{slug}.json"
+    alias = os.environ.get("STORAGE_ALIAS", "minio")
     result = subprocess.run(
-        ["mc", "cp", f"minio/{dest}", str(merged_path)],
+        ["mc", "cp", f"{alias}/{dest}", str(merged_path)],
         capture_output=True,
         text=True,
         timeout=120,
