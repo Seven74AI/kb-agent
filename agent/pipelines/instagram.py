@@ -334,14 +334,15 @@ DATE: {date_str}
 
 TASK: Write a note that:
 1. Notes this is a music/BGM reel with minimal speech
-2. Analyze the provided caption as the primary content
-3. Describe what can be observed from the transcript (if any words were detected)
+2. Includes the provided caption VERBATIM in a blockquote under a `## Post Description` heading
+3. Analyzes the caption as the primary content
+4. Describes what can be observed from the transcript (if any words were detected)
 
 OUTPUT FORMAT:
 - YAML frontmatter: date, source: instagram.com, source_url, minio placeholder,
   confidence: low (music-only reel), tags: [instagram, reel, music]
-- Note sections: Title, Summary, Caption Analysis (if any), Transcript Notes,
-  Reliability (note music-only limitation)"""
+- Note sections: Title, Summary, Post Description (verbatim caption), Caption Analysis,
+  Transcript Notes, Reliability (note music-only limitation)"""
     else:
         system_prompt = f"""You are a knowledge base curator specialized in Instagram reel content.
 
@@ -358,11 +359,12 @@ SECTIONS:
 1. YAML frontmatter
 2. Title — descriptive
 3. Summary — 2-3 sentences
-4. Key Points — ≥2, with direct quotes from transcript
-5. Speaker Analysis — who is speaking, perspective
-6. Context — platform context, trends if identifiable
-7. Critical Analysis — what's being communicated, what's omitted
-8. Reliability — confidence assessment
+4. Post Description — the caption text VERBATIM in a blockquote (>), under a `## Post Description` heading; if no caption, write "No post description."
+5. Key Points — ≥2, with direct quotes from transcript
+6. Speaker Analysis — who is speaking, perspective
+7. Context — platform context, trends if identifiable
+8. Critical Analysis — what's being communicated, what's omitted
+9. Reliability — confidence assessment
 
 OUTPUT FORMAT:
 - Start with YAML frontmatter:

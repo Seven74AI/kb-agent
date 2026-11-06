@@ -675,6 +675,9 @@ STRUCTURE (follow this template):
 ## Summary
 2-3 sentences capturing the core message.
 
+## Post Description
+The post caption VERBATIM in a blockquote (>), or "No post description." if none.
+
 ## Key Points
 ≥3 key points, each with a direct quote from the transcript (> prefix).
 
