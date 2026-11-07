@@ -40,6 +40,7 @@ from agent.db import (  # noqa: E402
     finish_batch_run,
     init_db,
     record_batch_run,
+    recover_failed_media,
     recover_stale_ingest,
     update_ingest_status,
 )
@@ -330,6 +331,9 @@ def main() -> None:
     try:
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
         recover_stale_ingest(conn)
+        n_retry = recover_failed_media(conn)
+        if n_retry:
+            print(f"Requeued {n_retry} failed media item(s) for retry.")
         run_id = record_batch_run(conn)
         claimed = claim_ingest_items(conn)
         if not claimed:
