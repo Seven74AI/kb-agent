@@ -5,13 +5,17 @@ from pathlib import Path
 
 import pytest
 
+from agent.core.resume import retry_task
 from agent.db import (
     AGENT_SCHEMA,
     _migrate,
     count_pending_media,
+    create_task,
+    get_task_steps,
     init_db,
     queue_ingest,
     recover_failed_media,
+    resume_tasks_by_reason,
     serialize_tags,
 )
 
@@ -139,3 +143,140 @@ def test_recover_failed_media_requeues_up_to_max_attempts(tmp_path):
     assert recover_failed_media(conn, max_attempts=3) == 0
     row = conn.execute("SELECT status FROM ingest_queue WHERE url='https://example.com/i1'").fetchone()
     assert row["status"] == "failed"
+
+
+def test_queue_ingest_same_url_different_parent_creates_two_rows(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://substack-post-media.s3.amazonaws.com/public/images/shared.png"
+
+    id_a, created_a = queue_ingest(
+        conn, url, "substack_image", "img_a", parent_slug="article_a", media_kind="image",
+    )
+    id_b, created_b = queue_ingest(
+        conn, url, "substack_image", "img_b", parent_slug="article_b", media_kind="image",
+    )
+    assert created_a and created_b
+    assert id_a != id_b
+    assert conn.execute("SELECT COUNT(*) FROM ingest_queue WHERE url = ?", (url,)).fetchone()[0] == 2
+
+
+def test_resume_awaiting_media_does_not_skip_embedded_step(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    defer_step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("awaiting media: 2 images enqueued", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'defer' WHERE id = ?",
+        (defer_step_id,),
+    )
+    conn.commit()
+
+    assert resume_tasks_by_reason(conn, "%awaiting media%") == 0
+    task_row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task_row[0] == "paused"
+    steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["substack_embedded_media"] == "paused"
+    assert steps["synthesize_note"] == "pending"
+
+
+def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    defer_step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("awaiting media: 1 images enqueued", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'defer' WHERE id = ?",
+        (defer_step_id,),
+    )
+    conn.commit()
+
+    assert retry_task(conn, task_id) is True
+    steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["substack_embedded_media"] == "pending"
+    assert steps["synthesize_note"] == "pending"
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+
+
+def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "article_slug"
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    from agent.config import Config
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 2}',
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    def fake_dispatch(url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t1"}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    assert calls == []
+
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 1}',
+        encoding="utf-8",
+    )
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+    assert calls == [parent]
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    assert len(calls) == 1

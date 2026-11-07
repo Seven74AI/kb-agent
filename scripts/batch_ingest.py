@@ -46,6 +46,9 @@ from agent.db import (  # noqa: E402
 )
 from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
 
+# Parent slugs whose deferred synthesize task was already dispatched this run.
+_deferred_synthesize_dispatched: set[str] = set()
+
 # content_type -> download-phase step names (everything before the ffmpeg audio
 # extraction, which batch_transcribe.py does itself).
 VIDEO_DOWNLOAD_STEPS = {
@@ -206,16 +209,31 @@ def _append_to_parent(config, parent_slug: str, section: str, body: str) -> None
 
 def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     """Fire the parent's deferred synthesis once every sibling media item is done."""
+    if parent_slug in _deferred_synthesize_dispatched:
+        return False
     if count_pending_media(conn, parent_slug) > 0:
         return False
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
     if not manifest_path.exists():
         return False
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = manifest.get("total")
+    if expected is not None:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (parent_slug,),
+        ).fetchone()
+        actual = row["n"] if hasattr(row, "keys") else row[0]
+        if actual != expected:
+            print(
+                f"  [skip] {parent_slug}: ingest rows {actual} != manifest total {expected}"
+            )
+            return False
     dispatch_synthesize(
         manifest["url"], config, conn,
         content_type=f"{manifest['content_type']}_synthesize", slug=parent_slug,
     )
+    _deferred_synthesize_dispatched.add(parent_slug)
     print(f"  [deferred] {parent_slug}: all media done -> synthesize")
     return True
 
