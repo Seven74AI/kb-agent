@@ -360,6 +360,81 @@ def test_parent_deferral_synthesize_not_blocked_standalone_no_deferral_row(tmp_p
     assert parent_deferral_synthesize_execute_blocked(conn, slug, raw_path=raw) is None
 
 
+def test_parent_deferral_synthesize_blocked_dispatched_siblings_no_deferral_row(
+    tmp_path,
+):
+    """Lost deferral row + all-dispatched-but-unverified siblings must fail closed."""
+    from agent.db import parent_deferral_synthesize_execute_blocked
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "lost_deferral_parent"
+    url = "https://blog.substack.com/p/lost"
+    create_task(conn, url, "substack_text", parent, ["substack_cleanup"], status="paused")
+    queue_ingest(
+        conn,
+        "https://example.com/img.png",
+        "substack_image",
+        "img1",
+        parent_slug=parent,
+        media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', media_appended=0 WHERE parent_slug=?",
+        (parent,),
+    )
+    conn.commit()
+    raw = tmp_path / f"{parent}_raw.md"
+    raw.write_text("# parent without markers\n", encoding="utf-8")
+    reason = parent_deferral_synthesize_execute_blocked(conn, parent, raw_path=raw)
+    assert reason is not None
+    assert "deferred synthesis paused" in reason
+
+
+def test_find_active_task_supersedes_terminal_synthesize_missing_deferral_with_siblings(
+    tmp_path,
+):
+    from agent.db import get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/orphan-dup"
+    slug = "orphan_dup_parent"
+    create_task(conn, url, "substack_text", slug, ["substack_cleanup"], status="paused")
+    queue_ingest(
+        conn,
+        "https://example.com/i.png",
+        "substack_image",
+        "i1",
+        parent_slug=slug,
+        media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (slug,))
+    done_id = create_task(
+        conn,
+        url,
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    conn.commit()
+    assert get_parent_media_deferral(conn, slug) is None
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+    row = conn.execute("SELECT status FROM tasks WHERE id=?", (done_id,)).fetchone()
+    assert row[0] == "failed"
+
+    config = _batch_test_config(tmp_path)
+    result = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    assert result.get("duplicate") is not True
+    assert conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE slug=? AND content_type GLOB '*_synthesize'",
+        (slug,),
+    ).fetchone()[0] == 2
+
+
 def test_parent_deferral_synthesize_execute_blocked_bootstraps_deferral_from_manifest(
     tmp_path,
 ):
@@ -1101,6 +1176,25 @@ def test_queue_ingest_rejects_javascript_scheme(tmp_path):
     with pytest.raises(ValueError, match="http or https"):
         queue_ingest(conn, "javascript:alert(1)", "web", "jev")
     assert conn.execute("SELECT COUNT(*) FROM ingest_queue").fetchone()[0] == 0
+
+
+def test_queue_ingest_revive_rejects_non_http_legacy_row(tmp_path):
+    """Failed revive must not bypass http(s) scheme guard on pre-existing rows."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    bad = "javascript:alert(1)"
+    conn.execute(
+        "INSERT INTO ingest_queue (id, url, content_type, slug, status, attempts) "
+        "VALUES ('legacy-id', ?, 'web', 'jev', 'failed', 0)",
+        (bad,),
+    )
+    conn.commit()
+    with pytest.raises(ValueError, match="http or https"):
+        queue_ingest(conn, bad, "web", "jev")
+    row = conn.execute(
+        "SELECT status FROM ingest_queue WHERE id='legacy-id'",
+    ).fetchone()
+    assert row[0] == "failed"
 
 
 def test_has_completed_parent_synthesis_vault_shortcut_needs_terminal_or_fresh_note(tmp_path):

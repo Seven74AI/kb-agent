@@ -257,7 +257,7 @@ def step_substack_video_download(task: dict, config: Config) -> str:
     cookie_args = _curl_netscape_cookie_config(cookie)
     mp4_url = _resolve_substack_video_mp4_redirect(endpoint, cookie_args)
     cmd = [
-        "curl", "-s", "--max-time", "600", "-o", str(output_path),
+        "curl", "-s", "--max-redirs", "0", "--max-time", "600", "-o", str(output_path),
         *cookie_args, mp4_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)

@@ -208,6 +208,21 @@ def test_detect_type_web():
     assert result["content_type"] == "web"
 
 
+def test_detect_type_normalizes_tracking_params_like_submit():
+    noisy = (
+        "https://www.instagram.com/reel/ShortCode1/"
+        "?igsh=track&igsi=track&comment_id=42"
+    )
+    clean = "https://www.instagram.com/reel/ShortCode1/?comment_id=42"
+    assert detect_type(noisy) == detect_type(clean)
+    assert detect_type(clean)["content_type"] == "instagram_comment"
+
+
+def test_detect_type_rejects_non_http_scheme():
+    with pytest.raises(ValueError, match="http or https"):
+        detect_type("javascript:alert(1)")
+
+
 def test_submit_url_empty(core_config, agent_conn):
     result = submit_url("", core_config, agent_conn)
     assert result["status"] == "error"

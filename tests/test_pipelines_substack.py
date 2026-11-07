@@ -119,10 +119,14 @@ class TestSubstackDetection:
         assert result == "substack_image"
 
     @patch("agent.detection.subprocess.run")
-    def test_detect_curl_failure(self, mock_run):
+    def test_detect_curl_failure(self, mock_run, caplog):
         mock_run.side_effect = Exception("Connection refused")
-        result = _detect_substack_subtype("https://blog.substack.com/p/something")
+        with caplog.at_level("WARNING"):
+            result = _detect_substack_subtype("https://blog.substack.com/p/something")
         assert result == "substack_text"
+        assert any(
+            "Substack subtype fetch/parse failed" in r.message for r in caplog.records
+        )
 
 
 # ── Cleanup Tests ─────────────────────────────────────────────────────────────
@@ -1241,7 +1245,7 @@ class TestSubstackVideoMetadata:
         assert head_cmd[head_cmd.index("--max-redirs") + 1] == "0"
         assert cdn_mp4 not in head_cmd
         assert "-L" not in get_cmd
-        assert "--max-redirs" not in get_cmd
+        assert get_cmd[get_cmd.index("--max-redirs") + 1] == "0"
         assert cdn_mp4 in get_cmd
         assert "-b" not in get_cmd
 

@@ -389,6 +389,7 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
     its reading/transcript to the parent's raw markdown and fire the parent's
     deferred synthesis once every sibling is done.
     """
+    _reject_non_http_ingest_url(url)
     conn.row_factory = sqlite3.Row
     parent_key = _ingest_parent_slug(parent_slug)
     if parent_key:
@@ -413,7 +414,6 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
                     (url, parent_key),
                 )
         return row["id"], False
-    _reject_non_http_ingest_url(url)
     import uuid
     ingest_id = str(uuid.uuid4())
     with conn:
@@ -423,6 +423,18 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             (ingest_id, url, content_type, slug, status, serialize_tags(tags), parent_key, media_kind),
         )
     return ingest_id, True
+
+
+def _parent_sibling_media_count(conn: sqlite3.Connection, parent_slug: str) -> int:
+    """Count ingest-queue sibling rows linked to *parent_slug* (any status)."""
+    if not parent_slug:
+        return 0
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchone()
+    return int(row["n"] if hasattr(row, "keys") else row[0])
 
 
 def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
@@ -483,6 +495,9 @@ def find_active_task(
     status = row["status"] if hasattr(row, "keys") else row[1]
     if is_synthesize_content_type(content_type):
         deferral = get_parent_media_deferral(conn, slug)
+        if deferral is None and _parent_sibling_media_count(conn, slug) > 0:
+            _supersede_synthesize_tasks_orphan_deferral(conn, slug)
+            return None
         if deferral is not None:
             if status in ("done", "completed"):
                 fresh = _deferral_synthesize_terminal_fresh(conn, slug, deferral)
@@ -651,6 +666,24 @@ def _has_stale_deferral_synthesize_terminal(
         (slug, anchor),
     ).fetchone()
     return row is not None
+
+
+def _supersede_synthesize_tasks_orphan_deferral(
+    conn: sqlite3.Connection, slug: str,
+) -> int:
+    """Fail *_synthesize rows when siblings exist but the deferral record is missing."""
+    if not slug:
+        return 0
+    with conn:
+        cur = conn.execute(
+            """
+            UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type GLOB '*_synthesize'
+            AND status IN ('pending', 'in_progress', 'paused', 'done', 'completed')
+            """,
+            ("superseded: parent deferral record missing", slug),
+        )
+        return cur.rowcount
 
 
 def supersede_stale_deferral_synthesize_tasks(
@@ -914,16 +947,22 @@ def parent_deferral_synthesize_execute_blocked(
     Fail closed when the deferral row is missing but siblings may still be
     incomplete (partial DB loss, manual task, race before batch bootstrap).
     """
+    temp_dir = raw_path.parent if raw_path is not None else None
     deferral = get_parent_media_deferral(conn, slug)
     if deferral is None:
-        temp_dir = raw_path.parent if raw_path is not None else None
         if temp_dir is not None:
             bootstrap_parent_media_deferral_from_manifest(conn, slug, temp_dir)
         deferral = get_parent_media_deferral(conn, slug)
     if deferral is None:
+        bootstrap_parent_media_deferral_from_siblings(conn, slug, temp_dir)
+        deferral = get_parent_media_deferral(conn, slug)
+    sibling_n = _parent_sibling_media_count(conn, slug)
+    if deferral is None:
+        if sibling_n == 0:
+            return None
         if count_pending_media(conn, slug) > 0:
             return "deferred synthesis paused — sibling media still pending"
-        return None
+        return "deferred synthesis paused — parent media not complete at execute time"
     if count_pending_media(conn, slug) > 0:
         return "deferred synthesis paused — sibling media still pending"
     if not parent_media_complete(conn, slug, raw_path=raw_path):
@@ -1059,6 +1098,56 @@ def ensure_parent_media_deferral(
                 """,
                 (parent_slug,),
             )
+
+
+def bootstrap_parent_media_deferral_from_siblings(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    temp_dir: Path | None = None,
+) -> None:
+    """Seed deferral from sibling ingest rows when manifest bootstrap did not run."""
+    if not parent_slug or get_parent_media_deferral(conn, parent_slug):
+        return
+    if temp_dir is not None:
+        bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, temp_dir)
+        if get_parent_media_deferral(conn, parent_slug):
+            return
+    expected = _parent_sibling_media_count(conn, parent_slug)
+    if expected == 0:
+        return
+    conn.row_factory = sqlite3.Row
+    parent_row = conn.execute(
+        "SELECT source_url, content_type FROM tasks "
+        "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "ORDER BY created_at LIMIT 1",
+        (parent_slug,),
+    ).fetchone()
+    source_url = None
+    content_type = None
+    if parent_row:
+        source_url = parent_row["source_url"] if hasattr(parent_row, "keys") else parent_row[0]
+        content_type = parent_row["content_type"] if hasattr(parent_row, "keys") else parent_row[1]
+    if not source_url or not content_type:
+        syn_row = conn.execute(
+            "SELECT source_url, content_type FROM tasks "
+            "WHERE slug = ? AND content_type GLOB '*_synthesize' "
+            "ORDER BY created_at LIMIT 1",
+            (parent_slug,),
+        ).fetchone()
+        if syn_row:
+            source_url = source_url or (
+                syn_row["source_url"] if hasattr(syn_row, "keys") else syn_row[0]
+            )
+            syn_ct = syn_row["content_type"] if hasattr(syn_row, "keys") else syn_row[1]
+            if syn_ct and is_synthesize_content_type(syn_ct):
+                content_type = content_type or syn_ct[: -len("_synthesize")]
+            else:
+                content_type = content_type or syn_ct
+    if not source_url or not content_type:
+        return
+    ensure_parent_media_deferral(
+        conn, parent_slug, source_url, content_type, expected,
+    )
 
 
 def bootstrap_parent_media_deferral_from_manifest(
