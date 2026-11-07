@@ -5,8 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-# Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``
-# and duplicate ``queue_ingest`` revival of a failed sibling).
+# Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``).
 INGEST_MAX_MEDIA_ATTEMPTS = 3
 
 
@@ -333,7 +332,6 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             if row["status"] == "failed" and row["attempts"] < max_attempts:
                 conn.execute(
                     "UPDATE ingest_queue SET status='queued', error=NULL, "
-                    "attempts = attempts + 1, "
                     "updated_at=datetime('now') WHERE url = ? AND COALESCE(parent_slug, '') = ?",
                     (url, parent_key),
                 )
@@ -404,6 +402,18 @@ def find_active_task(
             (slug, content_type),
         ).fetchone()
     return row["id"] if row else None
+
+
+def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
+    """True when a deferred synthesize task for *slug* is active (not ``failed``)."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
+        "LIMIT 1",
+        (slug,),
+    ).fetchone()
+    return row is not None
 
 
 def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> int:

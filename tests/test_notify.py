@@ -23,8 +23,26 @@ def test_sanitize_visible_message_strips_traceback_frames():
     out = sanitize_visible_message(raw)
     assert "Traceback" not in out
     assert 'File "/root' not in out
+    assert "/root/kb-agent" not in out
+    assert "[path]" in out
     assert "yt-dlp stderr" in out
     assert "ValueError: nope" in out
+
+
+def test_sanitize_visible_message_scrubs_paths_without_traceback():
+    raw = "megadl failed: cookiefile /home/ubuntu/secret/cookies.txt"
+    out = sanitize_visible_message(raw)
+    assert "/home/ubuntu" not in out
+    assert "[path]" in out
+    assert "megadl failed" in out
+
+
+def test_sanitize_visible_message_truncates_long_subprocess_stderr_line():
+    long_stderr = "yt-dlp: " + ("x" * 400)
+    out = sanitize_visible_message(long_stderr)
+    assert len(out) <= 203
+    assert out.endswith("...")
+    assert out.startswith("yt-dlp:")
 
 
 def test_sanitize_visible_message_caps_length():

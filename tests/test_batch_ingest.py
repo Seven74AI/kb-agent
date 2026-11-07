@@ -471,6 +471,144 @@ class TestMediaKindRoutingInMain:
         assert all(u[1] != "downloading" for u in updates if u[0] == ingest_id)
 
 
+class TestVideoStagingUsesQueueId:
+    """Batch video staging/transcripts must use ingest_queue.id, not slug."""
+
+    @staticmethod
+    def _shared_substack_post_slug():
+        from agent.core.slugify import slugify
+
+        post = "https://author.substack.com/p/my-post"
+        assert slugify(f"{post}#vid-a") == slugify(f"{post}#vid-b")
+        return slugify(post)
+
+    def test_two_native_videos_same_slug_distinct_staged_files(
+        self, config, conn, monkeypatch, tmp_path,
+    ):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = self._shared_substack_post_slug()
+        post = "https://author.substack.com/p/my-post"
+        parent = "parent_multi_vid"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        id_a = queue_ingest(
+            conn,
+            f"{post}#native-a",
+            "substack_video",
+            slug,
+            parent_slug=parent,
+            media_kind="video",
+        )[0]
+        id_b = queue_ingest(
+            conn,
+            f"{post}#native-b",
+            "substack_video",
+            slug,
+            parent_slug=parent,
+            media_kind="video",
+        )[0]
+        q_a = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_a,)).fetchone())
+        q_b = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_b,)).fetchone())
+        assert q_a["slug"] == q_b["slug"]
+
+        v_a = tmp_path / "a.mp4"
+        v_b = tmp_path / "b.mp4"
+        v_a.write_bytes(b"a" * 200)
+        v_b.write_bytes(b"b" * 200)
+
+        def fake_download(q, _cfg):
+            return (v_a if q["id"] == id_a else v_b, None)
+
+        monkeypatch.setattr(batch_ingest, "_download_video", fake_download)
+        staged_paths: list[Path] = []
+
+        def fake_run(cmd, **kw):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                bdir = Path(cmd[2])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for staged in bdir.iterdir():
+                    staged_paths.append(staged)
+                    (out_dir / f"{staged.stem}.json").write_text(
+                        json.dumps({"segments": [{"text": f"tx-{staged.stem}"}]}),
+                        encoding="utf-8",
+                    )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_videos([q_a, q_b], config, conn, 77)
+
+        assert len(staged_paths) == 2
+        names = {p.name for p in staged_paths}
+        assert f"{id_a}.mp4" in names
+        assert f"{id_b}.mp4" in names
+        assert id_a != id_b
+        assert all(conn.execute(
+            "SELECT status FROM ingest_queue WHERE id=?",
+            (i,),
+        ).fetchone()["status"] == "dispatched" for i in (id_a, id_b))
+
+    def test_same_youtube_embed_two_parents_distinct_staged_files(
+        self, config, conn, monkeypatch, tmp_path,
+    ):
+        import scripts.batch_ingest as batch_ingest
+        from agent.core.slugify import slugify
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        yt = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        slug = slugify(yt, content_type="youtube")
+        for parent in ("parent_one", "parent_two"):
+            (config.temp_dir / f"{parent}_raw.md").write_text(f"# {parent}\n", encoding="utf-8")
+        id_one = queue_ingest(
+            conn, yt, "youtube", slug, parent_slug="parent_one", media_kind="video",
+        )[0]
+        id_two = queue_ingest(
+            conn, yt, "youtube", slug, parent_slug="parent_two", media_kind="video",
+        )[0]
+        q_one = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_one,)).fetchone())
+        q_two = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_two,)).fetchone())
+        assert q_one["slug"] == q_two["slug"]
+
+        v_one = tmp_path / "one.mp4"
+        v_two = tmp_path / "two.mp4"
+        v_one.write_bytes(b"1" * 200)
+        v_two.write_bytes(b"2" * 200)
+
+        def fake_download(q, _cfg):
+            return (v_one if q["id"] == id_one else v_two, None)
+
+        monkeypatch.setattr(batch_ingest, "_download_video", fake_download)
+        staged_paths: list[Path] = []
+
+        def fake_run(cmd, **kw):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                bdir = Path(cmd[2])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for staged in bdir.iterdir():
+                    staged_paths.append(staged)
+                    (out_dir / f"{staged.stem}.json").write_text(
+                        json.dumps({"segments": [{"text": f"words-{staged.stem}"}]}),
+                        encoding="utf-8",
+                    )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_videos([q_one, q_two], config, conn, 88)
+
+        assert len(staged_paths) == 2
+        assert {p.name for p in staged_paths} == {f"{id_one}.mp4", f"{id_two}.mp4"}
+        raw_one = (config.temp_dir / "parent_one_raw.md").read_text(encoding="utf-8")
+        raw_two = (config.temp_dir / "parent_two_raw.md").read_text(encoding="utf-8")
+        assert f"words-{id_one}" in raw_one
+        assert f"words-{id_two}" in raw_two
+
+
 class TestDownloadVideoUnsupportedContentType:
     def test_unknown_content_type_returns_error_not_keyerror(self, config, monkeypatch):
         import scripts.batch_ingest as batch_ingest
@@ -551,7 +689,7 @@ class TestCorruptJsonHandling:
             if "batch_transcribe.py" in cmd[1]:
                 out_dir = Path(cmd[cmd.index("--out-dir") + 1])
                 out_dir.mkdir(parents=True, exist_ok=True)
-                (out_dir / "vid_bad_json.json").write_text("<<bad>>", encoding="utf-8")
+                (out_dir / f"{ingest_id}.json").write_text("<<bad>>", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             return subprocess.run(cmd, **kwargs)
 

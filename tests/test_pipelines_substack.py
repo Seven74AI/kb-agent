@@ -432,7 +432,7 @@ class TestSubstackVideoMetadata:
         )
         create_task(
             conn, post, "substack_text_synthesize", slug,
-            ["synthesize_note"], status="pending",
+            ["synthesize_note"], status="completed",
         )
         conn.commit()
         conn.close()
@@ -442,7 +442,7 @@ class TestSubstackVideoMetadata:
         assert result == "no embedded media"
 
     @patch("agent.pipelines.web._fetch_substack_html")
-    def test_zero_embeds_deferral_marker_allows_inline_when_raw_has_media_sections(
+    def test_zero_embeds_raw_media_sections_alone_do_not_unblock_deferral(
         self, mock_fetch, config, task_dict, tmp_path,
     ):
         from agent.db import AGENT_SCHEMA, create_task, init_db
@@ -467,6 +467,46 @@ class TestSubstackVideoMetadata:
             "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'substack_cleanup'",
             (f"media_deferred:{slug}", task_id),
         )
+        conn.commit()
+        conn.close()
+
+        task_dict["id"] = task_id
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "prior deferral" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_zero_embeds_batch_finished_when_manifest_matches_queue(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "content_type": "substack_text", "total": 1}),
+            encoding="utf-8",
+        )
+        mock_fetch.return_value = "<html><body>plain text</body></html>"
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        task_id = create_task(
+            conn, post, "substack_text", slug,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'substack_cleanup'",
+            (f"media_deferred:{slug}", task_id),
+        )
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#vid", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
         conn.commit()
         conn.close()
 
@@ -637,6 +677,40 @@ class TestSubstackVideoMetadata:
         )
         result = step_substack_embedded_media(task_dict, config)
         assert "media ready" in result
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_media_ready_defers_when_synthesize_sibling_active(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+        manifest = config.temp_dir / f"{slug}_media.json"
+        manifest.write_text(json.dumps({"url": post, "total": 1}), encoding="utf-8")
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#{vid}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        create_task(
+            conn, post, "substack_text_synthesize", slug,
+            ["synthesize_note"], status="pending",
+        )
+        conn.commit()
+        conn.close()
+
+        mock_fetch.return_value = (
+            f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+        )
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "media ready — deferred to batch"
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_media_ready_when_manifest_total_matches_queue_count(

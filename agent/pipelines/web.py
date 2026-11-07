@@ -483,22 +483,38 @@ def _parent_media_was_deferred(conn, task_id: str, slug: str) -> bool:
 
 
 def _deferred_media_batch_finished(conn, config: Config, slug: str) -> bool:
-    """True when the nightly batch has taken over (synthesize task or appended raw sections)."""
+    """True when deferred media work is done and batch synthesis may have taken over."""
+    from agent.db import count_pending_media
+
+    if count_pending_media(conn, slug) > 0:
+        return False
     row = conn.execute(
         """
         SELECT 1 FROM tasks
         WHERE slug = ? AND content_type GLOB '*_synthesize'
+        AND status IN ('done', 'completed')
         LIMIT 1
         """,
         (slug,),
     ).fetchone()
     if row:
         return True
-    raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
-    if not raw_path.exists():
+    manifest_path = Path(config.temp_dir) / f"{slug}_media.json"
+    if not manifest_path.exists():
         return False
-    body = raw_path.read_text(encoding="utf-8")
-    return "\n## Image\n" in body or "\n## Video Transcript\n" in body
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return False
+    expected = manifest.get("total")
+    if expected is None:
+        return False
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+        (slug,),
+    ).fetchone()
+    queue_count = row["n"] if hasattr(row, "keys") else row[0]
+    return queue_count == int(expected)
 
 
 def step_substack_embedded_media(task: dict, config: Config) -> str:
@@ -548,14 +564,18 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         try:
             pending = count_pending_media(conn, slug)
             prior_deferral = _parent_media_was_deferred(conn, task_id, slug)
-            batch_finished = (
-                _deferred_media_batch_finished(conn, config, slug) if prior_deferral else False
-            )
-            if had_manifest or pending > 0:
+            batch_finished = _deferred_media_batch_finished(conn, config, slug)
+            if (had_manifest or pending > 0) and not batch_finished:
                 _persist_parent_media_deferral(conn, task_id, slug)
         finally:
             conn.close()
-        if had_manifest or pending > 0:
+        if pending > 0:
+            raise StepError(
+                "awaiting media — re-fetch found no embeds but siblings pending",
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
+        if had_manifest and not batch_finished:
             raise StepError(
                 "awaiting media — re-fetch found no embeds but siblings pending",
                 error_type=ErrorType.PAUSE,
@@ -614,6 +634,10 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                     error_type=ErrorType.PAUSE,
                     step_name="substack_embedded_media",
                 )
+            from agent.db import has_active_synthesize_task
+
+            if has_active_synthesize_task(conn, slug):
+                return "media ready — deferred to batch"
             return (
                 f"media ready: {len(images)} images + {n_videos} videos "
                 f"({queue_count} siblings dispatched)"

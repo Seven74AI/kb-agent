@@ -6,19 +6,56 @@ it works in every environment the app runs in (service, cron, MCP).
 """
 
 import json
+import re
 import urllib.parse
 import urllib.request
 
 from agent.config import Config
 
 _VISIBLE_ERROR_MAX_LEN = 2000
+_STDERR_LINE_MAX = 200
+_KNOWN_ROOT_PATH_RE = re.compile(r"/(?:root|home|tmp)(?:/[^\s\"')\]]+)?", re.IGNORECASE)
+_MULTI_SEGMENT_ABS_PATH_RE = re.compile(r"/[\w.-]+(?:/[\w.-]+)+")
+_ROOTED_REL_PATH_RE = re.compile(r"/[a-z_][a-z0-9_]*(?:/[^\s\"')\]]+)+")
+_SUBPROCESS_STDERR_LINE_RE = re.compile(
+    r"^(?:yt-dlp|curl|megadl|ffmpeg|mc:|ERROR:|\[download\])",
+    re.IGNORECASE,
+)
+
+
+def _scrub_paths(text: str) -> str:
+    text = _KNOWN_ROOT_PATH_RE.sub("[path]", text)
+    text = _MULTI_SEGMENT_ABS_PATH_RE.sub("[path]", text)
+    text = _ROOTED_REL_PATH_RE.sub("[path]", text)
+    return text
+
+
+def _truncate_subprocess_stderr_lines(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        head = stripped.lstrip()
+        if (
+            _SUBPROCESS_STDERR_LINE_RE.match(head)
+            or (head.lower().startswith("stderr") and len(stripped) > _STDERR_LINE_MAX)
+        ):
+            if len(stripped) > _STDERR_LINE_MAX:
+                stripped = stripped[: _STDERR_LINE_MAX - 3] + "..."
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _finalize_visible_message(text: str) -> str:
+    text = _scrub_paths(text)
+    text = _truncate_subprocess_stderr_lines(text)
+    return text[:_VISIBLE_ERROR_MAX_LEN]
 
 
 def sanitize_visible_message(message: str) -> str:
-    """Strip stack frames from user-visible error text (dashboard, Telegram, tasks)."""
+    """Strip stack frames, paths, and bulky stderr from user-visible error text."""
     marker = "Traceback (most recent call last):"
     if marker not in message:
-        return message[:_VISIBLE_ERROR_MAX_LEN]
+        return _finalize_visible_message(message)
     head, tail = message.split(marker, 1)
     exc_line = ""
     for line in reversed(tail.splitlines()):
@@ -29,7 +66,7 @@ def sanitize_visible_message(message: str) -> str:
     summary = head.rstrip()
     if exc_line and exc_line not in summary:
         summary = f"{summary}\n{exc_line}" if summary else exc_line
-    return summary[:_VISIBLE_ERROR_MAX_LEN]
+    return _finalize_visible_message(summary)
 
 
 def send_message(config: Config, text: str) -> bool:

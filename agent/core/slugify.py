@@ -32,6 +32,10 @@ def slugify(url: str, *, content_type: str | None = None) -> str:
 
     For ``instagram_comment``, preserves ``comment_id`` the same way — multiple
     comments on one post must not share a slug.
+
+    URL fragments (``#...``) are removed and do not affect the slug. Deferred
+    media enqueued as ``post_url#<video_id>`` therefore shares the parent's
+    slug; batch staging must key files by ``ingest_queue.id``, not slug.
     """
     slug = re.sub(r"^https?://", "", url)
     identity_suffix = ""

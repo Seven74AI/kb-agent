@@ -179,7 +179,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
         ctype = q["content_type"]
         bdir = base / "batch_videos" / run_tag / ctype
         bdir.mkdir(parents=True, exist_ok=True)
-        dest = bdir / f"{q['slug']}{vp.suffix.lower()}"
+        dest = bdir / f"{q['id']}{vp.suffix.lower()}"
         shutil.copy(vp, dest)
         update_ingest_status(conn, q["id"], "staged")
         staged.setdefault(ctype, []).append((q, dest))
@@ -213,7 +213,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
 
         # 3. upload video + transcript, then dispatch synthesize-only
         for q, vdest in items:
-            merged = out_dir / f"{q['slug']}.json"
+            merged = out_dir / f"{q['id']}.json"
             if not merged.exists():
                 update_ingest_status(conn, q["id"], "failed", error="no merged transcript produced")
                 failed += 1
@@ -424,7 +424,7 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
         ctype = q["content_type"]
         bdir = base / "batch_videos" / run_tag / ctype
         bdir.mkdir(parents=True, exist_ok=True)
-        dest = bdir / f"{q['slug']}{vp.suffix.lower()}"
+        dest = bdir / f"{q['id']}{vp.suffix.lower()}"
         shutil.copy(vp, dest)
         update_ingest_status(conn, q["id"], "staged")
         staged.setdefault(ctype, []).append((q, dest))
@@ -448,7 +448,7 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
                 update_ingest_status(conn, q["id"], "failed", error=f"batch_transcribe failed ({r.returncode})")
             continue
         for q, vdest in items:
-            merged = out_dir / f"{q['slug']}.json"
+            merged = out_dir / f"{q['id']}.json"
             if not merged.exists():
                 update_ingest_status(conn, q["id"], "failed", error="no merged transcript")
                 continue
