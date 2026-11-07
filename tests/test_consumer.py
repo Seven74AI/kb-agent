@@ -26,6 +26,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.consumer import (
     STEP_REGISTRY,
+    VIDEO_TASK_CONTENT_TYPES,
     Consumer,
     register_step,
 )
@@ -439,6 +440,14 @@ async def test_shutdown_waits_for_tasks(consumer, agent_db):
 
 
 # ── Semaphore tests ───────────────────────────────────────────────────────────
+
+
+def test_video_task_content_types_include_rumble_and_substack_excludes_mega():
+    """Video path must gate AV pipelines; mega is book-archive only."""
+    types = set(VIDEO_TASK_CONTENT_TYPES)
+    assert "rumble" in types
+    assert "substack_video" in types
+    assert "mega" not in types
 
 
 @pytest.mark.asyncio

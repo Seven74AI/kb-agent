@@ -5,8 +5,15 @@ import sqlite3
 from agent.config import Config
 from agent.pipelines import get_pipeline_names
 from agent.core.slugify import slugify
-from agent.db import create_task, queue_ingest
-from agent.detection import dedup_check, detect_content_subtype, detect_platform, normalize_url, preflight_health
+from agent.db import create_task, find_active_task, queue_ingest
+from agent.detection import (
+    DedupCheckError,
+    dedup_check,
+    detect_content_subtype,
+    detect_platform,
+    normalize_url,
+    preflight_health,
+)
 
 
 def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> dict:
@@ -30,13 +37,23 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
 
     platform = detect_platform(url)
 
-    if not ignore_dedup and dedup_check(url, config.vault_path):
-        return {
-            "status": "skipped",
-            "http_status": 200,
-            "reason": "Already in vault",
-            "platform": platform,
-        }
+    if not ignore_dedup:
+        try:
+            in_vault = dedup_check(url, config.vault_path)
+        except DedupCheckError as exc:
+            return {
+                "status": "error",
+                "http_status": 500,
+                "error": f"dedup check failed: {exc}",
+                "platform": platform,
+            }
+        if in_vault:
+            return {
+                "status": "skipped",
+                "http_status": 200,
+                "reason": "Already in vault",
+                "platform": platform,
+            }
 
     ok, reason = preflight_health(platform)
     slug = slugify(url)
@@ -158,6 +175,19 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
         return {"status": "error", "http_status": 400, "error": "url required"}
 
     platform = detect_platform(url)
+    # Blocks in-flight work and prior successful synthesis; allows retry after failed.
+    existing_id = find_active_task(agent_conn, slug, content_type)
+    if existing_id:
+        return {
+            "status": "pending",
+            "http_status": 200,
+            "task_id": existing_id,
+            "platform": platform,
+            "content_type": content_type,
+            "slug": slug,
+            "duplicate": True,
+        }
+
     steps = get_pipeline_names(content_type, platform)
     task_id = create_task(agent_conn, url, content_type, slug, steps, tags=tags)
 

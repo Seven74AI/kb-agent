@@ -3,12 +3,14 @@
 Deterministic URL pattern matching (no ML, no external calls except health checks).
 """
 
+import json
 import re
 import subprocess
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from agent.config import REPO_ROOT, load_config
+from agent.constants import FLARESOLVERR_URL
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
 
@@ -463,18 +465,27 @@ def _check_rumble() -> tuple[bool, str]:
     return _check_flaresolverr()
 
 
-FLARESOLVERR_URL = "http://localhost:8191/v1"
-
-
 def _check_flaresolverr() -> tuple[bool, str]:
-    """Ping Flaresolverr (Rumble Cloudflare bypass)."""
+    """Ping Flaresolverr the same way the Rumble pipeline does (POST + JSON status)."""
     try:
         result = subprocess.run(
-            ["curl", "-s", "--max-time", "10", FLARESOLVERR_URL],
+            [
+                "curl", "-s", "-X", "POST", FLARESOLVERR_URL,
+                "-H", "Content-Type: application/json",
+                "-d", json.dumps({"cmd": "sessions.list"}),
+                "--max-time", "10",
+            ],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:
             return False, f"Flaresolverr unreachable (exit {result.returncode})"
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            return False, f"Flaresolverr bad response: {exc}"
+        if data.get("status") != "ok":
+            msg = data.get("message") or "non-ok status"
+            return False, f"Flaresolverr error: {msg}"
         return True, ""
     except Exception as e:
         return False, f"Flaresolverr health check failed: {e}"
@@ -532,7 +543,14 @@ def dedup_check(url: str, vault_path: Path) -> bool:
         return False
     try:
         result = subprocess.run(
-            ["grep", "-F", "-rl", f"source_url: {url}", str(kb_dir)],
+            [
+                "grep",
+                "-F",
+                "-rl",
+                "--",
+                f"source_url: {url}",
+                str(kb_dir),
+            ],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

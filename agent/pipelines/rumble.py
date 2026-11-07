@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from agent.config import Config
+from agent.constants import FLARESOLVERR_URL
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -36,7 +37,6 @@ from agent.pipelines.youtube import (
     step_transcribe,
 )
 
-FLARESOLVERR_URL = "http://localhost:8191/v1"
 MAX_HEIGHT = 720
 
 
