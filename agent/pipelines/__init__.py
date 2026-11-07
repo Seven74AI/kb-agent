@@ -60,16 +60,18 @@ def get_pipeline(content_type: str) -> list[Step] | None:
     return PIPELINES.get(content_type)
 
 
-def get_pipeline_names(content_type: str, platform: str = "") -> list[str]:
-    """Resolve step names for a content type, with subtype→platform→web fallback.
+def get_pipeline_names(content_type: str, platform: str = "") -> list[str] | None:
+    """Resolve step names for a content type (subtype key, then platform key).
 
     Replaces ``core.pipelines.steps_for_content_type`` — derives names from the
     Step-object registry so there is a single source of truth. Auto-imports the
     pipeline modules on first call (same as :func:`get_pipeline`).
+
+    Returns ``None`` when no pipeline is registered (no silent web fallback).
     """
     if not _all_imported:
         import_all_pipelines()
     for key in (content_type, platform):
         if key and key in PIPELINES:
             return [s.name for s in PIPELINES[key]]
-    return [s.name for s in (PIPELINES.get("web") or [])]
+    return None

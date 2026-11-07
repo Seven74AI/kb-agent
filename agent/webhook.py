@@ -21,7 +21,7 @@ from agent.core import (
     resume_tasks,
     submit_plan,
 )
-from agent.core.resume import normalize_reason_pattern
+from agent.core.resume import ResumeReasonError, normalize_reason_pattern
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
 
 app = Flask(__name__)
@@ -118,7 +118,10 @@ def resume():
         return jsonify({
             "error": "reason required (refusing to resume all paused tasks)",
         }), 400
-    reason_pattern = normalize_reason_pattern(reason_param)
+    try:
+        reason_pattern = normalize_reason_pattern(reason_param)
+    except ResumeReasonError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     conn = _get_agent_conn()
     count = resume_tasks(conn, reason_param)
