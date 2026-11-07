@@ -3,6 +3,7 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -23,9 +24,13 @@ from agent.core import (
     slugify,
     submit_url,
 )
+from agent.core.bulk import expand_youtube_playlist
 from agent.core.resume import ResumeReasonError
 from agent.core.submit import plan_submission
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, create_task, init_db, pause_task
+
+METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+PRIVATE_HOST_URL = "http://127.0.0.1/playlist?list=PLfake"
 
 
 @pytest.fixture
@@ -245,6 +250,20 @@ def test_ingest_playlist_expands(monkeypatch, core_config, agent_conn):
     result = ingest_playlist("https://youtube.com/playlist?list=PLx", core_config, agent_conn)
     assert result["status"] == "ok"
     assert result["count"] == 2
+
+
+@patch("agent.core.bulk.subprocess.run")
+def test_expand_youtube_playlist_rejects_metadata_url(mock_run):
+    with pytest.raises(ValueError, match="not allowed"):
+        expand_youtube_playlist(METADATA_URL)
+    mock_run.assert_not_called()
+
+
+@patch("agent.core.bulk.subprocess.run")
+def test_expand_youtube_playlist_rejects_private_host_url(mock_run):
+    with pytest.raises(ValueError, match="not allowed"):
+        expand_youtube_playlist(PRIVATE_HOST_URL)
+    mock_run.assert_not_called()
 
 
 def test_submit_url_health_pause(core_config, agent_conn, monkeypatch):
