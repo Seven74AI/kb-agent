@@ -48,6 +48,8 @@ from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
 VIDEO_DOWNLOAD_STEPS = {
     "youtube": ["extract_metadata", "download_video"],
     "bunny_stream": ["extract_metadata", "download_video"],
+    "rumble": ["extract_metadata", "download_video"],
+    "substack_video": ["extract_metadata", "download_video"],
     "instagram_reel": ["ig_reel_validate", "ig_reel_download"],
     "threads_video": ["threads_detect", "threads_extract_video"],
 }
