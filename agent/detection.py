@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from agent.config import REPO_ROOT, load_config
 from agent.constants import FLARESOLVERR_URL
+from agent.core.watch_source import _assert_fetch_url_allowed
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
 
@@ -105,6 +106,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
     Returns raw HTML (threads/substack) or a filename list (mega), or None on
     failure. Reuses the same fetches the legacy scrapers use.
     """
+    _assert_fetch_url_allowed(url)
     if platform == "threads":
         try:
             cookie_path = _resolve_threads_cookie_path()
@@ -161,8 +163,13 @@ def detect_content_subtype(url: str, platform: str) -> str:
         - mega -> 'mega_video' / 'book' / 'book_batch'
     """
     # A comment deep-link (?comment_id=) is a comment ON a post — capture the
-    # comment + parent, not the parent alone.
-    if "comment_id" in url:
+    # comment + parent, not the parent alone (Instagram only).
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    is_instagram = platform in ("instagram_reel", "instagram_post") or host.endswith(
+        "instagram.com"
+    )
+    if "comment_id" in url and is_instagram:
         return "instagram_comment"
 
     if platform in SIMPLE_PLATFORMS:
@@ -458,10 +465,7 @@ def _check_threads() -> tuple[bool, str]:
 
 
 def _check_rumble() -> tuple[bool, str]:
-    """Check Rumble cookies and Flaresolverr reachability."""
-    cookie_file = _resolve_cookie_path("rumble_cookies.txt")
-    if not cookie_file.exists():
-        return False, "Rumble cookies missing — no rumble_cookies.txt found"
+    """Check Flaresolverr reachability (Rumble uses Flaresolverr + CDN, not cookies)."""
     return _check_flaresolverr()
 
 

@@ -21,6 +21,7 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.constants import FLARESOLVERR_URL
+from agent.core.watch_source import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -45,6 +46,7 @@ RUMBLE_METADATA_MAX_AGE_SEC = 6 * 3600
 
 def _flaresolverr_get(url: str) -> str:
     """Fetch a URL through Flaresolverr; return the cleared response body."""
+    _assert_fetch_url_allowed(url)
     result = subprocess.run(
         [
             "curl", "-s", "-X", "POST", FLARESOLVERR_URL,
