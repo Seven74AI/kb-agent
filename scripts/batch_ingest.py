@@ -68,6 +68,9 @@ VIDEO_DOWNLOAD_STEPS = {
 
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
 
+# content_type values that denote embedded still images when media_kind is missing.
+_IMAGE_CONTENT_TYPES = frozenset({"substack_image"})
+
 # content_type -> extra batch_transcribe.py args (language + domain context).
 # bunny_stream is the French TDAH summit; other types auto-detect language.
 TRANSCRIBE_ARGS = {
@@ -85,10 +88,46 @@ TRANSCRIBE_ARGS = {
 }
 
 
+def _media_kind_from_content_type(content_type: str) -> str | None:
+    if content_type in _IMAGE_CONTENT_TYPES or content_type.endswith("_image"):
+        return "image"
+    if content_type in VIDEO_DOWNLOAD_STEPS:
+        return "video"
+    return None
+
+
+def _resolve_media_kind(q: dict) -> tuple[str | None, str | None]:
+    """Map an embedded ingest row to ``image`` or ``video``. Returns (kind, error)."""
+    raw = q.get("media_kind")
+    if raw is not None:
+        mk = str(raw).strip().lower()
+        if mk in ("image", "video"):
+            return mk, None
+        inferred = _media_kind_from_content_type(q.get("content_type") or "")
+        if inferred:
+            return inferred, None
+        return None, f"unsupported media_kind: {raw!r}"
+    inferred = _media_kind_from_content_type(q.get("content_type") or "")
+    if inferred:
+        return inferred, None
+    ct = q.get("content_type") or ""
+    return None, f"missing or unknown media_kind (content_type={ct!r})"
+
+
+def _read_json_file(path: Path, label: str) -> tuple[object | None, str | None]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except json.JSONDecodeError as exc:
+        return None, f"invalid {label} JSON: {exc}"
+
+
 def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
     """Run one link's download-phase steps. Returns (video_path, error)."""
     from agent.pipelines import get_pipeline
 
+    steps = VIDEO_DOWNLOAD_STEPS.get(q["content_type"])
+    if not steps:
+        return None, f"unsupported embedded content_type: {q['content_type']}"
     pipeline = get_pipeline(q["content_type"])
     step_fns = {s.name: s.fn for s in pipeline}
     task = {
@@ -97,7 +136,7 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
         "source_url": q["url"],
         "content_type": q["content_type"],
     }
-    for name in VIDEO_DOWNLOAD_STEPS[q["content_type"]]:
+    for name in steps:
         fn = step_fns.get(name)
         if fn is None:
             return None, f"download step '{name}' not found"
@@ -240,7 +279,10 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
     if not manifest_path.exists():
         return False
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest, manifest_err = _read_json_file(manifest_path, "manifest")
+    if manifest_err:
+        print(f"  [skip] {parent_slug}: {manifest_err}")
+        return False
     expected = manifest.get("total")
     if expected is not None:
         row = conn.execute(
@@ -329,7 +371,11 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
         if not ocr_json.exists():
             update_ingest_status(conn, q["id"], "failed", error="no OCR output")
             continue
-        reading = json.loads(ocr_json.read_text(encoding="utf-8")).get("reading", "")
+        ocr_data, ocr_err = _read_json_file(ocr_json, "OCR")
+        if ocr_err:
+            update_ingest_status(conn, q["id"], "failed", error=ocr_err)
+            continue
+        reading = ocr_data.get("reading", "")
         if not reading.strip():
             update_ingest_status(conn, q["id"], "failed", error="empty OCR reading")
             continue
@@ -383,7 +429,11 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
             if not merged.exists():
                 update_ingest_status(conn, q["id"], "failed", error="no merged transcript")
                 continue
-            segs = json.loads(merged.read_text(encoding="utf-8")).get("segments", [])
+            merged_data, merged_err = _read_json_file(merged, "transcript")
+            if merged_err:
+                update_ingest_status(conn, q["id"], "failed", error=merged_err)
+                continue
+            segs = merged_data.get("segments", [])
             transcript = " ".join(s.get("text", "") for s in segs).strip()
             if not transcript:
                 update_ingest_status(conn, q["id"], "failed", error="empty transcript")
@@ -431,8 +481,20 @@ def main() -> None:
         non_video = [q for q in claimed if q["content_type"] not in VIDEO_DOWNLOAD_STEPS and not q.get("parent_slug")]
 
         # 1. embedded media (linked to a parent article) → append to parent's raw.md
-        img_items = [q for q in media if q.get("media_kind") == "image"]
-        vid_items = [q for q in media if q.get("media_kind") == "video"]
+        img_items: list[dict] = []
+        vid_items: list[dict] = []
+        for q in media:
+            kind, kind_err = _resolve_media_kind(q)
+            if kind_err:
+                update_ingest_status(conn, q["id"], "failed", error=kind_err)
+                failed += 1
+                causes.append(f"{q['slug']}: {kind_err}")
+                print(f"  [failed] {q['slug']}: {kind_err}")
+                continue
+            if kind == "image":
+                img_items.append(q)
+            else:
+                vid_items.append(q)
         if img_items:
             print(f"Reading {len(img_items)} embedded image(s) via Modal VLM...")
             _process_embedded_images(img_items, config, conn, run_id)
