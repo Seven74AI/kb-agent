@@ -44,7 +44,13 @@ _PROTECTED_ENDPOINTS = frozenset({
 
 
 def _config_yaml_path() -> Path:
-    return config.kb_agent_dir / "config.yaml" if (config.kb_agent_dir / "config.yaml").exists() else REPO_ROOT / "config.yaml"
+    candidate = config.kb_agent_dir / "config.yaml"
+    try:
+        if candidate.exists():
+            return candidate
+    except (OSError, PermissionError):
+        pass
+    return REPO_ROOT / "config.yaml"
 
 
 def resolve_api_token() -> str | None:
