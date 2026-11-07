@@ -106,6 +106,15 @@ def _ingest_download_stem(task: dict) -> str:
     return task["id"]
 
 
+def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
+    """Load Netscape cookie jar via curl --config (cookie path must not appear on argv/ps)."""
+    if not cookie_file.is_file():
+        return []
+    conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
+    conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
+    return ["--config", str(conf_path)]
+
+
 def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     """Find the native ``videoUpload.id`` and write ``{id}_metadata.json``.
 
@@ -121,9 +130,10 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     domain = urlparse(url).netloc
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
-    cmd = ["curl", "-s", "-L", "--max-time", "30", url]
-    if cookie.exists():
-        cmd += ["-b", str(cookie)]
+    cmd = [
+        "curl", "-s", "-L", "--max-redirs", "0",
+        "--max-time", "30", *_curl_netscape_cookie_config(cookie), url,
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
     html = result.stdout or ""
 
@@ -176,10 +186,9 @@ def step_substack_video_download(task: dict, config: Config) -> str:
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
     cmd = [
         "curl", "-s", "-L", "--max-redirs", "0",
-        "--max-time", "600", "-o", str(output_path), endpoint,
+        "--max-time", "600", "-o", str(output_path),
+        *_curl_netscape_cookie_config(cookie), endpoint,
     ]
-    if cookie.exists():
-        cmd += ["-b", str(cookie)]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)
     if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
         raise StepError(
@@ -281,11 +290,15 @@ def _extract_native_video_ids(html: str) -> list[str]:
 
 def _fetch_substack_html(url: str, config: Config | None = None) -> str:
     _assert_fetch_url_allowed(url)
-    cmd = ["curl", "-s", "-L", "--max-time", "20", url]
+    cookie_args: list[str] = []
     if config is not None:
-        cookie = Path(config.cookie_dir) / "substack_cookies.txt"
-        if cookie.exists():
-            cmd += ["-b", str(cookie)]
+        cookie_args = _curl_netscape_cookie_config(
+            Path(config.cookie_dir) / "substack_cookies.txt"
+        )
+    cmd = [
+        "curl", "-s", "-L", "--max-redirs", "0",
+        "--max-time", "20", *cookie_args, url,
+    ]
     result = subprocess.run(
         cmd,
         capture_output=True, text=True, timeout=30,
@@ -377,23 +390,6 @@ def _extract_rumble_urls(html: str) -> list[str]:
         if url not in out:
             out.append(url)
     return out
-
-
-def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
-    """Download an image and run Tesseract OCR; return the text (or '' on failure)."""
-    _assert_fetch_url_allowed(img_url)
-    img_path = Path(config.temp_dir) / f"{slug}_img{idx}"
-    dl = subprocess.run(
-        ["curl", "-s", "-L", "--max-time", "30", "-o", str(img_path), img_url],
-        capture_output=True, text=True, timeout=35,
-    )
-    if dl.returncode != 0 or not img_path.exists() or img_path.stat().st_size < 100:
-        return ""
-    ocr = subprocess.run(
-        ["tesseract", str(img_path), "stdout", "-l", "eng+fra+spa+deu+ara"],
-        capture_output=True, text=True, timeout=60,
-    )
-    return ocr.stdout.strip()
 
 
 def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],

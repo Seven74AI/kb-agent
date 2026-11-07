@@ -14,7 +14,9 @@ from agent.detection import detect_platform
 from agent.exceptions import StepError
 from agent.pipelines.bunny_stream import (
     BUNNY_UUID_RE,
+    _assert_bunny_cdn_url_allowed,
     _curl_page,
+    _resolve_cdn_base,
     extract_bunny_video_uuid,
 )
 
@@ -73,6 +75,23 @@ class TestBunnyUuidExtraction:
         assert uuid == "abcdef12-3456-7890-abcd-ef1234567890"
 
 
+class TestBunnyCdnAllowlist:
+
+    def test_rejects_non_cdn_host(self):
+        with pytest.raises(StepError, match="not allowlisted"):
+            _assert_bunny_cdn_url_allowed("https://evil.example.com/play_720p.mp4")
+
+    @patch("agent.pipelines.bunny_stream._curl_page")
+    def test_resolve_cdn_base_validates_regex_match(self, mock_curl):
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        mock_curl.return_value = f"https://vz-testzone.b-cdn.net/{uuid}/playlist.m3u8"
+        base = _resolve_cdn_base(
+            f"https://player.mediadelivery.net/embed/1/{uuid}",
+            uuid,
+        )
+        assert base == "https://vz-testzone.b-cdn.net"
+
+
 class TestBunnyDownloadVideo:
 
     @pytest.fixture
@@ -126,3 +145,12 @@ class TestBunnyDownloadVideo:
         result = step_download_video(task_dict, config)
         assert result == str(mp4_path)
         assert mp4_path.exists()
+
+        mp4_curls = [
+            c for c in (mock_run.call_args_list or [])
+            if (args := c[0][0])[0] == "curl" and "play_720p.mp4" in " ".join(args)
+        ]
+        assert mp4_curls, "expected curl mp4 download"
+        mp4_cmd = mp4_curls[0][0][0]
+        assert "--max-redirs" in mp4_cmd
+        assert mp4_cmd[mp4_cmd.index("--max-redirs") + 1] == "0"

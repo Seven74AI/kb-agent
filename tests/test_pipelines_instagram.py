@@ -691,6 +691,9 @@ class TestIgCommentFetchSecurity:
         cmd = mock_run.call_args[0][0]
         argv_str = " ".join(cmd)
         assert secret_session not in argv_str
-        assert "Cookie:" not in argv_str
-        assert "-b" in cmd
-        assert str(cookie_file) in cmd
+        assert "csrf_test_token" not in argv_str
+        assert "csrftoken" not in argv_str
+        assert "-K" in cmd
+        assert cmd[cmd.index("-K") + 1] == "-"
+        assert "-b" not in cmd
+        assert str(cookie_file) not in argv_str

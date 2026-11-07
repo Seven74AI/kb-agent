@@ -68,6 +68,9 @@ class TestSubstackDetection:
         )
         result = _detect_substack_subtype("https://blog.substack.com/p/text-only")
         assert result == "substack_text"
+        cmd = mock_run.call_args[0][0]
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
 
     @patch("agent.detection.subprocess.run")
     def test_detect_video_preloads(self, mock_run):
@@ -303,6 +306,26 @@ class TestSubstackVideoMetadata:
         assert meta["title"] == "I MADE A VLOG"
         assert meta["domain"] == "testblog.substack.com"
 
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_extract_metadata_curl_disables_redirects_and_cookie_config(
+        self, mock_run, config, task_dict,
+    ):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        (config.cookie_dir / "substack_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='<title>T</title><script>"videoUpload":{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}</script>',
+        )
+        step_substack_video_extract_metadata(task_dict, config)
+        cmd = mock_run.call_args[0][0]
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        assert "--config" in cmd
+        assert "-b" not in cmd
+        cookie_path = config.cookie_dir / "substack_cookies.txt"
+        assert str(cookie_path) not in cmd
+
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")
     def test_two_sibling_native_videos_distinct_download_artifacts(
@@ -402,8 +425,21 @@ class TestSubstackVideoMetadata:
         mock_run.return_value = MagicMock(stdout="<html></html>", returncode=0)
         _fetch_substack_html("https://author.substack.com/p/post", config)
         cmd = mock_run.call_args[0][0]
-        assert "-b" in cmd
-        assert str(cookie_path) in cmd
+        assert "--config" in cmd
+        assert "-b" not in cmd
+        assert str(cookie_path) not in cmd
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_fetch_substack_html_curl_disables_redirects_without_cookie(self, mock_run, config):
+        mock_run.return_value = MagicMock(stdout="<html></html>", returncode=0)
+        _fetch_substack_html("https://author.substack.com/p/post", None)
+        cmd = mock_run.call_args[0][0]
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        assert "-b" not in cmd
+        assert "--config" not in cmd
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_no_media_synthesizes_inline(self, mock_fetch, config, task_dict):
@@ -1056,10 +1092,35 @@ class TestSubstackVideoMetadata:
         cmd = mock_run.call_args[0][0]
         assert "--max-redirs" in cmd
         assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        assert "-b" not in cmd
         with pytest.raises(ValueError, match="not allowed"):
             from agent.fetch_guard import _assert_fetch_url_allowed
 
             _assert_fetch_url_allowed("http://169.254.169.254/evil")
+
+    @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_download_cookie_via_config_not_argv(
+        self, mock_run, _h264, config, task_dict, tmp_path,
+    ):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        cookie_path = config.cookie_dir / "substack_cookies.txt"
+        cookie_path.write_text("# Netscape\n", encoding="utf-8")
+        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        meta_path.write_text(
+            json.dumps({"video_id": "vid-1", "domain": "testblog.substack.com"}),
+            encoding="utf-8",
+        )
+        mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
+        mp4.write_bytes(b"\x00" * 2000)
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        step_substack_video_download(task_dict, config)
+        cmd = mock_run.call_args[0][0]
+        assert "--config" in cmd
+        assert "-b" not in cmd
+        assert str(cookie_path) not in cmd
 
     @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_download_rejects_blocked_endpoint(self, mock_run, config, task_dict):

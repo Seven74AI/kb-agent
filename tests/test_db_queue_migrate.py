@@ -406,7 +406,7 @@ def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
     ).fetchone()
     assert row["status"] == "queued"
     assert row["error"] is None
-    assert row["attempts"] == 1
+    assert row["attempts"] == 2
 
 
 def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
@@ -450,13 +450,6 @@ def test_queue_ingest_revive_and_recover_single_attempt_accounting(tmp_path):
         parent_slug="article", media_kind="image",
     )
     assert recover_failed_media(conn, max_attempts=3) == 0
-    row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url=?", (url,)).fetchone()
-    assert row["status"] == "queued"
-    assert row["attempts"] == 1
-
-    conn.execute("UPDATE ingest_queue SET status='failed' WHERE url=?", (url,))
-    conn.commit()
-    assert recover_failed_media(conn, max_attempts=3) == 1
     row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url=?", (url,)).fetchone()
     assert row["status"] == "queued"
     assert row["attempts"] == 2

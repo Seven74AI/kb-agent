@@ -10,6 +10,7 @@ knowledge-base skill). Diarization mandatory for all video content.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -45,6 +46,10 @@ from agent.pipelines.video_common import (
 # and MCP run with a system PATH that lacks the py3.11 venv's bin).
 YTDLP_BIN = shutil.which("yt-dlp") or "/usr/local/lib/hermes-agent/venv/bin/yt-dlp"
 
+# yt-dlp is a delegated fetcher: only the user-supplied input URL is validated via
+# fetch_guard. Media segment URLs yt-dlp opens internally are outside fetch_guard
+# (accepted residual, same class as Flaresolverr).
+
 # yt-dlp rate limiting (per video-pipeline-global.md)
 YTDL_RATE_FLAGS = [
     "--sleep-requests", "1",
@@ -66,6 +71,18 @@ CHARS_PER_TOKEN = 4
 def _youtube_cookies_path(config: Config) -> Path:
     """Netscape cookie file for yt-dlp (uploaded via kba.sevend.io dashboard)."""
     return Path(config.cookie_dir) / "yt_cookies.txt"
+
+
+def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
+    """Load YT cookies via XDG yt-dlp config so paths stay off subprocess argv."""
+    cookie_path = _youtube_cookies_path(config)
+    xdg_root = Path(config.temp_dir) / "ytdlp_xdg"
+    conf_dir = xdg_root / "yt-dlp"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "config").write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(xdg_root)
+    return env
 
 
 def _download_artifact_stem(task: dict) -> str:
@@ -142,16 +159,15 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     _validate_cookies(config)
 
     url = task["source_url"]
-    cookies_file = str(_youtube_cookies_path(config))
     slug = task.get("slug", task["id"][:8])
     stem = _download_artifact_stem(task)
     _assert_fetch_url_allowed(url)
+    ytdlp_env = _ytdlp_subprocess_env(config)
 
     # --- Metadata ---
     result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -159,7 +175,10 @@ def step_extract_metadata(task: dict, config: Config) -> str:
             *YTDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=ytdlp_env,
     )
 
     if result.returncode != 0:
@@ -205,7 +224,6 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     chapter_result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -213,7 +231,10 @@ def step_extract_metadata(task: dict, config: Config) -> str:
             *YTDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=ytdlp_env,
     )
     if chapter_result.returncode == 0 and chapter_result.stdout.strip():
         try:
@@ -235,7 +256,6 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     desc_result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -243,7 +263,10 @@ def step_extract_metadata(task: dict, config: Config) -> str:
             *YTDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=ytdlp_env,
     )
     if desc_result.returncode == 0:
         metadata["description"] = desc_result.stdout.strip()
@@ -280,7 +303,6 @@ def step_download_video(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
     stem = _download_artifact_stem(task)
-    cookies_file = str(_youtube_cookies_path(config))
     output_path = Path(config.temp_dir) / f"{stem}.mp4"
     try:
         _assert_fetch_url_allowed(url)
@@ -291,10 +313,10 @@ def step_download_video(task: dict, config: Config) -> str:
             step_name="download_video",
         ) from exc
 
+    ytdlp_env = _ytdlp_subprocess_env(config)
     result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -304,7 +326,10 @@ def step_download_video(task: dict, config: Config) -> str:
             *YTDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=ytdlp_env,
     )
 
     if result.returncode != 0:
@@ -312,7 +337,6 @@ def step_download_video(task: dict, config: Config) -> str:
         result = subprocess.run(
             [
                 YTDLP_BIN,
-                "--cookies", cookies_file,
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
                 "--no-update",
@@ -322,7 +346,10 @@ def step_download_video(task: dict, config: Config) -> str:
                 *YTDL_RATE_FLAGS,
                 url,
             ],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            env=ytdlp_env,
         )
 
     if result.returncode != 0:
