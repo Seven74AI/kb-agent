@@ -94,24 +94,7 @@ def detect_platform(url: str) -> str:
 
 def _resolve_threads_cookie_path() -> Path:
     """Return path to threads_cookies.txt (config.cookie_dir, then legacy locations)."""
-    candidates: list[Path] = []
-    try:
-        candidates.append(load_config().cookie_dir / "threads_cookies.txt")
-    except Exception:
-        pass
-    candidates.extend([
-        REPO_ROOT / "cookies" / "threads_cookies.txt",
-        Path("/root/kb-agent/cookies/threads_cookies.txt"),
-        Path("/root/.hermes/cookies/threads_cookies.txt"),
-    ])
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        if path.exists():
-            return path
-    return candidates[0]
+    return _resolve_cookie_path("threads_cookies.txt")
 
 
 def _fetch_content(url: str, platform: str) -> str | None:
@@ -403,16 +386,38 @@ def preflight_health(platform: str) -> tuple[bool, str]:
         return _check_firecrawl()
     elif platform == "mega":
         return _check_mega()
+    elif platform == "rumble":
+        return _check_rumble()
     elif platform == "book":
         return True, ""
     return True, ""
 
 
+def _resolve_cookie_path(filename: str) -> Path:
+    """Return path to a cookie file (config.cookie_dir, then legacy locations)."""
+    candidates: list[Path] = []
+    try:
+        candidates.append(load_config().cookie_dir / filename)
+    except Exception:
+        pass
+    candidates.extend([
+        REPO_ROOT / "cookies" / filename,
+        Path("/root/kb-agent/cookies") / filename,
+        Path("/root/.hermes/cookies") / filename,
+    ])
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def _check_youtube() -> tuple[bool, str]:
     """Tier 1: Check YouTube cookies (LOGIN_INFO + SAPISID + 3PSID ≥ 3)."""
-    cookie_file = Path("/root/kb-agent/cookies/yt_cookies.txt")
-    if not cookie_file.exists():
-        cookie_file = Path("/root/.hermes/cookies/yt_cookies.txt")
+    cookie_file = _resolve_cookie_path("yt_cookies.txt")
     if not cookie_file.exists():
         return False, "YouTube cookies missing — no yt_cookies.txt found"
 
@@ -429,9 +434,7 @@ def _check_youtube() -> tuple[bool, str]:
 
 def _check_instagram() -> tuple[bool, str]:
     """Check Instagram sessionid cookie presence."""
-    cookie_file = Path("/root/kb-agent/cookies/ig_cookies.txt")
-    if not cookie_file.exists():
-        cookie_file = Path("/root/.hermes/cookies/ig_cookies.txt")
+    cookie_file = _resolve_cookie_path("ig_cookies.txt")
     if not cookie_file.exists():
         return False, "Instagram cookies missing — no ig_cookies.txt found"
 
@@ -446,12 +449,35 @@ def _check_instagram() -> tuple[bool, str]:
 
 def _check_threads() -> tuple[bool, str]:
     """Check Threads cookies file exists."""
-    cookie_file = Path("/root/kb-agent/cookies/threads_cookies.txt")
-    if not cookie_file.exists():
-        cookie_file = Path("/root/.hermes/cookies/threads_cookies.txt")
+    cookie_file = _resolve_cookie_path("threads_cookies.txt")
     if not cookie_file.exists():
         return False, "Threads cookies missing — no threads_cookies.txt found"
     return True, ""
+
+
+def _check_rumble() -> tuple[bool, str]:
+    """Check Rumble cookies and Flaresolverr reachability."""
+    cookie_file = _resolve_cookie_path("rumble_cookies.txt")
+    if not cookie_file.exists():
+        return False, "Rumble cookies missing — no rumble_cookies.txt found"
+    return _check_flaresolverr()
+
+
+FLARESOLVERR_URL = "http://localhost:8191/v1"
+
+
+def _check_flaresolverr() -> tuple[bool, str]:
+    """Ping Flaresolverr (Rumble Cloudflare bypass)."""
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "10", FLARESOLVERR_URL],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return False, f"Flaresolverr unreachable (exit {result.returncode})"
+        return True, ""
+    except Exception as e:
+        return False, f"Flaresolverr health check failed: {e}"
 
 
 def _check_firecrawl() -> tuple[bool, str]:
@@ -484,6 +510,11 @@ def _check_mega() -> tuple[bool, str]:
 
 # ── Deduplication ────────────────────────────────────────────────────────────
 
+
+class DedupCheckError(Exception):
+    """Vault grep failed; callers must not treat this as "not in vault"."""
+
+
 def dedup_check(url: str, vault_path: Path) -> bool:
     """Check if a URL already exists in the Obsidian vault.
 
@@ -496,11 +527,22 @@ def dedup_check(url: str, vault_path: Path) -> bool:
     Returns:
         True if the URL already exists in the vault, False otherwise.
     """
+    kb_dir = vault_path / "Knowledge base"
+    if not kb_dir.is_dir():
+        return False
     try:
         result = subprocess.run(
-            ["grep", "-F", "-rl", f"source_url: {url}", str(vault_path / "Knowledge base")],
+            ["grep", "-F", "-rl", f"source_url: {url}", str(kb_dir)],
             capture_output=True, text=True, timeout=30,
         )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DedupCheckError(f"Vault dedup grep failed: {exc}") from exc
+    if result.returncode == 0:
         return bool(result.stdout.strip())
-    except Exception:
+    if result.returncode == 1:
         return False
+    stderr = (result.stderr or "").strip()[:200]
+    raise DedupCheckError(
+        f"Vault dedup grep failed (exit {result.returncode})"
+        + (f": {stderr}" if stderr else "")
+    )

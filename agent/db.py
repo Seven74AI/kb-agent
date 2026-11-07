@@ -481,7 +481,11 @@ def claim_task(conn: sqlite3.Connection) -> dict | None:
     with conn:
         row = conn.execute("""
             UPDATE tasks SET status = 'in_progress', updated_at = datetime('now')
-            WHERE id = (SELECT id FROM tasks WHERE status = 'pending' LIMIT 1)
+            WHERE id = (
+                SELECT id FROM tasks WHERE status = 'pending'
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+            )
             RETURNING *
         """).fetchone()
     if row is None:
@@ -516,11 +520,25 @@ def update_step(conn: sqlite3.Connection, step_id: int, status: str, output: str
         status: New status ('running', 'done', 'failed', 'paused').
         output: Optional output text from the step.
     """
+    terminal = status in ("done", "failed", "paused")
     with conn:
-        conn.execute(
-            "UPDATE task_steps SET status = ?, output = ?, finished_at = datetime('now') WHERE id = ?",
-            (status, output, step_id),
-        )
+        if status == "running":
+            conn.execute(
+                "UPDATE task_steps SET status = ?, output = ?, "
+                "started_at = datetime('now'), finished_at = NULL WHERE id = ?",
+                (status, output, step_id),
+            )
+        elif terminal:
+            conn.execute(
+                "UPDATE task_steps SET status = ?, output = ?, "
+                "finished_at = datetime('now') WHERE id = ?",
+                (status, output, step_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE task_steps SET status = ?, output = ?, finished_at = NULL WHERE id = ?",
+                (status, output, step_id),
+            )
 
 
 def complete_task(conn: sqlite3.Connection, task_id: str):
