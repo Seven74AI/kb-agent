@@ -30,6 +30,8 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
     # Bunny Stream (TDAH summit / terragrandir, mediadelivery.net)
     (r"player\.mediadelivery\.net/", "bunny_stream"),
     (r"terragrandir\.com/", "bunny_stream"),
+    # Rumble
+    (r"rumble\.com/", "rumble"),
     # Wikispooks
     (r"wikispooks\.org/", "wikispooks"),
     # Books (direct upload by file extension)
