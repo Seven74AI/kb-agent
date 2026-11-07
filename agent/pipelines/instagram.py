@@ -184,7 +184,14 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
 
     output_path = Path(config.temp_dir) / f"{safe_slug}_reel.mp4"
 
-    _assert_fetch_url_allowed(url)
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="reel_download",
+        ) from exc
     result = subprocess.run(
         [
             YTDLP_BIN,
@@ -430,6 +437,15 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
+
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="ig_carousel_metadata",
+        ) from exc
 
     # Extract metadata via yt-dlp print
     result = subprocess.run(

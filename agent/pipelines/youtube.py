@@ -266,7 +266,14 @@ def step_download_video(task: dict, config: Config) -> str:
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
     output_path = Path(config.temp_dir) / f"{slug}.mp4"
-    _assert_fetch_url_allowed(url)
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        ) from exc
 
     result = subprocess.run(
         [
