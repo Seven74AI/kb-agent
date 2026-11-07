@@ -61,6 +61,14 @@ def test_post_resume_empty_reason_returns_400(client):
     assert "reason required" in data["error"].lower()
 
 
+def test_post_resume_wildcard_reason_returns_400(client):
+    """reason=% must not resume every paused task."""
+    resp = client.post("/resume?reason=%")
+    assert resp.status_code == 400
+    data = json.loads(resp.data)
+    assert "reason required" in data["error"].lower()
+
+
 def test_upload_cookies_saves_mode_600(client, monkeypatch, tmp_path):
     """Cookie files must be owner read/write only (chmod 600)."""
     cookie_dir = tmp_path / "cookies"

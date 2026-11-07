@@ -5,12 +5,23 @@ import sqlite3
 from agent.db import resume_tasks_by_reason
 
 
+class ResumeReasonError(ValueError):
+    """Resume reason is missing or would match every paused task."""
+
+
+def _is_catch_all_like_pattern(pattern: str) -> bool:
+    """True when a SQL LIKE pattern has no literal characters (matches everything)."""
+    return not pattern.replace("%", "").replace("_", "")
+
+
 def normalize_reason_pattern(reason_param: str) -> str:
-    """Convert a resume reason query param to a SQL LIKE pattern."""
+    """Convert a resume reason query param to a concrete SQL LIKE pattern."""
     reason_param = (reason_param or "").strip()
-    if not reason_param:
-        return "%"
-    if reason_param != "%" and "%" not in reason_param:
+    if not reason_param or _is_catch_all_like_pattern(reason_param):
+        raise ResumeReasonError(
+            "reason required (refusing to resume all paused tasks)",
+        )
+    if "%" not in reason_param and "_" not in reason_param:
         return f"%{reason_param}%"
     return reason_param
 
