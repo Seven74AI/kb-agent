@@ -178,6 +178,10 @@ _IMAGE_KEY_RE = re.compile(
     r'([a-z0-9-]+_\d+x\d+\.\w+)'
 )
 
+# Real image formats the VLM can read. Anything else (`.bin`, etc.) is a
+# non-image asset that Substack serves under the same `images/` prefix.
+IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif", "heic", "avif"}
+
 
 def _html_unescape(s: str) -> str:
     return (
@@ -204,8 +208,12 @@ def _is_content_image(key: str) -> bool:
     small avatars (``_144x144``/``_372x372``), square headshots/logos (author
     photo, channel logo), and extreme banners (channel header). Content images
     (charts, screenshots, documents) are typically rectangular with an aspect
-    ratio in the ~0.8–3.0 band.
+    ratio in the ~0.8–3.0 band. Non-image assets (``.bin``) served under the
+    same ``images/`` prefix are also dropped.
     """
+    ext = re.search(r'\.(\w+)$', key)
+    if not ext or ext.group(1).lower() not in IMAGE_EXTS:
+        return False  # .bin / non-image asset
     dim = re.search(r'_(\d+)x(\d+)\.\w+$', key)
     if not dim:
         return True  # no dimensions → assume content
