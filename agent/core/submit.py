@@ -32,9 +32,13 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
     Callers that need to touch the DB only for the enqueue step can run this
     first and skip opening a connection entirely on dedup hits.
     """
-    url = normalize_url((url or "").strip())
-    if not url:
+    raw = (url or "").strip()
+    if not raw:
         return {"status": "error", "http_status": 400, "error": "url required"}
+    try:
+        url = normalize_url(raw)
+    except ValueError as exc:
+        return {"status": "error", "http_status": 400, "error": str(exc)}
 
     platform = detect_platform(url)
 
@@ -159,9 +163,13 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
     ``parent_slug`` + ``media_kind`` link an embedded media item (image/video)
     back to the Substack article that spawned it, for deferred synthesis.
     """
-    url = normalize_url((url or "").strip())
-    if not url:
+    raw = (url or "").strip()
+    if not raw:
         return {"status": "error", "http_status": 400, "error": "url required"}
+    try:
+        url = normalize_url(raw)
+    except ValueError as exc:
+        return {"status": "error", "http_status": 400, "error": str(exc)}
 
     platform = detect_platform(url)
     subtype = content_type or detect_content_subtype(url, platform)
@@ -191,9 +199,13 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
     archived the source (video + transcript in MinIO). The task starts at the
     synthesize step, using the content type to select the right note template.
     """
-    url = (url or "").strip()
-    if not url:
+    raw = (url or "").strip()
+    if not raw:
         return {"status": "error", "http_status": 400, "error": "url required"}
+    try:
+        url = normalize_url(raw)
+    except ValueError as exc:
+        return {"status": "error", "http_status": 400, "error": str(exc)}
 
     platform = detect_platform(url)
     # Blocks in-flight work and prior successful synthesis; allows retry after failed.

@@ -90,6 +90,20 @@ def test_youtube_v_param_untouched():
     )
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "javascript:alert(1)",
+        "JavaScript:alert(document.cookie)",
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+    ],
+)
+def test_normalize_url_rejects_non_http_schemes(bad_url):
+    with pytest.raises(ValueError, match="http or https"):
+        detection.normalize_url(bad_url)
+
+
 # ── Video extraction (null-skip) ────────────────────────────────────────────
 
 def test_extract_array_skips_null_occurrence():

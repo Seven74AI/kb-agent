@@ -223,6 +223,13 @@ class TestThreadsCurlRedirects:
         cmd = mock_run.call_args[0][0]
         assert "--max-redirs" in cmd
         assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        assert "--config" in cmd
+        assert "-b" not in cmd
+        cookie_path = cookie_dir / "threads_cookies.txt"
+        assert str(cookie_path) not in cmd
+        conf_path = cookie_dir / ".curl-threads_cookies.txt.conf"
+        assert conf_path.is_file()
+        assert oct(conf_path.stat().st_mode)[-3:] == "600"
 
 
 class TestThreadsSsrf:

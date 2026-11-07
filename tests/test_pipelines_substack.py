@@ -20,6 +20,7 @@ from agent.pipelines.web import (
     step_substack_embedded_media,
     step_synthesize_web,
     step_substack_video_extract_metadata,
+    _assert_substack_video_cdn_url_allowed,
     _extract_body_images,
     _extract_native_video_ids,
     step_substack_video_download,
@@ -325,6 +326,9 @@ class TestSubstackVideoMetadata:
         assert "-b" not in cmd
         cookie_path = config.cookie_dir / "substack_cookies.txt"
         assert str(cookie_path) not in cmd
+        conf_path = config.cookie_dir / ".curl-substack_cookies.txt.conf"
+        assert conf_path.is_file()
+        assert oct(conf_path.stat().st_mode)[-3:] == "600"
 
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")
@@ -341,9 +345,17 @@ class TestSubstackVideoMetadata:
         vid_b = "bbbbbbbb-2222-4222-8222-222222222222"
         assert slugify(f"{post}#{vid_a}") == slugify(f"{post}#{vid_b}")
 
+        cdn_mp4 = "https://dz8aopenkvv6s.cloudfront.net/native-video.mp4?signed=1"
+
         def curl_side_effect(cmd, *args, **kwargs):
             url = next((c for c in cmd if c.startswith("http")), "")
-            if "extract" in str(kwargs) or "-o" not in cmd:
+            if "-I" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
+                    stderr="",
+                )
+            if "-o" not in cmd:
                 frag = urlparse(url).fragment
                 body = (
                     f'<title>Post</title>'
@@ -1071,7 +1083,7 @@ class TestSubstackVideoMetadata:
 
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")
-    def test_substack_video_download_curl_disables_redirects(
+    def test_substack_video_download_follows_one_validated_cloudfront_hop(
         self, mock_run, _h264, config, task_dict, tmp_path,
     ):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -1083,20 +1095,69 @@ class TestSubstackVideoMetadata:
             }),
             encoding="utf-8",
         )
-        mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
-        mp4.write_bytes(b"\x00" * 2000)
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        cdn_mp4 = "https://dz8aopenkvv6s.cloudfront.net/native-video.mp4?signed=1"
+        calls: list[list[str]] = []
 
+        def curl_side_effect(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            if "-I" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
+                    stderr="",
+                )
+            mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
+            mp4.write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = curl_side_effect
         step_substack_video_download(task_dict, config)
 
-        cmd = mock_run.call_args[0][0]
-        assert "--max-redirs" in cmd
-        assert cmd[cmd.index("--max-redirs") + 1] == "0"
-        assert "-b" not in cmd
-        with pytest.raises(ValueError, match="not allowed"):
-            from agent.fetch_guard import _assert_fetch_url_allowed
+        assert len(calls) == 2
+        head_cmd, get_cmd = calls
+        assert "-I" in head_cmd
+        assert head_cmd[head_cmd.index("--max-redirs") + 1] == "0"
+        assert cdn_mp4 not in head_cmd
+        assert "-L" not in get_cmd
+        assert "--max-redirs" not in get_cmd
+        assert cdn_mp4 in get_cmd
+        assert "-b" not in get_cmd
 
-            _assert_fetch_url_allowed("http://169.254.169.254/evil")
+    @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_download_rejects_disallowed_redirect_host(
+        self, mock_run, _h264, config, task_dict,
+    ):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        meta_path.write_text(
+            json.dumps({
+                "video_id": "vid-1",
+                "domain": "testblog.substack.com",
+            }),
+            encoding="utf-8",
+        )
+        evil = "http://169.254.169.254/latest/meta-data/"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {evil}\r\n",
+            stderr="",
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_video_download(task_dict, config)
+        assert exc.value.step_name == "substack_video_download"
+        assert mock_run.call_count == 1
+        assert "-I" in mock_run.call_args[0][0]
+
+    def test_substack_video_cdn_allowlist(self):
+        _assert_substack_video_cdn_url_allowed(
+            "https://dz8aopenkvv6s.cloudfront.net/video.mp4",
+        )
+        _assert_substack_video_cdn_url_allowed(
+            "https://substackcdn.com/video/fetch/foo",
+        )
+        with pytest.raises(StepError, match="not allowlisted"):
+            _assert_substack_video_cdn_url_allowed("https://evil.example.com/v.mp4")
 
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")
@@ -1112,12 +1173,23 @@ class TestSubstackVideoMetadata:
             json.dumps({"video_id": "vid-1", "domain": "testblog.substack.com"}),
             encoding="utf-8",
         )
-        mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
-        mp4.write_bytes(b"\x00" * 2000)
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        cdn_mp4 = "https://dz8aopenkvv6s.cloudfront.net/native-video.mp4"
 
+        def curl_side_effect(cmd, *args, **kwargs):
+            if "-I" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
+                    stderr="",
+                )
+            mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
+            mp4.write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = curl_side_effect
         step_substack_video_download(task_dict, config)
-        cmd = mock_run.call_args[0][0]
+        get_cmd = mock_run.call_args_list[-1][0][0]
+        cmd = get_cmd
         assert "--config" in cmd
         assert "-b" not in cmd
         assert str(cookie_path) not in cmd

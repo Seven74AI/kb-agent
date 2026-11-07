@@ -693,7 +693,12 @@ class TestIgCommentFetchSecurity:
         assert secret_session not in argv_str
         assert "csrf_test_token" not in argv_str
         assert "csrftoken" not in argv_str
-        assert "-K" in cmd
-        assert cmd[cmd.index("-K") + 1] == "-"
+        assert "-K" not in cmd
+        assert "--config" in cmd
+        assert mock_run.call_args.kwargs.get("input") is None
         assert "-b" not in cmd
         assert str(cookie_file) not in argv_str
+        conf_path = config.cookie_dir / ".curl-ig-comment-999888777.conf"
+        assert conf_path.is_file()
+        assert secret_session in conf_path.read_text(encoding="utf-8")
+        assert oct(conf_path.stat().st_mode)[-3:] == "600"
