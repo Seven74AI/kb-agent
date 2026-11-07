@@ -14,6 +14,7 @@ from agent.detection import (
     normalize_url,
     preflight_health,
 )
+from agent.notify import sanitize_visible_message
 
 
 def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> dict:
@@ -44,7 +45,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
             return {
                 "status": "error",
                 "http_status": 500,
-                "error": f"dedup check failed: {exc}",
+                "error": sanitize_visible_message(f"dedup check failed: {exc}"),
                 "platform": platform,
             }
         if in_vault:
@@ -77,6 +78,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
 
     ok, reason = preflight_health(platform)
     slug = slugify(url, content_type=subtype)
+    pause_reason = sanitize_visible_message(reason) if (not ok and reason) else None
 
     return {
         "status": "paused" if not ok else "pending",
@@ -86,7 +88,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
         "content_type": subtype,
         "slug": slug,
         "steps": steps,
-        "reason": reason if not ok else None,
+        "reason": pause_reason,
     }
 
 
@@ -97,12 +99,13 @@ def submit_plan(agent_conn: sqlite3.Connection, plan: dict, tags=None) -> dict:
             agent_conn, plan["url"], plan["content_type"], plan["slug"], plan["steps"],
             status="paused", tags=tags,
         )
-        agent_conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (plan["reason"], task_id))
+        pause_reason = sanitize_visible_message(plan["reason"] or "")
+        agent_conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (pause_reason, task_id))
         agent_conn.commit()
         return {
             "status": "paused",
             "http_status": 200,
-            "reason": plan["reason"],
+            "reason": pause_reason,
             "platform": plan["platform"],
             "task_id": task_id,
         }

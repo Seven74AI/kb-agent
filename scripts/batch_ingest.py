@@ -45,6 +45,7 @@ from agent.db import (  # noqa: E402
     has_completed_parent_synthesis,
     init_db,
     append_parent_media_atomic,
+    parent_media_complete,
     normalize_tags,
     record_batch_run,
     recover_failed_media,
@@ -339,11 +340,12 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     if parent_slug in _deferred_synthesize_dispatched:
         return False
     if has_completed_parent_synthesis(
-        conn, parent_slug, vault_path=config.vault_path,
+        conn,
+        parent_slug,
+        vault_path=config.vault_path,
+        temp_dir=config.temp_dir,
     ):
         print(f"  [skip] {parent_slug}: parent synthesis already completed")
-        return False
-    if count_pending_media(conn, parent_slug) > 0:
         return False
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
     if manifest_path.exists():
@@ -365,15 +367,17 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     if deferral is None:
         print(f"  [skip] {parent_slug}: deferral record missing; fail closed")
         return False
-    expected = deferral["expected_total"]
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-        (parent_slug,),
-    ).fetchone()
-    actual = row["n"] if hasattr(row, "keys") else row[0]
-    if actual != expected:
+    raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
+    if not parent_media_complete(conn, parent_slug, raw_path=raw_path):
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (parent_slug,),
+        ).fetchone()
+        actual = row["n"] if hasattr(row, "keys") else row[0]
+        expected = deferral["expected_total"]
         print(
-            f"  [skip] {parent_slug}: ingest rows {actual} != expected total {expected}"
+            f"  [skip] {parent_slug}: parent media incomplete "
+            f"(rows {actual}/{expected}, raw={raw_path.name})"
         )
         return False
     rr = dispatch_synthesize(
@@ -399,7 +403,9 @@ def _reconcile_deferred_parent_syntheses(conn, config) -> None:
     ).fetchall()
     for row in rows:
         parent_slug = row["parent_slug"]
-        if count_pending_media(conn, parent_slug) > 0:
+        bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, config.temp_dir)
+        raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
+        if not parent_media_complete(conn, parent_slug, raw_path=raw_path):
             continue
         _maybe_dispatch_parent_synthesize(conn, config, parent_slug)
 
@@ -464,6 +470,9 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
             continue
         if ocr_data.get("error"):
             ocr_results.append((q, None, f"OCR failed: {ocr_data['error']}"))
+            continue
+        if ocr_data.get("truncated"):
+            ocr_results.append((q, None, "OCR output truncated at token cap"))
             continue
         reading = ocr_data.get("reading", "")
         if not reading.strip():

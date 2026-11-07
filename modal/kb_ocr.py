@@ -39,6 +39,9 @@ CACHE = "/cache"
 
 MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
+# Cap decoded pixels before VLM preprocess (OOM / pixel bombs).
+MAX_IMAGE_PIXELS = 4_194_304  # 2048 x 2048
+MAX_NEW_OCR_TOKENS = 768
 
 PROMPT = (
     "Transcribe every piece of text visible in this image, verbatim and complete, "
@@ -74,6 +77,15 @@ def read_images(images: list) -> list:
             with open(path, "wb") as f:
                 f.write(item["bytes"])
 
+            from PIL import Image
+
+            with Image.open(path) as img:
+                w, h = img.size
+                if w * h > MAX_IMAGE_PIXELS:
+                    raise ValueError(
+                        f"image pixel count {w * h} exceeds cap {MAX_IMAGE_PIXELS}"
+                    )
+
             t0 = time.time()
             messages = [{
                 "role": "user",
@@ -90,7 +102,7 @@ def read_images(images: list) -> list:
                 text=[text], images=image_inputs, videos=video_inputs,
                 padding=True, return_tensors="pt",
             ).to(model.device)
-            generated_ids = model.generate(**inputs, max_new_tokens=768)
+            generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_OCR_TOKENS)
             trimmed = [
                 out[len(inp):]
                 for inp, out in zip(inputs.input_ids, generated_ids)
@@ -98,6 +110,16 @@ def read_images(images: list) -> list:
             reading = processor.batch_decode(
                 trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
             )[0].strip()
+            truncated = len(trimmed[0]) >= MAX_NEW_OCR_TOKENS
+            if truncated:
+                results.append(
+                    {
+                        "name": name,
+                        "error": f"OCR output truncated at {MAX_NEW_OCR_TOKENS} tokens",
+                    }
+                )
+                print(f"[{name}] truncated at token cap", flush=True)
+                continue
 
             results.append({"name": name, "reading": reading})
             print(f"[{name}] {len(reading)} chars in {time.time() - t0:.0f}s", flush=True)

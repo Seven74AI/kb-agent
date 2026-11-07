@@ -2,7 +2,11 @@
 
 import sqlite3
 
-from agent.db import has_active_synthesize_task, resume_tasks_by_reason
+from agent.db import (
+    has_active_synthesize_task,
+    is_deferred_media_pause,
+    resume_tasks_by_reason,
+)
 
 
 class ResumeReasonError(ValueError):
@@ -33,7 +37,7 @@ def resume_tasks(agent_conn: sqlite3.Connection, reason: str) -> int:
 
 
 def _is_awaiting_media_pause(error: str | None) -> bool:
-    return bool(error and "awaiting media" in error.lower())
+    return is_deferred_media_pause(error)
 
 
 def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:

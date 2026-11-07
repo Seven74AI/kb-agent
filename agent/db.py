@@ -9,6 +9,32 @@ from pathlib import Path
 # Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``).
 INGEST_MAX_MEDIA_ATTEMPTS = 3
 
+# Substrings in task/step pause reasons that mean deferred media still blocks synthesis.
+DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
+    "awaiting media",
+    "deferred to batch synthesis",
+    "batch synthesis dispatched or completed",
+    "media_deferred:",
+)
+
+
+def is_deferred_media_pause(reason: str | None) -> bool:
+    """True when a pause reason signals the parent must not pass ``synthesize_note``."""
+    if not reason:
+        return False
+    low = reason.lower()
+    return any(marker in low for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
+
+
+def _deferred_media_resume_sql_exclusion() -> tuple[str, tuple[str, ...]]:
+    """SQL fragment and params that exclude deferred-media pauses from bulk resume."""
+    clauses = [
+        "LOWER(COALESCE(error, '')) NOT LIKE ?"
+        for _ in DEFERRED_MEDIA_PAUSE_MARKERS
+    ]
+    params = tuple(f"%{marker}%" for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
+    return " AND ".join(clauses), params
+
 
 AGENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -347,8 +373,7 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             if row["status"] == "failed" and row["attempts"] < max_attempts:
                 conn.execute(
                     "UPDATE ingest_queue SET status='queued', error=NULL, "
-                    "attempts = attempts + 1, updated_at=datetime('now') "
-                    "WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+                    "updated_at=datetime('now') WHERE url = ? AND COALESCE(parent_slug, '') = ?",
                     (url, parent_key),
                 )
         return row["id"], False
@@ -454,6 +479,7 @@ def has_completed_parent_synthesis(
     slug: str,
     *,
     vault_path: Path | None = None,
+    temp_dir: Path | None = None,
 ) -> bool:
     """True when synthesis for *slug* already finished on the parent or batch path.
 
@@ -487,6 +513,10 @@ def has_completed_parent_synthesis(
         actual = row["n"] if hasattr(row, "keys") else row[0]
         if actual != deferral["expected_total"]:
             return False
+        if temp_dir is not None:
+            raw_path = temp_dir / f"{slug}_raw.md"
+            if not parent_media_complete(conn, slug, raw_path=raw_path):
+                return False
         return True
     return False
 
@@ -575,6 +605,51 @@ def media_append_marker(ingest_id: str) -> str:
     return f"<!-- kb-ingest-media:{ingest_id} -->"
 
 
+def parent_media_complete(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    *,
+    raw_path: Path | None = None,
+) -> bool:
+    """True when every deferred sibling is dispatched and its append marker is on disk."""
+    if not parent_slug:
+        return False
+    if count_pending_media(conn, parent_slug) > 0:
+        return False
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None:
+        return False
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchone()
+    actual = row["n"] if hasattr(row, "keys") else row[0]
+    expected = deferral["expected_total"]
+    if actual != expected:
+        return False
+    if expected == 0 and actual == 0:
+        return True
+    rows = conn.execute(
+        "SELECT id, media_appended FROM ingest_queue WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchall()
+    for sibling in rows:
+        if not bool(
+            sibling["media_appended"] if hasattr(sibling, "keys") else sibling[1]
+        ):
+            return False
+    if raw_path is None:
+        return True
+    if not raw_path.is_file():
+        return False
+    text = raw_path.read_text(encoding="utf-8")
+    for sibling in rows:
+        if media_append_marker(sibling["id"]) not in text:
+            return False
+    return True
+
+
 def append_parent_media_atomic(
     conn: sqlite3.Connection,
     ingest_id: str,
@@ -582,37 +657,29 @@ def append_parent_media_atomic(
     section: str,
     body: str,
 ) -> bool:
-    """Append once; commit ``media_appended`` before atomically replacing the raw file."""
+    """Append once; persist raw content to disk before recording ``media_appended``."""
     marker = media_append_marker(ingest_id)
-    pending_text: str | None = None
-    with conn:
-        row = conn.execute(
-            "SELECT media_appended FROM ingest_queue WHERE id = ?", (ingest_id,)
-        ).fetchone()
-        if row is None:
-            return False
-        if bool(row["media_appended"] if hasattr(row, "keys") else row[0]):
-            return True
-        if not raw_path.exists():
-            return False
-        text = raw_path.read_text(encoding="utf-8")
-        if marker in text:
-            conn.execute(
-                "UPDATE ingest_queue SET media_appended = 1, updated_at = datetime('now') "
-                "WHERE id = ?",
-                (ingest_id,),
-            )
-            return True
-        block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
-        pending_text = text + block
-        conn.execute(
-            "UPDATE ingest_queue SET media_appended = 1, updated_at = datetime('now') WHERE id = ?",
-            (ingest_id,),
-        )
-    if pending_text is not None:
-        tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
-        tmp_path.write_text(pending_text, encoding="utf-8")
-        os.replace(tmp_path, raw_path)
+    row = conn.execute(
+        "SELECT media_appended FROM ingest_queue WHERE id = ?", (ingest_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    if not raw_path.exists():
+        return False
+    text = raw_path.read_text(encoding="utf-8")
+    media_flag = bool(row["media_appended"] if hasattr(row, "keys") else row[0])
+    if marker in text:
+        if not media_flag:
+            set_ingest_media_appended(conn, ingest_id)
+        return True
+    if media_flag:
+        pass
+    block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
+    pending_text = text + block
+    tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
+    tmp_path.write_text(pending_text, encoding="utf-8")
+    os.replace(tmp_path, raw_path)
+    set_ingest_media_appended(conn, ingest_id)
     return True
 
 
@@ -839,6 +906,9 @@ def claim_task(conn: sqlite3.Connection) -> dict | None:
 def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
     """Get the next pending step for a task, ordered by step_order.
 
+    A paused ``synthesize_note`` with a deferred-media reason blocks later pending
+    steps so the consumer cannot skip ahead to ``quality_gate`` / ``minio_upload``.
+
     Args:
         conn: Agent database connection.
         task_id: The task UUID.
@@ -846,12 +916,36 @@ def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
     Returns:
         Step dict if a pending step exists, None otherwise.
     """
-    row = conn.execute("""
+    pending_row = conn.execute(
+        """
         SELECT * FROM task_steps
         WHERE task_id = ? AND status = 'pending'
         ORDER BY step_order LIMIT 1
-    """, (task_id,)).fetchone()
-    return dict(row) if row else None
+        """,
+        (task_id,),
+    ).fetchone()
+    synthesize_paused = conn.execute(
+        """
+        SELECT * FROM task_steps
+        WHERE task_id = ? AND name = 'synthesize_note' AND status = 'paused'
+        ORDER BY step_order LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if synthesize_paused is not None:
+        task_row = conn.execute(
+            "SELECT error FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        task_error = task_row[0] if task_row else None
+        step_output = synthesize_paused["output"]
+        if is_deferred_media_pause(task_error) or is_deferred_media_pause(step_output):
+            if pending_row is None or (
+                synthesize_paused["step_order"] < pending_row["step_order"]
+            ):
+                return dict(synthesize_paused)
+    if pending_row is None:
+        return None
+    return dict(pending_row)
 
 
 def update_step(conn: sqlite3.Connection, step_id: int, status: str, output: str | None = None):
@@ -950,8 +1044,8 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
     """Resume all paused tasks matching a reason pattern.
 
     Resets retries to 0 and sets status back to 'pending'. Tasks paused for
-    deferred Substack media (error contains ``awaiting media``) are left paused
-    so the consumer does not skip past ``substack_embedded_media`` to synthesis.
+    deferred Substack media (structured deferral pause markers) are left paused
+    so the consumer does not skip past ``substack_embedded_media`` / ``synthesize_note``.
 
     Args:
         conn: Agent database connection.
@@ -961,13 +1055,13 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
     Returns:
         Number of tasks resumed.
     """
+    exclusion, ex_params = _deferred_media_resume_sql_exclusion()
     with conn:
         cursor = conn.execute(
             "UPDATE tasks SET status = 'pending', retries = 0, "
             "error = NULL, updated_at = datetime('now') "
-            "WHERE status = 'paused' AND error LIKE ? "
-            "AND error NOT LIKE '%awaiting media%'",
-            (reason_pattern,),
+            f"WHERE status = 'paused' AND error LIKE ? AND {exclusion}",
+            (reason_pattern, *ex_params),
         )
         return cursor.rowcount
 
@@ -1010,9 +1104,34 @@ def get_all_tasks(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     return [{k: r[k] for k in r.keys()} for r in rows]
 
 
+_LLM_ARCHIVE_RAW_ENV = "KB_LLM_ARCHIVE_RAW"
+_LLM_ARCHIVE_SECRET_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*\S+"
+)
+_LLM_ARCHIVE_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
+
+
+def llm_archive_store_raw() -> bool:
+    """Opt-in via KB_LLM_ARCHIVE_RAW=1 — default is redacted storage at rest."""
+    return os.getenv(_LLM_ARCHIVE_RAW_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def redact_llm_archive_text(text: str, *, store_raw: bool | None = None) -> str:
+    """Scrub paths and token-shaped secrets before persisting llm_archives rows."""
+    if store_raw if store_raw is not None else llm_archive_store_raw():
+        return text or ""
+    from agent.notify import sanitize_visible_message
+
+    out = sanitize_visible_message(text or "")
+    out = _LLM_ARCHIVE_BEARER_RE.sub("Bearer [redacted]", out)
+    out = _LLM_ARCHIVE_SECRET_RE.sub("[credential redacted]", out)
+    return out
+
+
 def archive_llm_call(conn: sqlite3.Connection, task_id: str, role: str,
                      prompt: str, response: str, model: str,
-                     tokens_in: int | None = None, tokens_out: int | None = None):
+                     tokens_in: int | None = None, tokens_out: int | None = None,
+                     *, store_raw: bool | None = None):
     """Archive a full LLM prompt + response pair in logs.db.
 
     Args:
@@ -1024,10 +1143,13 @@ def archive_llm_call(conn: sqlite3.Connection, task_id: str, role: str,
         model: Model identifier string.
         tokens_in: Input token count if available.
         tokens_out: Output token count if available.
+        store_raw: When True, skip redaction (default: env KB_LLM_ARCHIVE_RAW).
     """
+    prompt_row = redact_llm_archive_text(prompt, store_raw=store_raw)
+    response_row = redact_llm_archive_text(response, store_raw=store_raw)
     with conn:
         conn.execute(
             """INSERT INTO llm_archives (task_id, role, prompt, response, model, tokens_in, tokens_out)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (task_id, role, prompt, response, model, tokens_in, tokens_out),
+            (task_id, role, prompt_row, response_row, model, tokens_in, tokens_out),
         )
