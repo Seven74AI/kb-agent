@@ -5,6 +5,8 @@ and Git push. Uses mocks for external dependencies (yt-dlp, ffmpeg, pyannote,
 faster-whisper, LLM)."""
 
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +19,8 @@ from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.youtube import (
+    _pass1_extract_concepts,
+    _ytdlp_subprocess_env,
     _validate_cookies,
     _identify_speakers,
     _generate_chapters,
@@ -137,6 +141,41 @@ def sample_merged_transcript(config, task_dict, sample_diarization, sample_trans
 
 
 # ── _validate_cookies tests ──────────────────────────────────────────────────
+
+
+def test_ytdlp_xdg_config_is_owner_only(config):
+    cookie_dir = config.cookie_dir
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    (cookie_dir / "yt_cookies.txt").write_text("# cookies\n", encoding="utf-8")
+    _ytdlp_subprocess_env(config)
+    xdg_root = Path(config.temp_dir) / "ytdlp_xdg"
+    conf_path = xdg_root / "yt-dlp" / "config"
+    assert conf_path.is_file()
+    for path in (xdg_root, conf_path.parent, conf_path):
+        mode = path.stat().st_mode
+        assert mode & stat.S_IRWXG == 0
+        assert mode & stat.S_IRWXO == 0
+    assert oct(conf_path.stat().st_mode)[-3:] == "600"
+
+
+def test_pass1_debug_dump_owner_only(tmp_path):
+    """Pass-1 JSON failure writes debug output under temp_dir with 0600 perms."""
+    cfg = Config(
+        kb_agent_dir=tmp_path / "kb",
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+    )
+    cfg.temp_dir.mkdir(parents=True, exist_ok=True)
+    llm = MagicMock()
+    llm.call.return_value = LLMResponse(content="not json at all", model="m")
+    with pytest.raises(StepError, match="Pass 1 concepts JSON parse failed"):
+        _pass1_extract_concepts("transcript", (3, 6), llm, "dbg_slug", cfg)
+    debug_path = cfg.temp_dir / "pass1_debug" / "dbg_slug_pass1_debug.txt"
+    assert debug_path.is_file()
+    assert oct(debug_path.stat().st_mode)[-3:] == "600"
+    assert debug_path.stat().st_mode & stat.S_IRWXO == 0
+
 
 def test_validate_cookies_missing(config):
     """Test when cookies file doesn't exist under config.cookie_dir."""

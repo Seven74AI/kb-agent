@@ -1160,7 +1160,7 @@ class TestBatchPipelineIdKeyedDownloadArtifacts:
         threads_url = "https://www.threads.net/@user/post/XYZ"
         shared_slug = "threads.net_user_post_XYZ"
         video_html = (
-            '{"video_versions":[{"url":"https://example.com/threads-v.mp4",'
+            '{"video_versions":[{"url":"https://scontent.cdninstagram.com/v/threads-v.mp4",'
             '"height":720}],"caption":{"text":"clip"},"permalink":"https://www.threads.com/'
             '\\u0040user/post/XYZ","is_reply":false}<div class="_ab6c">x</div>'
         )

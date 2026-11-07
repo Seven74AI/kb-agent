@@ -30,9 +30,12 @@ def test_tdah_fetch_rejects_private_url():
         mod.fetch("http://127.0.0.1/evil")
 
 
-def test_tdah_fetch_calls_guard_before_urlopen(monkeypatch):
+def test_tdah_fetch_calls_guard_before_curl(monkeypatch):
+    from unittest.mock import MagicMock
+
     mod = _load_tdah_module()
     seen: list[str] = []
+    curl_cmds: list[list] = []
 
     monkeypatch.setattr(
         mod,
@@ -40,14 +43,45 @@ def test_tdah_fetch_calls_guard_before_urlopen(monkeypatch):
         lambda url: seen.append(url),
     )
 
-    def fake_urlopen(req, timeout=40):
-        return type("R", (), {"read": lambda self: b"<html></html>"})()
+    def fake_sh(cmd, **kw):
+        curl_cmds.append(list(cmd))
+        return MagicMock(returncode=0, stdout="<html></html>", stderr="")
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mod, "sh", fake_sh)
 
     out = mod.fetch("https://example.com/page")
     assert seen == ["https://example.com/page"]
     assert "<html>" in out
+    assert curl_cmds
+    curl = curl_cmds[0]
+    assert "--max-redirs" in curl
+    assert curl[curl.index("--max-redirs") + 1] == "0"
+
+
+def test_tdah_fetch_redirect_target_never_guarded(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from agent.fetch_guard import _assert_fetch_url_allowed as real_guard
+
+    mod = _load_tdah_module()
+    guarded: list[str] = []
+
+    def track_guard(url: str) -> None:
+        guarded.append(url)
+        real_guard(url)
+
+    monkeypatch.setattr(mod, "_assert_fetch_url_allowed", track_guard)
+    monkeypatch.setattr(
+        mod,
+        "sh",
+        lambda cmd, **kw: MagicMock(
+            returncode=0, stdout="<html>no redirect follow</html>", stderr=""
+        ),
+    )
+    mod.fetch("https://www.terragrandir.com/page")
+    assert guarded == ["https://www.terragrandir.com/page"]
+    with pytest.raises(ValueError, match="not allowed"):
+        real_guard("http://127.0.0.1/stolen")
 
 
 def test_tdah_bunny_cdn_url_passes_fetch_guard():

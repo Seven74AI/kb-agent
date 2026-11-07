@@ -13,6 +13,7 @@ from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.threads import (
+    _assert_threads_video_cdn_url_allowed,
     _curl_threads,
     _has_video_versions,
     _extract_video_url,
@@ -252,9 +253,24 @@ class TestThreadsSsrf:
             '<div class="_ab6c">x</div>'
         )
         mock_curl.return_value = html
-        with pytest.raises(StepError, match="not allowed"):
+        with pytest.raises(StepError, match="not allowlisted"):
             step_threads_extract_video(task_dict, config)
         mock_run.assert_not_called()
+
+    def test_threads_video_cdn_allowlist(self):
+        _assert_threads_video_cdn_url_allowed(
+            "https://scontent.cdninstagram.com/v/t50.2886-16/test.mp4",
+        )
+        _assert_threads_video_cdn_url_allowed(
+            "https://instagram.fsyd13-1.fna.fbcdn.net/o1/v/t16/f2/m84/test.mp4",
+        )
+        with pytest.raises(StepError, match="not allowlisted"):
+            _assert_threads_video_cdn_url_allowed("https://evil.example.com/v.mp4")
+
+    @patch("agent.pipelines.threads._assert_fetch_url_allowed")
+    def test_threads_video_cdn_allowlist_threads_net_suffix(self, mock_fetch):
+        _assert_threads_video_cdn_url_allowed("https://video.cdn.threads.net/test.mp4")
+        mock_fetch.assert_called_once()
 
 
 # ── Step Tests: Detection ────────────────────────────────────────────────────
@@ -339,7 +355,7 @@ class TestVideoExtraction:
     @patch("agent.pipelines.threads.ensure_h264", side_effect=lambda p: p)
     def test_extract_video_success(self, mock_ensure_h264, mock_run, mock_curl, config, task_dict):
         html = (
-            '{"video_versions":[{"url":"https://example.com/test.mp4",'
+            '{"video_versions":[{"url":"https://scontent.cdninstagram.com/v/test.mp4",'
             '"height":1080}],"caption":{"text":"x"},"username":"x"}'
             '<div class="_ab6c">x</div>'
         )

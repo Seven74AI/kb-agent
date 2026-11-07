@@ -74,6 +74,56 @@ def test_default_fetch_html_rejects_metadata_ip():
         default_fetch_html("http://169.254.169.254/latest/meta-data/")
 
 
+def test_default_fetch_html_curl_disables_redirects(monkeypatch):
+    from unittest.mock import MagicMock
+
+    import agent.core.watch_source as watch_source
+
+    curl_cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        watch_source.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            curl_cmds.append(list(cmd))
+            or MagicMock(returncode=0, stdout="<html>ok</html>", stderr="")
+        ),
+    )
+    assert default_fetch_html("https://example.com/watch") == "<html>ok</html>"
+    assert curl_cmds
+    curl = curl_cmds[0]
+    assert "--max-redirs" in curl
+    assert curl[curl.index("--max-redirs") + 1] == "0"
+
+
+def test_default_fetch_html_redirect_target_never_guarded(monkeypatch):
+    """Allowed page URL must not reach a disallowed redirect host (boundary 5)."""
+    from unittest.mock import MagicMock
+
+    import agent.core.watch_source as watch_source
+
+    guarded: list[str] = []
+    real_guard = watch_source._assert_fetch_url_allowed
+
+    def track_guard(url: str) -> None:
+        guarded.append(url)
+        real_guard(url)
+
+    monkeypatch.setattr(watch_source, "_assert_fetch_url_allowed", track_guard)
+    monkeypatch.setattr(
+        watch_source.subprocess,
+        "run",
+        lambda cmd, **kw: MagicMock(
+            returncode=0,
+            stdout="<html>redirect body, not 127.0.0.1</html>",
+            stderr="",
+        ),
+    )
+    default_fetch_html("https://example.com/redirects-to-private")
+    assert guarded == ["https://example.com/redirects-to-private"]
+    with pytest.raises(ValueError, match="not allowed"):
+        real_guard("http://127.0.0.1/stolen")
+
+
 def test_extract_items_from_html():
     items = extract_items(SAMPLE_HTML, TDAH_PATTERN)
     assert items == frozenset({"j1-intro", "j2-keynote"})
