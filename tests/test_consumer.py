@@ -217,8 +217,8 @@ async def test_execute_task_fail_error(consumer, agent_db):
 
 
 @pytest.mark.asyncio
-async def test_execute_task_step_error_logs_traceback(consumer, agent_db, logs_db):
-    """StepError should be logged with a full traceback, not only the message."""
+async def test_execute_task_step_error_logs_sanitized(consumer, agent_db, logs_db):
+    """StepError stderr logs should keep the message, not stack frames or paths."""
     task_id = create_task(agent_db, "https://example.com", "web", "tb_slug", ["tb_step"])
 
     def tb_step(task, cfg):
@@ -233,10 +233,35 @@ async def test_execute_task_step_error_logs_traceback(consumer, agent_db, logs_d
     ).fetchone()
     assert row is not None
     assert "StepError(fail): boom" in row["content"]
-    assert "Traceback" in row["content"]
-    assert "tb_step" in row["content"]
+    assert "Traceback" not in row["content"]
+    assert "tb_step" not in row["content"]
 
     del STEP_REGISTRY["tb_step"]
+
+
+@pytest.mark.asyncio
+async def test_execute_task_unhandled_exception_logs_sanitized(consumer, agent_db, logs_db):
+    """Unhandled exceptions in step_logs must not persist full tracebacks."""
+    task_id = create_task(agent_db, "https://example.com", "web", "uh_slug", ["uh_step"])
+
+    def uh_step(task, cfg):
+        raise RuntimeError("kaboom")
+
+    register_step("uh_step", uh_step, "fail")
+
+    await consumer._execute_task({"id": task_id, "content_type": "web"})
+
+    row = logs_db.execute(
+        "SELECT content FROM step_logs WHERE task_id = ? AND stream = 'stderr'",
+        (task_id,),
+    ).fetchone()
+    assert row is not None
+    assert "Unhandled exception" in row["content"]
+    assert "RuntimeError: kaboom" in row["content"]
+    assert "Traceback" not in row["content"]
+    assert "uh_step" not in row["content"]
+
+    del STEP_REGISTRY["uh_step"]
 
 
 @pytest.mark.asyncio

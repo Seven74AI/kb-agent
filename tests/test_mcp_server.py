@@ -13,7 +13,7 @@ from agent.config import Config
 from agent.core import get_note
 from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.llm import LLMResponse
-from agent.mcp.server import build_mcp_server
+from agent.mcp.server import _safe_tool, build_mcp_server
 from agent.pipelines.web import step_synthesize_web
 from fastmcp.utilities.tests import asgi_server
 
@@ -79,6 +79,23 @@ async def _with_stateless_client(mcp_server):
         path="/mcp",
         stateless_http=True,
     )
+
+
+def test_safe_tool_returns_sanitized_error_without_traceback():
+    @_safe_tool
+    def broken() -> dict:
+        raise ValueError("leaked /agent/secret/path detail")
+
+    with patch("agent.mcp.server.logger") as mock_logger:
+        result = broken()
+
+    assert result["status"] == "error"
+    assert "traceback" not in result
+    assert result["error"].startswith("ValueError:")
+    assert "detail" in result["error"]
+    assert "Traceback" not in result["error"]
+    assert "/agent/secret" not in result["error"]
+    mock_logger.exception.assert_called_once()
 
 
 @pytest.mark.asyncio
