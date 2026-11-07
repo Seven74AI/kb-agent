@@ -49,18 +49,19 @@ CREATE TABLE IF NOT EXISTS watch_sources (
 
 CREATE TABLE IF NOT EXISTS ingest_queue (
     id TEXT PRIMARY KEY,
-    url TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
     content_type TEXT NOT NULL,
     slug TEXT NOT NULL,
     tags TEXT,
-    parent_slug TEXT,
+    parent_slug TEXT NOT NULL DEFAULT '',
     media_kind TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     dispatched_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    UNIQUE(url, parent_slug)
 );
 
 CREATE TABLE IF NOT EXISTS batch_runs (
@@ -152,7 +153,7 @@ def _column_defs_from_schema(schema: str) -> dict[str, dict[str, str]]:
             if not line:
                 continue
             upper = line.upper()
-            if upper.startswith(("PRIMARY ", "FOREIGN ", "UNIQUE ", "CHECK ", "CONSTRAINT ")):
+            if upper.startswith(("PRIMARY ", "FOREIGN ", "UNIQUE", "CHECK ", "CONSTRAINT ")):
                 continue
             parts = line.split(None, 1)
             if len(parts) == 2:
@@ -162,6 +163,59 @@ def _column_defs_from_schema(schema: str) -> dict[str, dict[str, str]]:
 
 
 _SCHEMA_COLUMNS = _column_defs_from_schema(AGENT_SCHEMA)
+
+
+def _ingest_parent_slug(parent_slug: str | None) -> str:
+    """Normalize parent_slug for ingest_queue (NULL/None → standalone sentinel '')."""
+    return parent_slug or ""
+
+
+def _migrate_ingest_queue_url_parent_unique(conn: sqlite3.Connection) -> None:
+    """Rebuild ingest_queue when uniqueness is url-only (legacy schema)."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "ingest_queue" not in tables:
+        return
+    ddl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='ingest_queue'"
+    ).fetchone()
+    if ddl_row is None:
+        return
+    ddl = ddl_row[0] or ""
+    if "UNIQUE(url, parent_slug)" in ddl.replace(" ", ""):
+        return
+    conn.executescript(
+        """
+        CREATE TABLE ingest_queue_new (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            tags TEXT,
+            parent_slug TEXT NOT NULL DEFAULT '',
+            media_kind TEXT,
+            status TEXT NOT NULL DEFAULT 'queued',
+            error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            dispatched_at TEXT,
+            updated_at TEXT,
+            UNIQUE(url, parent_slug)
+        );
+        INSERT INTO ingest_queue_new (
+            id, url, content_type, slug, tags, parent_slug, media_kind,
+            status, error, attempts, created_at, dispatched_at, updated_at
+        )
+        SELECT id, url, content_type, slug, tags,
+               COALESCE(parent_slug, ''), media_kind,
+               status, error, attempts, created_at, dispatched_at, updated_at
+        FROM ingest_queue;
+        DROP TABLE ingest_queue;
+        ALTER TABLE ingest_queue_new RENAME TO ingest_queue;
+        """
+    )
+    conn.commit()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -181,6 +235,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if col == "id" or col in existing:
                 continue
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+    _migrate_ingest_queue_url_parent_unique(conn)
     conn.commit()
 
 
@@ -246,10 +301,10 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
 
 def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
                  status: str = "queued", tags=None, parent_slug=None, media_kind=None) -> tuple[str, bool]:
-    """Insert a link into the ingest queue (dedup by URL).
+    """Insert a link into the ingest queue (dedup by URL + parent_slug).
 
-    Returns ``(ingest_id, created_new)``. A URL already in the queue returns its
-    existing id with ``created_new=False`` — never a duplicate row.
+    Returns ``(ingest_id, created_new)``. The same URL queued for a different
+    ``parent_slug`` creates a new row; the same pair only updates tags.
 
     ``parent_slug`` + ``media_kind`` link a media item (embedded image/video)
     back to the parent article it belongs to, so the nightly batch can append
@@ -257,16 +312,18 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
     deferred synthesis once every sibling is done.
     """
     conn.row_factory = sqlite3.Row
+    parent_key = _ingest_parent_slug(parent_slug)
     row = conn.execute(
-        "SELECT id, status FROM ingest_queue WHERE url = ?", (url,)
+        "SELECT id, status FROM ingest_queue WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+        (url, parent_key),
     ).fetchone()
     if row:
         serialized = serialize_tags(tags)
         if serialized:
             with conn:
                 conn.execute(
-                    "UPDATE ingest_queue SET tags = ? WHERE url = ?",
-                    (serialized, url),
+                    "UPDATE ingest_queue SET tags = ? WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+                    (serialized, url, parent_key),
                 )
         return row["id"], False
     import uuid
@@ -275,7 +332,7 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
         conn.execute(
             "INSERT INTO ingest_queue (id, url, content_type, slug, status, tags, parent_slug, media_kind) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ingest_id, url, content_type, slug, status, serialize_tags(tags), parent_slug, media_kind),
+            (ingest_id, url, content_type, slug, status, serialize_tags(tags), parent_key, media_kind),
         )
     return ingest_id, True
 
@@ -289,9 +346,9 @@ def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
     """
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ? "
-        "AND status != 'dispatched'",
-        (parent_slug,),
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE COALESCE(parent_slug, '') = ? "
+        "AND COALESCE(parent_slug, '') != '' AND status != 'dispatched'",
+        (_ingest_parent_slug(parent_slug),),
     ).fetchone()
     return row["n"]
 
@@ -531,7 +588,9 @@ def get_last_log_line(conn: sqlite3.Connection, task_id: str) -> str | None:
 def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int:
     """Resume all paused tasks matching a reason pattern.
 
-    Resets retries to 0 and sets status back to 'pending'.
+    Resets retries to 0 and sets status back to 'pending'. Tasks paused for
+    deferred Substack media (error contains ``awaiting media``) are left paused
+    so the consumer does not skip past ``substack_embedded_media`` to synthesis.
 
     Args:
         conn: Agent database connection.
@@ -545,7 +604,8 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
         cursor = conn.execute(
             "UPDATE tasks SET status = 'pending', retries = 0, "
             "error = NULL, updated_at = datetime('now') "
-            "WHERE status = 'paused' AND error LIKE ?",
+            "WHERE status = 'paused' AND error LIKE ? "
+            "AND error NOT LIKE '%awaiting media%'",
             (reason_pattern,),
         )
         return cursor.rowcount

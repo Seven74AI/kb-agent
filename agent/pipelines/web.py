@@ -352,7 +352,11 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
     html = _fetch_substack_html(url)
     if not html:
-        return "no html fetched"
+        raise StepError(
+            "no html fetched",
+            error_type=ErrorType.RETRY,
+            step_name="substack_embedded_media",
+        )
 
     images = _extract_body_images(html)
     youtube_ids = _extract_youtube_ids(html)
