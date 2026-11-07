@@ -40,12 +40,17 @@ from agent.db import (  # noqa: E402
     count_pending_media,
     finish_batch_run,
     init_db,
+    normalize_tags,
     record_batch_run,
     recover_failed_media,
     recover_stale_ingest,
     update_ingest_status,
 )
+from agent.core.batch_lock import acquire, release  # noqa: E402
 from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
+
+# Reject staging huge images to Modal (GPU OOM / pixel bombs).
+MAX_STAGED_IMAGE_BYTES = 25 * 1024 * 1024
 
 # Parent slugs whose deferred synthesize task was already dispatched this run.
 _deferred_synthesize_dispatched: set[str] = set()
@@ -197,15 +202,33 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
     return failed, dispatched, causes
 
 
-def _append_to_parent(config, parent_slug: str, section: str, body: str) -> None:
+def _append_to_parent(config, parent_slug: str, section: str, body: str) -> bool:
     """Append a media reading/transcript to the parent article's raw markdown."""
     raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
     if not raw_path.exists():
-        return
+        return False
     raw_path.write_text(
         raw_path.read_text(encoding="utf-8") + f"\n\n## {section}\n\n{body.strip()}\n",
         encoding="utf-8",
     )
+    return True
+
+
+def _parent_tags(conn, parent_slug: str):
+    """Tags for the parent article (task row, else any sibling ingest row)."""
+    row = conn.execute(
+        "SELECT tags FROM tasks WHERE slug = ? LIMIT 1",
+        (parent_slug,),
+    ).fetchone()
+    if row and row[0]:
+        return normalize_tags(row[0])
+    row = conn.execute(
+        "SELECT tags FROM ingest_queue WHERE parent_slug = ? AND tags IS NOT NULL LIMIT 1",
+        (parent_slug,),
+    ).fetchone()
+    if row and row[0]:
+        return normalize_tags(row[0])
+    return None
 
 
 def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
@@ -233,6 +256,7 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     rr = dispatch_synthesize(
         manifest["url"], config, conn,
         content_type=f"{manifest['content_type']}_synthesize", slug=parent_slug,
+        tags=_parent_tags(conn, parent_slug),
     )
     if rr.get("duplicate"):
         _deferred_synthesize_dispatched.add(parent_slug)
@@ -274,6 +298,16 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
         if r.returncode != 0 or not dest.exists() or dest.stat().st_size < 100:
             update_ingest_status(conn, q["id"], "failed", error="image download failed")
             continue
+        size = dest.stat().st_size
+        if size > MAX_STAGED_IMAGE_BYTES:
+            dest.unlink(missing_ok=True)
+            update_ingest_status(
+                conn,
+                q["id"],
+                "failed",
+                error=f"image too large ({size} bytes; max {MAX_STAGED_IMAGE_BYTES})",
+            )
+            continue
         update_ingest_status(conn, q["id"], "staged")
         staged.append((q, dest))
     if not staged:
@@ -299,7 +333,11 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
         if not reading.strip():
             update_ingest_status(conn, q["id"], "failed", error="empty OCR reading")
             continue
-        _append_to_parent(config, q["parent_slug"], "Image", reading)
+        if not _append_to_parent(config, q["parent_slug"], "Image", reading):
+            update_ingest_status(
+                conn, q["id"], "failed", error="parent raw markdown missing",
+            )
+            continue
         update_ingest_status(conn, q["id"], "dispatched")
         _maybe_dispatch_parent_synthesize(conn, config, q["parent_slug"])
 
@@ -350,7 +388,11 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
             if not transcript:
                 update_ingest_status(conn, q["id"], "failed", error="empty transcript")
                 continue
-            _append_to_parent(config, q["parent_slug"], "Video Transcript", transcript)
+            if not _append_to_parent(config, q["parent_slug"], "Video Transcript", transcript):
+                update_ingest_status(
+                    conn, q["id"], "failed", error="parent raw markdown missing",
+                )
+                continue
             update_ingest_status(conn, q["id"], "dispatched")
             _maybe_dispatch_parent_synthesize(conn, config, q["parent_slug"])
 
@@ -363,7 +405,12 @@ def main() -> None:
     failed = 0
     dispatched = 0
     causes: list[str] = []
+    lock_held = False
     try:
+        if not acquire(config):
+            print("Another batch run is in progress; exiting.")
+            return
+        lock_held = True
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
         recover_stale_ingest(conn)
         n_retry = recover_failed_media(conn)
@@ -426,6 +473,8 @@ def main() -> None:
     finally:
         if conn is not None:
             conn.close()
+        if lock_held:
+            release(config)
 
 
 if __name__ == "__main__":

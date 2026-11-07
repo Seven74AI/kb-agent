@@ -24,7 +24,7 @@ from agent.core.status import get_task as core_get_task
 from agent.core.status import list_tasks as core_list_tasks
 from agent.core.submit import submit_url as core_submit_url
 from agent.core.submit import submit_ingest as core_submit_ingest
-from agent.core.batch_lock import acquire, release
+from agent.core.batch_lock import is_locked
 from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
 from agent.mcp.db import open_agent_conn, open_logs_conn
@@ -215,23 +215,20 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         if not queued:
             return {"status": "noop", "queued": 0, "message": "No queued ingest links."}
 
-        if not acquire(cfg):
+        if is_locked(cfg):
             return {"status": "skipped", "queued": len(queued), "message": "Another batch run is in progress."}
 
         script = Path(cfg.kb_agent_dir) / "scripts" / "batch_ingest.py"
         log_path = Path(cfg.kb_agent_dir) / "data" / "batch_manual.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(log_path, "a") as log:
-                log.write(f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n")
-                subprocess.Popen(
-                    [sys.executable, str(script)],
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-        finally:
-            release(cfg)
+        with open(log_path, "a") as log:
+            log.write(f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n")
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
         return {
             "status": "started",
