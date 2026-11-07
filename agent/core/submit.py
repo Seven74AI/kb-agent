@@ -158,6 +158,7 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
         return {"status": "error", "http_status": 400, "error": "url required"}
 
     platform = detect_platform(url)
+    # Blocks in-flight work and prior successful synthesis; allows retry after failed.
     existing_id = find_active_task(agent_conn, slug, content_type)
     if existing_id:
         return {

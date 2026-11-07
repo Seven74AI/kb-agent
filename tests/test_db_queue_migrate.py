@@ -424,3 +424,261 @@ def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path
     assert calls == [parent]
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
     assert len(calls) == 1
+
+
+def _batch_test_config(tmp_path) -> Config:
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    return config
+
+
+def test_dispatch_synthesize_idempotent_when_task_done(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/x"
+    slug = "parent_slug"
+    done_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="done",
+    )
+    config = _batch_test_config(tmp_path)
+    result = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    assert result["duplicate"] is True
+    assert result["task_id"] == done_id
+    assert conn.execute("SELECT COUNT(*) FROM tasks WHERE slug=?", (slug,)).fetchone()[0] == 1
+
+
+def test_dispatch_synthesize_redispatches_after_failed_task(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/x"
+    slug = "parent_slug"
+    create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="failed",
+    )
+    config = _batch_test_config(tmp_path)
+    result = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    assert result.get("duplicate") is not True
+    assert conn.execute("SELECT COUNT(*) FROM tasks WHERE slug=?", (slug,)).fetchone()[0] == 2
+
+
+def test_process_videos_download_failure_sets_failed(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(conn, "https://www.youtube.com/watch?v=standAlone", "youtube", "yt_stand")
+    row = conn.execute("SELECT * FROM ingest_queue").fetchone()
+    q = dict(row)
+    config = _batch_test_config(tmp_path)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (None, "download failed"))
+
+    failed, dispatched, _ = batch_ingest._process_videos([q], config, conn, 1)
+    assert failed == 1
+    assert dispatched == 0
+    assert conn.execute("SELECT status FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "failed"
+
+
+def test_process_videos_batch_transcribe_failure_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(conn, "https://www.youtube.com/watch?v=tx1", "youtube", "yt_tx")
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_tx.mp4"
+    fake_video.write_bytes(b"x" * 200)
+
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+
+    failed, dispatched, causes = batch_ingest._process_videos([q], config, conn, 2)
+    assert failed == 1
+    assert dispatched == 0
+    assert conn.execute("SELECT status FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "failed"
+    assert any("batch_transcribe" in c for c in causes)
+
+
+def test_process_videos_missing_merged_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(conn, "https://www.youtube.com/watch?v=tx2", "youtube", "yt_merge")
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_merge.mp4"
+    fake_video.write_bytes(b"x" * 200)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+
+    failed, _, _ = batch_ingest._process_videos([q], config, conn, 3)
+    assert failed == 1
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()
+    assert row["status"] == "failed"
+    assert "merged transcript" in row["error"]
+
+
+def test_process_videos_upload_failure_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(conn, "https://www.youtube.com/watch?v=tx3", "youtube", "yt_up")
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_up.mp4"
+    fake_video.write_bytes(b"x" * 200)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "yt_up.json").write_text('{"segments": [{"text": "hello"}]}', encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+    def _upload_fail(*_a, **_k):
+        raise RuntimeError("minio down")
+
+    monkeypatch.setattr(batch_ingest, "upload_file_to_minio", _upload_fail)
+    monkeypatch.setattr(
+        batch_ingest, "dispatch_synthesize",
+        lambda *a, **k: {"status": "pending", "task_id": "never"},
+    )
+
+    failed, dispatched, _ = batch_ingest._process_videos([q], config, conn, 4)
+    assert failed == 1
+    assert dispatched == 0
+    assert conn.execute("SELECT status FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "failed"
+
+
+def test_embedded_images_batch_ocr_failure_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(
+        conn, "https://example.com/chart.png", "substack_image", "img_ocr",
+        parent_slug="parent_a", media_kind="image",
+    )
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "curl":
+            dest = Path(cmd[cmd.index("-o") + 1])
+            dest.write_bytes(b"\x00" * 200)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "batch_ocr.py" in cmd[1]:
+            return subprocess.CompletedProcess(cmd, 1, "", "ocr modal failed")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+
+    batch_ingest._process_embedded_images([q], config, conn, 5)
+    assert conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "failed"
+
+
+def test_embedded_videos_transcribe_failure_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(
+        conn, "https://www.youtube.com/watch?v=embedTx", "youtube", "yt_emb",
+        parent_slug="parent_v", media_kind="video",
+    )
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_emb.mp4"
+    fake_video.write_bytes(b"x" * 200)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            return subprocess.CompletedProcess(cmd, 2, "", "transcribe failed")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+
+    batch_ingest._process_embedded_videos([q], config, conn, 6)
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()
+    assert row["status"] == "failed"
+    assert "batch_transcribe" in row["error"]
+
+
+def test_embedded_videos_empty_transcript_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(
+        conn, "https://www.youtube.com/watch?v=emptyTx", "youtube", "yt_empty",
+        parent_slug="parent_v2", media_kind="video",
+    )
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_empty.mp4"
+    fake_video.write_bytes(b"x" * 200)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "yt_empty.json").write_text('{"segments": [{"text": "  "}]}', encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+
+    batch_ingest._process_embedded_videos([q], config, conn, 7)
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()
+    assert row["status"] == "failed"
+    assert row["error"] == "empty transcript"

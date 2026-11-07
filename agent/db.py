@@ -5,6 +5,10 @@ import re
 import sqlite3
 from pathlib import Path
 
+# Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``
+# and duplicate ``queue_ingest`` revival of a failed sibling).
+INGEST_MAX_MEDIA_ATTEMPTS = 3
+
 
 AGENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -300,7 +304,8 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
 
 
 def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
-                 status: str = "queued", tags=None, parent_slug=None, media_kind=None) -> tuple[str, bool]:
+                 status: str = "queued", tags=None, parent_slug=None, media_kind=None,
+                 max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> tuple[str, bool]:
     """Insert a link into the ingest queue (dedup by URL + parent_slug).
 
     Returns ``(ingest_id, created_new)``. The same URL queued for a different
@@ -325,7 +330,7 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
                     "UPDATE ingest_queue SET tags = ? WHERE url = ? AND COALESCE(parent_slug, '') = ?",
                     (serialized, url, parent_key),
                 )
-            if row["status"] == "failed" and row["attempts"] < 3:
+            if row["status"] == "failed" and row["attempts"] < max_attempts:
                 conn.execute(
                     "UPDATE ingest_queue SET status='queued', error=NULL, "
                     "updated_at=datetime('now') WHERE url = ? AND COALESCE(parent_slug, '') = ?",
@@ -362,17 +367,24 @@ def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
 def find_active_task(
     conn: sqlite3.Connection, slug: str, content_type: str,
 ) -> str | None:
-    """Return task id if a non-terminal task already exists for slug + content_type."""
+    """Return a task id when ``dispatch_synthesize`` must not enqueue another.
+
+    Cross-run idempotency: any successful or in-flight synthesis for
+    (slug, content_type) is treated as a duplicate — including terminal
+    ``done`` / ``completed``. Only ``failed`` is omitted so reconciliation or
+    a later batch run may dispatch a retry; a done synthesis must never run twice.
+    """
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT id FROM tasks WHERE slug = ? AND content_type = ? "
-        "AND status IN ('pending', 'in_progress', 'paused')",
+        "AND status IN ('pending', 'in_progress', 'paused', 'done', 'completed') "
+        "LIMIT 1",
         (slug, content_type),
     ).fetchone()
     return row["id"] if row else None
 
 
-def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = 3) -> int:
+def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> int:
     """Requeue failed media items for retry, up to ``max_attempts`` each.
 
     Returns the number requeued. After ``max_attempts`` retries an item stays
