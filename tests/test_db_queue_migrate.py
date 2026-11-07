@@ -2,6 +2,7 @@
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +18,8 @@ from agent.db import (
     create_task,
     find_active_task,
     has_active_synthesize_task,
+    has_completed_synthesize_task,
+    has_synthesize_task_signal,
     get_task_steps,
     init_db,
     queue_ingest,
@@ -345,6 +348,23 @@ def test_has_active_synthesize_task_excludes_failed(tmp_path):
     assert has_active_synthesize_task(conn, slug) is True
 
 
+def test_has_synthesize_task_signal_includes_completed(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "signal_slug"
+    create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    assert has_completed_synthesize_task(conn, slug) is True
+    assert has_synthesize_task_signal(conn, slug) is True
+    assert has_active_synthesize_task(conn, slug) is True
+
+
 def test_retry_task_skips_when_synthesize_sibling_active(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -581,6 +601,100 @@ def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path
     assert calls == [parent]
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
     assert len(calls) == 1
+
+
+def test_maybe_dispatch_reconciles_manifest_missing_from_db(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "manifest_missing_parent"
+    url = "https://blog.substack.com/p/reconcile"
+    create_task(conn, url, "substack_text", parent, ["substack_cleanup"], status="paused")
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    calls: list[str] = []
+
+    def fake_dispatch(dispatch_url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t-reconcile"}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+    assert calls == [parent]
+
+
+def test_maybe_dispatch_fails_closed_when_manifest_total_null(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "null_total_parent"
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text"}',
+        encoding="utf-8",
+    )
+
+    dispatch = MagicMock()
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    dispatch.assert_not_called()
+
+
+def test_update_ingest_status_stores_sanitized_error(tmp_path):
+    from agent.db import update_ingest_status
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    ingest_id, _ = queue_ingest(conn, "https://example.com/v.mp4", "youtube", "vid_scrub")
+    secret_path = "/root/kb-agent/secret/cookies.txt"
+    update_ingest_status(
+        conn,
+        ingest_id,
+        "failed",
+        error=f'download failed: File "{secret_path}", line 9, in run\nstderr: {"x" * 300}',
+    )
+    row = conn.execute(
+        "SELECT error FROM ingest_queue WHERE id=?", (ingest_id,),
+    ).fetchone()
+    assert secret_path not in row["error"]
+    assert len(row["error"]) < 400
 
 
 def test_claim_task_fifo_by_created_at(tmp_path):

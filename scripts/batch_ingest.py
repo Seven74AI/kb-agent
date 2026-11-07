@@ -40,12 +40,15 @@ from agent.db import (  # noqa: E402
     count_pending_media,
     finish_batch_run,
     init_db,
+    ingest_media_appended,
     normalize_tags,
     record_batch_run,
     recover_failed_media,
     recover_stale_ingest,
+    set_ingest_media_appended,
     update_ingest_status,
 )
+from agent.notify import sanitize_visible_message  # noqa: E402
 from agent.core.batch_lock import acquire, release  # noqa: E402
 from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
@@ -146,11 +149,11 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
         except Exception as exc:  # noqa: BLE001 — download is best-effort per link
             return None, f"{name} failed: {exc}"
 
-    slug = q["slug"]
     tmp = Path(config.temp_dir)
-    for p in tmp.iterdir():
-        if p.name.startswith(slug) and p.suffix.lower() in VIDEO_EXTS:
-            return p, None
+    for ext in VIDEO_EXTS:
+        candidate = tmp / f"{q['id']}{ext}"
+        if candidate.is_file():
+            return candidate, None
     return None, "no video file found after download"
 
 
@@ -242,8 +245,18 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
     return failed, dispatched, causes
 
 
-def _append_to_parent(config, parent_slug: str, section: str, body: str) -> bool:
+def _append_to_parent(
+    config,
+    parent_slug: str,
+    section: str,
+    body: str,
+    *,
+    conn=None,
+    ingest_id: str | None = None,
+) -> bool:
     """Append a media reading/transcript to the parent article's raw markdown."""
+    if conn is not None and ingest_id and ingest_media_appended(conn, ingest_id):
+        return True
     raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
     if not raw_path.exists():
         return False
@@ -251,6 +264,8 @@ def _append_to_parent(config, parent_slug: str, section: str, body: str) -> bool
         raw_path.read_text(encoding="utf-8") + f"\n\n## {section}\n\n{body.strip()}\n",
         encoding="utf-8",
     )
+    if conn is not None and ingest_id:
+        set_ingest_media_appended(conn, ingest_id)
     return True
 
 
@@ -288,6 +303,36 @@ def _supersede_deferred_parent_task(conn, parent_slug: str, *, synthesize_task_i
         )
 
 
+def _manifest_from_db(conn, parent_slug: str) -> dict | None:
+    """Rebuild deferral manifest from the parent task and ingest_queue siblings."""
+    parent_row = conn.execute(
+        "SELECT source_url, content_type FROM tasks "
+        "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "ORDER BY created_at LIMIT 1",
+        (parent_slug,),
+    ).fetchone()
+    if not parent_row:
+        return None
+    count_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchone()
+    total = count_row["n"] if hasattr(count_row, "keys") else count_row[0]
+    if total <= 0:
+        return None
+    if hasattr(parent_row, "keys"):
+        return {
+            "url": parent_row["source_url"],
+            "content_type": parent_row["content_type"],
+            "total": total,
+        }
+    return {
+        "url": parent_row[0],
+        "content_type": parent_row[1],
+        "total": total,
+    }
+
+
 def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     """Fire the parent's deferred synthesis once every sibling media item is done."""
     if parent_slug in _deferred_synthesize_dispatched:
@@ -295,24 +340,30 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     if count_pending_media(conn, parent_slug) > 0:
         return False
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
-    if not manifest_path.exists():
-        return False
-    manifest, manifest_err = _read_json_file(manifest_path, "manifest")
-    if manifest_err:
-        print(f"  [skip] {parent_slug}: {manifest_err}")
-        return False
-    expected = manifest.get("total")
-    if expected is not None:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-            (parent_slug,),
-        ).fetchone()
-        actual = row["n"] if hasattr(row, "keys") else row[0]
-        if actual != expected:
-            print(
-                f"  [skip] {parent_slug}: ingest rows {actual} != manifest total {expected}"
-            )
+    if manifest_path.exists():
+        manifest, manifest_err = _read_json_file(manifest_path, "manifest")
+        if manifest_err:
+            print(f"  [skip] {parent_slug}: {manifest_err}")
             return False
+    else:
+        manifest = _manifest_from_db(conn, parent_slug)
+        if manifest is None:
+            print(f"  [skip] {parent_slug}: manifest missing; cannot reconcile from DB")
+            return False
+    expected = manifest.get("total")
+    if expected is None:
+        print(f"  [skip] {parent_slug}: manifest total missing")
+        return False
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchone()
+    actual = row["n"] if hasattr(row, "keys") else row[0]
+    if actual != expected:
+        print(
+            f"  [skip] {parent_slug}: ingest rows {actual} != manifest total {expected}"
+        )
+        return False
     rr = dispatch_synthesize(
         manifest["url"], config, conn,
         content_type=f"{manifest['content_type']}_synthesize", slug=parent_slug,
@@ -402,7 +453,9 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
         if not reading.strip():
             update_ingest_status(conn, q["id"], "failed", error="empty OCR reading")
             continue
-        if not _append_to_parent(config, q["parent_slug"], "Image", reading):
+        if not _append_to_parent(
+            config, q["parent_slug"], "Image", reading, conn=conn, ingest_id=q["id"],
+        ):
             update_ingest_status(
                 conn, q["id"], "failed", error="parent raw markdown missing",
             )
@@ -461,7 +514,14 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
             if not transcript:
                 update_ingest_status(conn, q["id"], "failed", error="empty transcript")
                 continue
-            if not _append_to_parent(config, q["parent_slug"], "Video Transcript", transcript):
+            if not _append_to_parent(
+                config,
+                q["parent_slug"],
+                "Video Transcript",
+                transcript,
+                conn=conn,
+                ingest_id=q["id"],
+            ):
                 update_ingest_status(
                     conn, q["id"], "failed", error="parent raw markdown missing",
                 )
@@ -548,12 +608,16 @@ def main() -> None:
 
         _reconcile_deferred_parent_syntheses(conn, config)
 
-        summary = "; ".join(dict.fromkeys(causes[:5])) or None
+        summary_raw = "; ".join(dict.fromkeys(causes[:5])) or None
+        summary = sanitize_visible_message(summary_raw) if summary_raw else None
         finish_batch_run(conn, run_id, "failed" if failed else "ok", total, failed, dispatched, summary)
         print(f"DONE: {total} processed ({failed} failed, {dispatched} dispatched)")
     except Exception as exc:  # noqa: BLE001 — record the crash, then re-raise for the cron
         if conn is not None and run_id is not None:
-            finish_batch_run(conn, run_id, "crashed", total, failed, dispatched, str(exc))
+            finish_batch_run(
+                conn, run_id, "crashed", total, failed, dispatched,
+                sanitize_visible_message(str(exc)),
+            )
         raise
     finally:
         if conn is not None:

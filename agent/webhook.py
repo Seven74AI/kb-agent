@@ -23,6 +23,7 @@ from agent.core import (
 )
 from agent.core.resume import ResumeReasonError, normalize_reason_pattern
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
+from agent.notify import sanitize_visible_message
 
 app = Flask(__name__)
 config: Config = load_config()
@@ -482,6 +483,12 @@ def dashboard():
         last_run = get_last_batch_run(conn)
         conn.close()
         logs_conn.close()
+
+    for q in ingest:
+        if q.get("error"):
+            q["error"] = sanitize_visible_message(q["error"])
+    if last_run and last_run.get("summary"):
+        last_run = {**last_run, "summary": sanitize_visible_message(last_run["summary"])}
 
     # Failure-first ordering + a single failure count for the banner/tab title.
     bad = {"failed", "paused"}
