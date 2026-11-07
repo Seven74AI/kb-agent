@@ -108,13 +108,16 @@ def resume():
     """Resume paused tasks matching a reason pattern.
 
     Query params:
-        reason: SQL LIKE pattern for the pause reason (e.g., 'cookies', 'firecrawl').
-                Default: '%' (resume all paused).
+        reason: Required. SQL LIKE pattern for the pause reason (e.g., 'cookies', 'firecrawl').
 
     Returns:
-        JSON with count of resumed tasks.
+        JSON with count of resumed tasks, or 400 when reason is missing or empty.
     """
-    reason_param = request.args.get("reason", "%")
+    reason_param = request.args.get("reason")
+    if reason_param is None or not str(reason_param).strip():
+        return jsonify({
+            "error": "reason required (refusing to resume all paused tasks)",
+        }), 400
     reason_pattern = normalize_reason_pattern(reason_param)
 
     conn = _get_agent_conn()
@@ -147,7 +150,7 @@ def upload_cookies():
         cookie_type: one of 'yt_cookies.txt', 'ig_cookies.txt', 'threads_cookies.txt'
         cookie_file: the file upload
 
-    Sets file permissions to 444 (read-only for all).
+    Sets file permissions to 600 (read/write for owner only).
     """
     cookie_type = request.form.get("cookie_type", "").strip()
     if cookie_type not in ALLOWED_COOKIE_FILES:
@@ -167,8 +170,8 @@ def upload_cookies():
     dest_path = cookie_dir / cookie_type
     uploaded_file.save(str(dest_path))
 
-    # Set permissions: read-only for owner, group, others (chmod 444)
-    os.chmod(dest_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    # Set permissions: read/write for owner only (chmod 600)
+    os.chmod(dest_path, stat.S_IRUSR | stat.S_IWUSR)
 
     # Verify
     file_size = dest_path.stat().st_size

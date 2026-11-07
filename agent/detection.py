@@ -498,7 +498,14 @@ def dedup_check(url: str, vault_path: Path) -> bool:
     """
     try:
         result = subprocess.run(
-            ["grep", "-F", "-rl", f"source_url: {url}", str(vault_path / "Knowledge base")],
+            [
+                "grep",
+                "-F",
+                "-rl",
+                "--",
+                f"source_url: {url}",
+                str(vault_path / "Knowledge base"),
+            ],
             capture_output=True, text=True, timeout=30,
         )
         return bool(result.stdout.strip())

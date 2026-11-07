@@ -312,8 +312,8 @@ Both Hermes and KB Agent run on the same VPS but are fully isolated:
 | Config | `~/.hermes/` | `/root/kb-agent/` |
 | Firecrawl | `localhost:3002` (shared, stateless) | Same |
 
-Cookie upload: web dashboard drag-and-drop. System applies `chmod 444` (protect
-against yt-dlp overwrites) and re-validates paused tasks for that platform.
+Cookie upload: web dashboard drag-and-drop. System applies `chmod 600` (owner
+read/write only) and re-validates paused tasks for that platform.
 
 ## Deployment
 
