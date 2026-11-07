@@ -4,6 +4,7 @@ Deterministic URL pattern matching (no ML, no external calls except health check
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -15,6 +16,7 @@ from agent.constants import FLARESOLVERR_URL
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
+logger = logging.getLogger(__name__)
 
 # ── URL Pattern Matching ────────────────────────────────────────────────────
 
@@ -294,8 +296,13 @@ def _detect_substack_subtype(url: str) -> str:
 
         if '<body class="image-post' in html or 'image-gallery' in html.lower():
             return "substack_image"
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Substack subtype fetch/parse failed for %s — defaulting to substack_text: %s",
+            url,
+            exc,
+            exc_info=True,
+        )
     return "substack_text"
 
 

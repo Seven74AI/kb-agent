@@ -759,3 +759,67 @@ class TestIgCommentFetchSecurity:
         conf_path = cookie_dir / ".curl-ig-comment-42.conf"
         assert conf_path.is_file()
         assert conf_path.resolve().is_relative_to(cookie_dir.resolve())
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_paginates_past_first_page(self, mock_run, config):
+        """Deep comment_id values must not hard-fail when absent from page one."""
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", "sess",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        target_pk = 555444333
+        page_one = {
+            "status": "ok",
+            "comments": [{"pk": 1, "text": "shallow", "user": {"username": "a"}}],
+            "next_min_id": "cursor-page-2",
+            "caption": {"text": "cap", "user": {"username": "p"}},
+        }
+        page_two = {
+            "status": "ok",
+            "comments": [{
+                "pk": target_pk,
+                "text": "deep comment",
+                "user": {"username": "deep_user"},
+            }],
+            "caption": {"text": "cap", "user": {"username": "p"}},
+        }
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=json.dumps(page_one)),
+            MagicMock(returncode=0, stdout=json.dumps(page_two)),
+        ]
+        url = f"https://www.instagram.com/reel/ShortCode1/?comment_id={target_pk}"
+        info = _fetch_ig_comment(url, config)
+        assert info["comment_text"] == "deep comment"
+        assert mock_run.call_count == 2
+        conf_text = (cookie_dir / f".curl-ig-comment-{target_pk}.conf").read_text()
+        assert "min_id=cursor-page-2" in conf_text
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_missing_after_pages_pauses(self, mock_run, config):
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", "sess",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "comments": [],
+                "caption": {"text": "cap", "user": {"username": "p"}},
+            }),
+        )
+        url = "https://www.instagram.com/reel/ShortCode1/?comment_id=missing"
+        with pytest.raises(StepError) as exc:
+            _fetch_ig_comment(url, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "not found in comment pages" in str(exc.value)
