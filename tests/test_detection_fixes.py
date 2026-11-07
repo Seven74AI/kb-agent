@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from agent.config import Config
-from agent.detection import _resolve_threads_cookie_path, dedup_check
+from agent.detection import (
+    DedupCheckError,
+    _resolve_threads_cookie_path,
+    dedup_check,
+    preflight_health,
+)
 
 
 @pytest.fixture
@@ -30,6 +35,100 @@ def test_dedup_check_uses_grep_fixed_string(core_config, monkeypatch):
     assert captured
     assert "-F" in captured[0]
     assert f"source_url: {url}" in captured[0]
+
+
+def test_dedup_check_returncode_one_means_not_in_vault(core_config, monkeypatch):
+    """Grep exit 1 (no matches) must return False, not raise."""
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    assert dedup_check("https://example.com/missing", core_config.vault_path) is False
+
+
+def test_dedup_check_raises_on_grep_failure(core_config, monkeypatch):
+    """Grep errors must not be treated as 'not in vault'."""
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="permission denied")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    with pytest.raises(DedupCheckError, match="exit 2"):
+        dedup_check("https://example.com/x", core_config.vault_path)
+
+
+def test_preflight_youtube_uses_config_cookie_dir(tmp_path, monkeypatch):
+    custom_dir = tmp_path / "cookies"
+    custom_dir.mkdir()
+    yt = custom_dir / "yt_cookies.txt"
+    yt.write_text(
+        "LOGIN_INFO=x\nSAPISID=x\n__Secure-3PSID=x\n",
+        encoding="utf-8",
+    )
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+
+    ok, reason = preflight_health("youtube")
+    assert ok is True
+    assert reason == ""
+
+
+def test_preflight_rumble_checks_flaresolverr(tmp_path, monkeypatch):
+    custom_dir = tmp_path / "cookies"
+    custom_dir.mkdir()
+    (custom_dir / "rumble_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+
+    def fake_run(cmd, **kwargs):
+        if any("8191" in str(part) for part in cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"status":"ok"}', stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = preflight_health("rumble")
+    assert ok is True
+    assert reason == ""
+
+
+def test_preflight_rumble_unhealthy_when_flaresolverr_non_ok_json(tmp_path, monkeypatch):
+    """Curl success with non-ok JSON must not count as healthy."""
+    custom_dir = tmp_path / "cookies"
+    custom_dir.mkdir()
+    (custom_dir / "rumble_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+
+    def fake_run(cmd, **kwargs):
+        if any("8191" in str(part) for part in cmd):
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout='{"status":"error","message":"solver busy"}', stderr=""
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = preflight_health("rumble")
+    assert ok is False
+    assert "Flaresolverr error" in reason
+
+
+def test_preflight_rumble_unhealthy_when_flaresolverr_down(tmp_path, monkeypatch):
+    custom_dir = tmp_path / "cookies"
+    custom_dir.mkdir()
+    (custom_dir / "rumble_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+
+    def fake_run(cmd, **kwargs):
+        if any("8191" in str(part) for part in cmd):
+            return subprocess.CompletedProcess(cmd, 7, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = preflight_health("rumble")
+    assert ok is False
+    assert "Flaresolverr" in reason
 
 
 def test_dedup_check_no_false_positive_from_regex_dot(core_config):

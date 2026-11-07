@@ -138,6 +138,23 @@ def test_submit_url_creates_task(core_config, agent_conn, monkeypatch):
     assert result["platform"] == "web"
 
 
+def test_submit_url_dedup_grep_failure_does_not_enqueue(core_config, agent_conn, monkeypatch):
+    """Vault grep errors surface as structured errors without creating tasks."""
+    import subprocess
+
+    def fail_grep(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="permission denied")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fail_grep)
+    before = agent_conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    result = submit_url("https://example.com/new", core_config, agent_conn)
+    after = agent_conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    assert after == before
+    assert result["status"] == "error"
+    assert result["http_status"] == 500
+    assert "dedup check failed" in result["error"]
+
+
 def test_submit_url_dedup_skips(core_config, agent_conn, monkeypatch):
     note = core_config.vault_path / "Knowledge base" / "articles" / "existing.md"
     note.write_text("---\nsource_url: https://example.com/dup\n---\n", encoding="utf-8")
