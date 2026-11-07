@@ -13,6 +13,7 @@ from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.threads import (
+    _curl_threads,
     _has_video_versions,
     _extract_video_url,
     _extract_all_captions,
@@ -207,6 +208,34 @@ class TestHelpers:
         assert "SPEAKER_01: Hi there" in text
 
 
+METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+
+
+class TestThreadsSsrf:
+
+    @patch("agent.pipelines.threads.subprocess.run")
+    def test_curl_threads_rejects_metadata_ip(self, mock_run, config, tmp_path):
+        cookie_dir = tmp_path / "cookies"
+        cookie_dir.mkdir()
+        (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
+        with pytest.raises(StepError, match="not allowed"):
+            _curl_threads(METADATA_URL, cookie_dir=cookie_dir)
+        mock_run.assert_not_called()
+
+    @patch("agent.pipelines.threads._curl_threads")
+    @patch("subprocess.run")
+    def test_extract_video_rejects_metadata_cdn_url(self, mock_run, mock_curl, config, task_dict):
+        html = (
+            '{"video_versions":[{"url":"http://169.254.169.254/latest/meta-data/",'
+            '"height":1080}],"caption":{"text":"x"},"username":"x"}'
+            '<div class="_ab6c">x</div>'
+        )
+        mock_curl.return_value = html
+        with pytest.raises(StepError, match="not allowed"):
+            step_threads_extract_video(task_dict, config)
+        mock_run.assert_not_called()
+
+
 # ── Step Tests: Detection ────────────────────────────────────────────────────
 
 class TestDetection:
@@ -288,7 +317,11 @@ class TestVideoExtraction:
     @patch("subprocess.run")
     @patch("agent.pipelines.threads.ensure_h264", side_effect=lambda p: p)
     def test_extract_video_success(self, mock_ensure_h264, mock_run, mock_curl, config, task_dict):
-        html = '{"video_versions":[{"url":"https://v.cdn/v.mp4","height":1080}],"caption":{"text":"x"},"username":"x"}<div class="_ab6c">x</div>'
+        html = (
+            '{"video_versions":[{"url":"https://example.com/test.mp4",'
+            '"height":1080}],"caption":{"text":"x"},"username":"x"}'
+            '<div class="_ab6c">x</div>'
+        )
         mock_curl.return_value = html
 
         # Simulate successful curl download — actually create the output file

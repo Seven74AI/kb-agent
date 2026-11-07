@@ -21,6 +21,7 @@ from pathlib import Path
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client
@@ -87,6 +88,15 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
             step_name="curl_threads",
             details=f"Export cookies from Chrome to {cookie_path}",
         )
+
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="curl_threads",
+        ) from exc
 
     result = subprocess.run(
         [
@@ -524,6 +534,15 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
 
     # Download video with Referer header
     output_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
+
+    try:
+        _assert_fetch_url_allowed(video_url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="extract_video",
+        ) from exc
 
     result = subprocess.run(
         [

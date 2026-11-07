@@ -73,6 +73,22 @@ def mega_task():
     }
 
 
+METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+
+
+class TestBooksMegadlSsrf:
+
+    @patch("agent.pipelines.books.subprocess.run")
+    def test_megadl_download_rejects_metadata_ip(self, mock_run, config, mega_task):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        mega_task["source_url"] = METADATA_URL
+        from agent.exceptions import StepError
+
+        with pytest.raises(StepError, match="not allowed"):
+            step_megadl_download(mega_task, config)
+        mock_run.assert_not_called()
+
+
 # ── Detection Tests ───────────────────────────────────────────────────────────
 
 class TestMegaFilenamesClassification:
