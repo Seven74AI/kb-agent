@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from agent.config import REPO_ROOT, load_config
 from agent.constants import FLARESOLVERR_URL
-from agent.core.watch_source import _assert_fetch_url_allowed
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
 
@@ -210,6 +210,7 @@ def _detect_threads_subtype(url: str) -> str:
     Handles media_type=19 (Instagram video cross-post) — checks video_versions
     regardless of outer media type.
     """
+    _assert_fetch_url_allowed(url)
     try:
         cookie_path = _resolve_threads_cookie_path()
         cmd = [
@@ -240,6 +241,7 @@ def _detect_substack_subtype(url: str) -> str:
 
     Returns 'substack_text', 'substack_video', or 'substack_image'.
     """
+    _assert_fetch_url_allowed(url)
     try:
         result = subprocess.run(
             ["curl", "-s", "-L", "--max-time", "15", url],
@@ -303,6 +305,7 @@ def _detect_mega_subtype(url: str) -> str:
         'mega_video' — video file (.mp4/.mkv/.webm)
         'unknown' — could not determine or mixed content
     """
+    _assert_fetch_url_allowed(url)
     try:
         result = subprocess.run(
             ["megadl", "--print-names", url],

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
-from agent.core.watch_source import _assert_fetch_url_allowed
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.constants import FLARESOLVERR_URL
-from agent.core.watch_source import _assert_fetch_url_allowed
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
