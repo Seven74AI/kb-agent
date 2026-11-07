@@ -355,6 +355,34 @@ class TestCarouselExtract:
         assert len(data["slides"]) == 2
         assert "Hard cap" in data["cap_note"]
 
+    @patch("subprocess.run")
+    def test_extract_escapes_url_in_playwright_script(self, mock_run, config):
+        task = {
+            "id": "test-ig-post-12345",
+            "source_url": 'https://www.instagram.com/p/DEF456/"); import os; os.system("touch /tmp/pwned") #',
+            "content_type": "instagram_post",
+            "slug": "instagram.com_p_DEF456",
+        }
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            script_path = Path(args[0][1])  # argv = ["python3", script_path]
+            captured["script"] = script_path.read_text(encoding="utf-8")
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = "[]"
+            r.stderr = ""
+            return r
+        mock_run.side_effect = fake_run
+
+        step_ig_carousel_extract(task, config)
+
+        script = captured["script"]
+        # the injected URL's closing quote is backslash-escaped — the payload
+        # stays inside the string literal, no code breakout
+        assert '\\"); import os' in script
+        assert 'page.goto("https://www.instagram.com/p/DEF456/");' not in script
+
 
 class TestCarouselSynthesis:
     """Tests for step_ig_carousel_synthesize."""
