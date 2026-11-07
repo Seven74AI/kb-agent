@@ -1785,6 +1785,73 @@ def test_dispatch_synthesize_redispatches_stale_done_under_media_changed(tmp_pat
     assert old == "failed"
 
 
+def test_deferral_growth_supersedes_pending_synthesize(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "pending_super_parent"
+    url = "https://blog.substack.com/p/pending-super"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor = get_parent_media_deferral(conn, slug)["updated_at"]
+    pending_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="pending",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (anchor, pending_id),
+    )
+    conn.commit()
+
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?", (pending_id,),
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert "superseded by deferral media cycle" in (row["error"] or "")
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+
+
+def test_find_active_task_supersedes_stale_pending_synthesize_after_media_changed(tmp_path):
+    from agent.db import (
+        ensure_parent_media_deferral,
+        get_parent_media_deferral,
+        mark_parent_media_changed,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/stale-pending"
+    slug = "stale_pending_syn"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor = get_parent_media_deferral(conn, slug)["updated_at"]
+    pending_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="pending",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (anchor, pending_id),
+    )
+    conn.commit()
+
+    mark_parent_media_changed(conn, slug)
+    conn.commit()
+
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (pending_id,)).fetchone()
+    assert row[0] == "failed"
+
+    config = _batch_test_config(tmp_path)
+    result = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    assert result.get("duplicate") is not True
+
+
 def test_dispatch_synthesize_idempotent_when_task_done(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)

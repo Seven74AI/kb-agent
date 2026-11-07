@@ -355,6 +355,7 @@ def _reset_dispatched_parent_siblings_if_deferral_cycle(
     deferral = get_parent_media_deferral(conn, parent_slug)
     if deferral is None or not int(deferral.get("media_changed") or 0):
         return
+    supersede_stale_deferral_synthesize_tasks(conn, parent_slug, deferral)
     with conn:
         conn.execute(
             """
@@ -479,13 +480,18 @@ def find_active_task(
         return None
     task_id = row["id"] if hasattr(row, "keys") else row[0]
     status = row["status"] if hasattr(row, "keys") else row[1]
-    if is_synthesize_content_type(content_type) and status in ("done", "completed"):
+    if is_synthesize_content_type(content_type):
         deferral = get_parent_media_deferral(conn, slug)
         if deferral is not None:
-            fresh = _deferral_synthesize_terminal_fresh(conn, slug, deferral)
-            if int(deferral.get("media_changed") or 0) or not fresh:
-                supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
-                return None
+            if status in ("done", "completed"):
+                fresh = _deferral_synthesize_terminal_fresh(conn, slug, deferral)
+                if int(deferral.get("media_changed") or 0) or not fresh:
+                    supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
+                    return None
+            elif status in ("pending", "in_progress", "paused"):
+                if not _deferral_synthesize_task_fresh(conn, task_id, deferral):
+                    supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
+                    return None
     return task_id
 
 
@@ -571,6 +577,20 @@ def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, def
     return row is not None
 
 
+def _deferral_synthesize_task_fresh(
+    conn: sqlite3.Connection, task_id: str, deferral: dict,
+) -> bool:
+    """True when a *_synthesize task row belongs to the current deferral generation."""
+    conn.row_factory = sqlite3.Row
+    anchor = deferral["updated_at"]
+    op = _deferral_cycle_cmp(deferral)
+    row = conn.execute(
+        f"SELECT 1 FROM tasks WHERE id = ? AND datetime(updated_at) {op} datetime(?)",
+        (task_id, anchor),
+    ).fetchone()
+    return row is not None
+
+
 def _deferral_media_landing_anchor(
     conn: sqlite3.Connection, slug: str, deferral: dict,
 ) -> str:
@@ -635,7 +655,7 @@ def _has_stale_deferral_synthesize_terminal(
 def supersede_stale_deferral_synthesize_tasks(
     conn: sqlite3.Connection, slug: str, deferral: dict,
 ) -> int:
-    """Fail terminal *_synthesize rows from prior deferral generations so batch may re-dispatch."""
+    """Fail prior-generation *_synthesize rows (any status) so batch may re-dispatch."""
     if not slug or deferral is None:
         return 0
     anchor = deferral["updated_at"]
@@ -878,6 +898,29 @@ def parent_media_complete(
     return True
 
 
+def parent_deferral_synthesize_execute_blocked(
+    conn: sqlite3.Connection,
+    slug: str,
+    *,
+    raw_path: Path | None,
+) -> str | None:
+    """Execute-time gate for deferred ``*_synthesize`` tasks.
+
+    When ``parent_media_deferral`` exists, synthesis must not run until sibling
+    media is fully dispatched and landed in the parent raw bundle. Returns a
+    human-readable pause reason when blocked; ``None`` when there is no deferral
+    row or media is complete.
+    """
+    deferral = get_parent_media_deferral(conn, slug)
+    if deferral is None:
+        return None
+    if count_pending_media(conn, slug) > 0:
+        return "deferred synthesis paused — sibling media still pending"
+    if not parent_media_complete(conn, slug, raw_path=raw_path):
+        return "deferred synthesis paused — parent media not complete at execute time"
+    return None
+
+
 def append_parent_media_atomic(
     conn: sqlite3.Connection,
     ingest_id: str,
@@ -995,6 +1038,7 @@ def ensure_parent_media_deferral(
         and deferral is not None
         and int(deferral["expected_total"]) > prior_total
     ):
+        supersede_stale_deferral_synthesize_tasks(conn, parent_slug, deferral)
         with conn:
             conn.execute(
                 """
@@ -1061,6 +1105,9 @@ def mark_parent_media_changed(conn: sqlite3.Connection, parent_slug: str) -> Non
             """,
             (parent_slug,),
         )
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is not None:
+        supersede_stale_deferral_synthesize_tasks(conn, parent_slug, deferral)
     _reset_dispatched_parent_siblings_if_deferral_cycle(conn, parent_slug)
 
 
