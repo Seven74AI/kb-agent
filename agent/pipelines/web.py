@@ -437,6 +437,70 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
         conn.close()
 
 
+MEDIA_DEFERRED_MARKER_PREFIX = "media_deferred:"
+
+
+def _persist_parent_media_deferral(conn, task_id: str, slug: str) -> None:
+    """Mark the parent task so a later zero-embed re-fetch cannot skip the media gate.
+
+    Written to ``substack_cleanup`` step output (not ``substack_embedded_media``) so
+    ``retry_task`` clearing that step onward does not erase the deferral signal.
+    """
+    if not task_id:
+        return
+    marker = f"{MEDIA_DEFERRED_MARKER_PREFIX}{slug}"
+    with conn:
+        conn.execute(
+            """
+            UPDATE task_steps SET output = CASE
+                WHEN output IS NULL OR output = '' THEN ?
+                WHEN instr(COALESCE(output, ''), ?) > 0 THEN output
+                ELSE COALESCE(output, '') || char(10) || ?
+            END
+            WHERE task_id = ? AND name = 'substack_cleanup'
+            """,
+            (marker, MEDIA_DEFERRED_MARKER_PREFIX, marker, task_id),
+        )
+
+
+def _parent_media_was_deferred(conn, task_id: str, slug: str) -> bool:
+    if task_id:
+        row = conn.execute(
+            "SELECT output FROM task_steps WHERE task_id = ? AND name = 'substack_cleanup'",
+            (task_id,),
+        ).fetchone()
+        if row and row[0] and f"{MEDIA_DEFERRED_MARKER_PREFIX}{slug}" in row[0]:
+            return True
+        row = conn.execute(
+            "SELECT output FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+            (task_id,),
+        ).fetchone()
+        if row and row[0]:
+            out = row[0].lower()
+            if "awaiting media" in out or MEDIA_DEFERRED_MARKER_PREFIX in out:
+                return True
+    return False
+
+
+def _deferred_media_batch_finished(conn, config: Config, slug: str) -> bool:
+    """True when the nightly batch has taken over (synthesize task or appended raw sections)."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM tasks
+        WHERE slug = ? AND content_type GLOB '*_synthesize'
+        LIMIT 1
+        """,
+        (slug,),
+    ).fetchone()
+    if row:
+        return True
+    raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
+    if not raw_path.exists():
+        return False
+    body = raw_path.read_text(encoding="utf-8")
+    return "\n## Image\n" in body or "\n## Video Transcript\n" in body
+
+
 def step_substack_embedded_media(task: dict, config: Config) -> str:
     """Extract embedded media and DEFER synthesis to the nightly batch.
 
@@ -479,14 +543,27 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         had_manifest = manifest_path.exists()
         from agent.db import AGENT_SCHEMA, count_pending_media, init_db
 
+        task_id = task.get("id", "")
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
         try:
             pending = count_pending_media(conn, slug)
+            prior_deferral = _parent_media_was_deferred(conn, task_id, slug)
+            batch_finished = (
+                _deferred_media_batch_finished(conn, config, slug) if prior_deferral else False
+            )
+            if had_manifest or pending > 0:
+                _persist_parent_media_deferral(conn, task_id, slug)
         finally:
             conn.close()
         if had_manifest or pending > 0:
             raise StepError(
                 "awaiting media — re-fetch found no embeds but siblings pending",
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
+        if prior_deferral and not batch_finished:
+            raise StepError(
+                "awaiting media — re-fetch found no embeds; prior deferral with no batch completion",
                 error_type=ErrorType.PAUSE,
                 step_name="substack_embedded_media",
             )
@@ -529,20 +606,22 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             (slug,),
         ).fetchone()
         queue_count = row["n"] if hasattr(row, "keys") else row[0]
+
+        if had_manifest and pending == 0:
+            if gate_total != queue_count:
+                raise StepError(
+                    f"media gate: ingest rows {queue_count} != manifest total {gate_total}",
+                    error_type=ErrorType.PAUSE,
+                    step_name="substack_embedded_media",
+                )
+            return (
+                f"media ready: {len(images)} images + {n_videos} videos "
+                f"({queue_count} siblings dispatched)"
+            )
+
+        _persist_parent_media_deferral(conn, task.get("id", ""), slug)
     finally:
         conn.close()
-
-    if had_manifest and pending == 0:
-        if gate_total != queue_count:
-            raise StepError(
-                f"media gate: ingest rows {queue_count} != manifest total {gate_total}",
-                error_type=ErrorType.PAUSE,
-                step_name="substack_embedded_media",
-            )
-        return (
-            f"media ready: {len(images)} images + {n_videos} videos "
-            f"({queue_count} siblings dispatched)"
-        )
 
     raise StepError(
         f"awaiting media: {len(images)} images + {n_videos} videos enqueued",
