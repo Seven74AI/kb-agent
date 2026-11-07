@@ -12,6 +12,7 @@ from pathlib import Path
 from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -67,6 +68,14 @@ def extract_bunny_video_uuid(text: str) -> str | None:
 
 
 def _curl_page(url: str, timeout: int = 40) -> str:
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        ) from exc
     result = subprocess.run(
         [
             "curl", "-s", "--max-time", str(timeout),
