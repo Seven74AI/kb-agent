@@ -20,6 +20,7 @@ from pathlib import Path
 from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -98,6 +99,15 @@ def step_megadl_download(task: dict, config: Config) -> str:
     if dl_dir.exists():
         shutil.rmtree(dl_dir)
     dl_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="megadl_download",
+        ) from exc
 
     try:
         # Use megadl to download
