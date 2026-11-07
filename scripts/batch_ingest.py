@@ -48,6 +48,7 @@ from agent.db import (  # noqa: E402
 )
 from agent.core.batch_lock import acquire, release  # noqa: E402
 from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
+from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
 
 # Reject staging huge images to Modal (GPU OOM / pixel bombs).
 MAX_STAGED_IMAGE_BYTES = 25 * 1024 * 1024
@@ -331,6 +332,11 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
 
     staged: list[tuple[dict, Path]] = []
     for q in image_items:
+        try:
+            _assert_fetch_url_allowed(q["url"])
+        except ValueError as exc:
+            update_ingest_status(conn, q["id"], "failed", error=f"blocked fetch URL: {exc}")
+            continue
         ext = Path(q["url"].split("?")[0]).suffix.lower() or ".png"
         dest = stage_dir / f"{q['id']}{ext}"
         r = subprocess.run(
