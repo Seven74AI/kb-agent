@@ -821,6 +821,20 @@ def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
         conn.close()
 
 
+def _require_parent_media_complete_at_execute(
+    task: dict, config: Config, conn, raw_path: Path,
+) -> None:
+    """Fail closed when a stale ``*_synthesize`` task runs before media landed."""
+    from agent.db import is_synthesize_content_type, parent_deferral_synthesize_execute_blocked
+
+    if not is_synthesize_content_type(task.get("content_type", "")):
+        return
+    slug = task.get("slug", task["id"][:8])
+    reason = parent_deferral_synthesize_execute_blocked(conn, slug, raw_path=raw_path)
+    if reason:
+        raise StepError(reason, error_type=ErrorType.PAUSE, step_name="synthesize_note")
+
+
 def step_synthesize_web(task: dict, config: Config) -> str:
     """LLM synthesis for web articles — reads source, builds prompt, calls LLM,
     writes note to vault.
@@ -843,6 +857,14 @@ def step_synthesize_web(task: dict, config: Config) -> str:
 
     if not source_path.exists():
         raise FileNotFoundError(f"Source file not found: {source_path}")
+
+    from agent.db import AGENT_SCHEMA, init_db
+
+    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    try:
+        _require_parent_media_complete_at_execute(task, config, conn, source_path)
+    finally:
+        conn.close()
 
     source_content = source_path.read_text(encoding="utf-8")
     estimated_tokens = _estimate_tokens(source_content)

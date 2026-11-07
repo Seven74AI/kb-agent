@@ -937,6 +937,7 @@ class TestSubstackVideoMetadata:
     def test_synthesize_pipeline_not_blocked_by_deferred_manifest(
         self, _mock_syn, _mock_llm, config, task_dict, tmp_path,
     ):
+        """Without a deferral row, on-disk manifest alone does not gate execute."""
         slug = task_dict["slug"]
         post = task_dict["source_url"]
         (config.temp_dir / f"{slug}_media.json").write_text(
@@ -946,6 +947,109 @@ class TestSubstackVideoMetadata:
         (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
         synth_task = {**task_dict, "content_type": "substack_text_synthesize"}
         step_synthesize_web(synth_task, config)
+        assert (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").is_file()
+
+    @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
+    @patch("agent.pipelines.web.get_llm_client")
+    def test_deferred_synthesize_pauses_when_sibling_media_pending(
+        self, _mock_llm, mock_single_pass, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, init_db, queue_ingest
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ensure_parent_media_deferral(conn, slug, post, "substack_text", 1)
+        queue_ingest(
+            conn, "https://example.com/vid", "substack_video", "vid",
+            parent_slug=slug, media_kind="video",
+        )
+        conn.commit()
+        conn.close()
+
+        synth_task = {**task_dict, "content_type": "substack_text_synthesize"}
+        with pytest.raises(StepError) as exc:
+            step_synthesize_web(synth_task, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "pending" in str(exc.value).lower()
+        mock_single_pass.assert_not_called()
+        assert not (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").exists()
+
+    @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
+    @patch("agent.pipelines.web.get_llm_client")
+    def test_deferred_synthesize_pauses_when_markers_missing(
+        self, _mock_llm, mock_single_pass, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ensure_parent_media_deferral(conn, slug, post, "substack_text", 1)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#vid", "substack_video", "vid",
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1 WHERE id = ?",
+            (ingest_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        synth_task = {**task_dict, "content_type": "substack_image_synthesize"}
+        with pytest.raises(StepError) as exc:
+            step_synthesize_web(synth_task, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "not complete" in str(exc.value).lower()
+        mock_single_pass.assert_not_called()
+
+    @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
+    @patch("agent.pipelines.web.get_llm_client")
+    def test_deferred_synthesize_runs_when_media_complete(
+        self, _mock_llm, mock_single_pass, config, task_dict, tmp_path,
+    ):
+        from agent.db import (
+            AGENT_SCHEMA,
+            ensure_parent_media_deferral,
+            init_db,
+            media_append_marker,
+            queue_ingest,
+            update_ingest_status,
+        )
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ensure_parent_media_deferral(conn, slug, post, "substack_text", 1)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#vid", "substack_video", "vid",
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1 WHERE id = ?",
+            (ingest_id,),
+        )
+        conn.commit()
+        conn.close()
+        marker = media_append_marker(ingest_id)
+        (config.temp_dir / f"{slug}_raw.md").write_text(
+            f"# Post\n\nBody.\n\n## Embedded video\n\nTranscript here.\n\n{marker}\n",
+            encoding="utf-8",
+        )
+        synth_task = {**task_dict, "content_type": "substack_text_synthesize"}
+        step_synthesize_web(synth_task, config)
+        mock_single_pass.assert_called_once()
         assert (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").is_file()
 
     def test_deferred_manifest_parent_does_not_inline_synthesize(self, config, task_dict, tmp_path):
