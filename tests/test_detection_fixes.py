@@ -7,8 +7,10 @@ import pytest
 from agent.config import Config
 from agent.detection import (
     DedupCheckError,
+    _fetch_content,
     _resolve_threads_cookie_path,
     dedup_check,
+    detect_content_subtype,
     preflight_health,
 )
 
@@ -75,10 +77,7 @@ def test_preflight_youtube_uses_config_cookie_dir(tmp_path, monkeypatch):
 
 
 def test_preflight_rumble_checks_flaresolverr(tmp_path, monkeypatch):
-    custom_dir = tmp_path / "cookies"
-    custom_dir.mkdir()
-    (custom_dir / "rumble_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
-    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault")
     monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
 
     def fake_run(cmd, **kwargs):
@@ -94,10 +93,7 @@ def test_preflight_rumble_checks_flaresolverr(tmp_path, monkeypatch):
 
 def test_preflight_rumble_unhealthy_when_flaresolverr_non_ok_json(tmp_path, monkeypatch):
     """Curl success with non-ok JSON must not count as healthy."""
-    custom_dir = tmp_path / "cookies"
-    custom_dir.mkdir()
-    (custom_dir / "rumble_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
-    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault")
     monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
 
     def fake_run(cmd, **kwargs):
@@ -114,10 +110,7 @@ def test_preflight_rumble_unhealthy_when_flaresolverr_non_ok_json(tmp_path, monk
 
 
 def test_preflight_rumble_unhealthy_when_flaresolverr_down(tmp_path, monkeypatch):
-    custom_dir = tmp_path / "cookies"
-    custom_dir.mkdir()
-    (custom_dir / "rumble_cookies.txt").write_text("# Netscape\n", encoding="utf-8")
-    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault")
     monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
 
     def fake_run(cmd, **kwargs):
@@ -129,6 +122,44 @@ def test_preflight_rumble_unhealthy_when_flaresolverr_down(tmp_path, monkeypatch
     ok, reason = preflight_health("rumble")
     assert ok is False
     assert "Flaresolverr" in reason
+
+
+def test_preflight_rumble_ok_without_cookie_file(tmp_path, monkeypatch):
+    """Rumble preflight must not require rumble_cookies.txt."""
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault")
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+
+    def fake_run(cmd, **kwargs):
+        if any("8191" in str(part) for part in cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"status":"ok"}', stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = preflight_health("rumble")
+    assert ok is True
+    assert reason == ""
+
+
+METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+
+
+@pytest.mark.parametrize("platform", ["threads", "substack", "mega"])
+def test_fetch_content_rejects_metadata_ip(platform, monkeypatch):
+    """Subtype detection fetches must block cloud metadata SSRF targets."""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("subprocess must not run for blocked URL")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    with pytest.raises(ValueError, match="not allowed"):
+        _fetch_content(METADATA_URL, platform)
+
+
+def test_comment_id_on_non_instagram_does_not_route_to_comment(monkeypatch):
+    url = "https://example.com/page?comment_id=123"
+    monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: None)
+    monkeypatch.setattr("agent.detection.route_jev", lambda u, c: "web")
+    assert detect_content_subtype(url, "web") == "web"
 
 
 def test_dedup_check_no_false_positive_from_regex_dot(core_config):

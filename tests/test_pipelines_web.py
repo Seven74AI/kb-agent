@@ -90,6 +90,15 @@ AI's potential in healthcare is vast, but careful implementation is essential.
     return str(source_path)
 
 
+@patch("agent.pipelines.web.subprocess.run")
+def test_firecrawl_extract_rejects_metadata_ip(mock_run, config, task_dict):
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    task_dict["source_url"] = "http://169.254.169.254/latest/meta-data/"
+    with pytest.raises(ValueError, match="not allowed"):
+        step_firecrawl_extract(task_dict, config)
+    mock_run.assert_not_called()
+
+
 # ── _estimate_tokens tests ────────────────────────────────────────────────────
 
 def test_estimate_tokens_empty():

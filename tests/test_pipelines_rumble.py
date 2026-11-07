@@ -14,7 +14,7 @@ from agent.consumer import Consumer
 from agent.detection import detect_content_subtype, detect_platform
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import get_pipeline
-from agent.pipelines.rumble import resolve_rumble, step_rumble_download_video
+from agent.pipelines.rumble import _flaresolverr_get, resolve_rumble, step_rumble_download_video
 
 RUMBLE_URL = (
     "https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy"
@@ -76,6 +76,15 @@ async def test_consumer_fails_loudly_when_pipeline_missing(rumble_consumer):
         )
     assert exc.value.error_type == ErrorType.FAIL
     assert "nonexistent_content_type_xyz" in str(exc.value)
+
+
+class TestFlaresolverrSsrf:
+
+    @patch("agent.pipelines.rumble.subprocess.run")
+    def test_flaresolverr_rejects_metadata_ip(self, mock_run):
+        with pytest.raises(ValueError, match="not allowed"):
+            _flaresolverr_get("http://169.254.169.254/latest/meta-data/")
+        mock_run.assert_not_called()
 
 
 class TestResolveRumble:

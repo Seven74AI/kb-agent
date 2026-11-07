@@ -318,12 +318,17 @@ async def test_mcp_bulk_import_calls_submit_per_url(mcp_server, mcp_config, monk
         async with running.client() as client:
             result = await client.call_tool(
                 "bulk_import",
-                {"urls": ["https://a.com/1", "https://a.com/2"]},
+                {
+                    "urls": [
+                        "https://example.com/1",
+                        "https://example.com/2",
+                    ]
+                },
             )
             body = result.data
             assert body["count"] == 2
             assert len(body["results"]) == 2
-    assert calls == ["https://a.com/1", "https://a.com/2"]
+    assert calls == ["https://example.com/1", "https://example.com/2"]
 
 
 @pytest.mark.asyncio

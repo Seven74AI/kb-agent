@@ -234,6 +234,26 @@ class TestSubstackEmbeddedMedia:
             "https://rumble.com/vabc123-short",
         ]
 
+    def test_extract_rumble_embed_urls_normalized(self):
+        html = '<iframe src="https://rumble.com/embed/v2vk68c/"></iframe>'
+        assert _extract_rumble_urls(html) == ["https://rumble.com/v2vk68c"]
+
+    def test_fetch_substack_html_rejects_metadata_ip(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.pipelines.web.subprocess.run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch")),
+        )
+        with pytest.raises(ValueError, match="not allowed"):
+            _fetch_substack_html("http://169.254.169.254/latest/meta-data/")
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_metadata_rejects_metadata_ip(self, mock_run, config, task_dict):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        task_dict["source_url"] = "http://169.254.169.254/latest/meta-data/"
+        with pytest.raises(ValueError, match="not allowed"):
+            step_substack_video_extract_metadata(task_dict, config)
+        mock_run.assert_not_called()
+
     def test_drops_non_image_bin_asset(self):
         # Substack sometimes serves a .bin under the images/ prefix — not an image.
         html = (

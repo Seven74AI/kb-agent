@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.config import Config
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
@@ -111,6 +112,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     """
     slug = task.get("slug", task["id"][:8])
     url = task["source_url"]
+    _assert_fetch_url_allowed(url)
     domain = urlparse(url).netloc
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
@@ -241,6 +243,7 @@ def _extract_native_video_id(html: str) -> str | None:
 
 
 def _fetch_substack_html(url: str, config: Config | None = None) -> str:
+    _assert_fetch_url_allowed(url)
     cmd = ["curl", "-s", "-L", "--max-time", "20", url]
     if config is not None:
         cookie = Path(config.cookie_dir) / "substack_cookies.txt"
@@ -319,7 +322,9 @@ def _extract_youtube_ids(html: str) -> list[str]:
     return ids
 
 
-_RUMBLE_URL_RE = re.compile(r'https?://rumble\.com/v[a-z0-9]+(?:-[a-z0-9-]+)?')
+_RUMBLE_URL_RE = re.compile(
+    r'https?://rumble\.com/(?:embed/)?(v[a-z0-9]+(?:-[a-z0-9-]+)?)'
+)
 
 
 def _extract_rumble_urls(html: str) -> list[str]:
@@ -327,7 +332,7 @@ def _extract_rumble_urls(html: str) -> list[str]:
     decoded = _html_unescape(html)
     out: list[str] = []
     for m in _RUMBLE_URL_RE.finditer(decoded):
-        url = m.group(0).rstrip("\\").rstrip('"')
+        url = f"https://rumble.com/{m.group(1)}"
         if url not in out:
             out.append(url)
     return out
@@ -475,6 +480,7 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
         ValueError: If content is too short or extraction fails.
     """
     url = task["source_url"]
+    _assert_fetch_url_allowed(url)
     slug = task.get("slug", task["id"][:8])
 
     result = subprocess.run(
