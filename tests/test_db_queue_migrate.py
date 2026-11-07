@@ -11,6 +11,7 @@ from agent.db import (
     count_pending_media,
     init_db,
     queue_ingest,
+    recover_failed_media,
     serialize_tags,
 )
 
@@ -59,7 +60,7 @@ def test_migrate_adds_missing_ingest_queue_columns(tmp_path):
 
     _migrate(conn)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ingest_queue)").fetchall()}
-    for required in ("slug", "tags", "error", "created_at", "dispatched_at", "parent_slug", "media_kind"):
+    for required in ("slug", "tags", "error", "created_at", "dispatched_at", "parent_slug", "media_kind", "attempts"):
         assert required in cols, f"missing column {required}"
 
     conn.execute(
@@ -103,7 +104,38 @@ def test_count_pending_media(tmp_path):
     conn.commit()
     assert count_pending_media(conn, "p") == 1
 
-    # a failed sibling also counts as "done" (don't block forever)
+    # a failed sibling still blocks synthesis (must be retried to success)
     conn.execute("UPDATE ingest_queue SET status='failed' WHERE url='https://example.com/i2'")
     conn.commit()
-    assert count_pending_media(conn, "p") == 0
+    assert count_pending_media(conn, "p") == 1
+
+
+def test_recover_failed_media_requeues_up_to_max_attempts(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    queue_ingest(conn, "https://example.com/i1", "substack_image", "i1", parent_slug="p", media_kind="image")
+    conn.execute("UPDATE ingest_queue SET status='failed' WHERE url='https://example.com/i1'")
+    conn.commit()
+
+    # retry 1
+    assert recover_failed_media(conn, max_attempts=3) == 1
+    row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url='https://example.com/i1'").fetchone()
+    assert row["status"] == "queued"
+    assert row["attempts"] == 1
+
+    # fail again, retry 2, fail again, retry 3
+    for _ in range(2):
+        conn.execute("UPDATE ingest_queue SET status='failed' WHERE url='https://example.com/i1'")
+        conn.commit()
+        assert recover_failed_media(conn, max_attempts=3) == 1
+    row = conn.execute("SELECT attempts FROM ingest_queue WHERE url='https://example.com/i1'").fetchone()
+    assert row["attempts"] == 3
+
+    # 4th failure stays failed (attempts exhausted) — no more requeue
+    conn.execute("UPDATE ingest_queue SET status='failed' WHERE url='https://example.com/i1'")
+    conn.commit()
+    assert recover_failed_media(conn, max_attempts=3) == 0
+    row = conn.execute("SELECT status FROM ingest_queue WHERE url='https://example.com/i1'").fetchone()
+    assert row["status"] == "failed"
