@@ -678,7 +678,6 @@ Confidence level with justification.
 
 ## Sources
 - Original source (full citation)
-- Raw source archived: minio: URL
 
 ## See Also
 - (filled by See Also step)
@@ -869,6 +868,16 @@ def step_minio_upload(task: dict, config: Config) -> str:
                     # No source_files: field — insert after the opening ---
                     content = content[:3] + "\nsource_files:\n  raw: " + minio_url + content[3:]
                 note_path.write_text(content, encoding="utf-8")
+
+        # Write the real archive URL into the Sources section (before See Also).
+        # If the note lacks a See Also header, skip — the frontmatter raw: field
+        # already carries the URL.
+        content = re.sub(
+            r'^## See Also\s*$',
+            f'- Raw source archived: `{minio_url}`\n\n## See Also',
+            content, flags=re.MULTILINE, count=1,
+        )
+        note_path.write_text(content, encoding="utf-8")
 
     return minio_url
 
