@@ -38,6 +38,7 @@ vol = modal.Volume.from_name("kb-models", create_if_missing=True)
 CACHE = "/cache"
 
 MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
 PROMPT = (
     "Transcribe every piece of text visible in this image, verbatim and complete, "
@@ -110,10 +111,20 @@ def main(image_dir: str = None, out_dir: str = "."):
     os.makedirs(out_dir, exist_ok=True)
     exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".avif")
     items = []
+    skipped = 0
     for f in sorted(os.listdir(image_dir)):
-        if f.lower().endswith(exts):
-            with open(os.path.join(image_dir, f), "rb") as fh:
-                items.append({"name": f, "bytes": fh.read()})
+        if not f.lower().endswith(exts):
+            continue
+        path = os.path.join(image_dir, f)
+        size = os.path.getsize(path)
+        if size > MAX_IMAGE_BYTES:
+            print(f"skip {f}: {size} bytes exceeds cap {MAX_IMAGE_BYTES}", flush=True)
+            skipped += 1
+            continue
+        with open(path, "rb") as fh:
+            items.append({"name": f, "bytes": fh.read()})
+    if skipped:
+        print(f"skipped {skipped} oversized image(s)", flush=True)
     if not items:
         print("no images found in", image_dir)
         return

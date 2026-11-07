@@ -19,9 +19,11 @@ from agent.pipelines.web import (
     step_substack_embedded_media,
     step_substack_video_extract_metadata,
     _extract_body_images,
+    _extract_native_video_id,
     _extract_rumble_urls,
     _extract_youtube_ids,
     _is_content_image,
+    _is_substack_unauth_paywall_shell,
     SUBSTACK_BOILERPLATE,
 )
 
@@ -280,6 +282,7 @@ class TestSubstackVideoMetadata:
     @patch("agent.pipelines.web._enqueue_embedded_media")
     def test_defers_synthesis_when_media_found(self, mock_enqueue, mock_fetch, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_enqueue.return_value = 2
         mock_fetch.return_value = (
             '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
             '<iframe src="https://www.youtube-nocookie.com/embed/xyzXYZ12345"></iframe>'
@@ -295,7 +298,7 @@ class TestSubstackVideoMetadata:
         mock_enqueue.assert_called_once_with(
             task_dict["slug"],
             ["https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"],
-            ["xyzXYZ12345"], [], config, None,
+            ["xyzXYZ12345"], [], [], task_dict["source_url"], config, None,
         )
 
     @patch("agent.pipelines.web._fetch_substack_html")
@@ -312,6 +315,61 @@ class TestSubstackVideoMetadata:
             step_substack_embedded_media(task_dict, config)
         assert exc.value.error_type == ErrorType.RETRY
         mock_enqueue.assert_not_called()
+
+    def test_extract_native_video_id_from_preloads(self):
+        html = (
+            '{"videoUpload":{"id":"a7315fa8-8027-4432-a7e3-652479bc5275"}}'
+        )
+        assert _extract_native_video_id(html) == "a7315fa8-8027-4432-a7e3-652479bc5275"
+
+    def test_extract_native_video_id_from_api_path(self):
+        html = '<a href="/api/v1/video/upload/deadbeef-1111-2222-3333-444455556666/src">'
+        assert _extract_native_video_id(html) == "deadbeef-1111-2222-3333-444455556666"
+
+    def test_paywall_shell_detected(self):
+        html = (
+            "<html><body><div data-testid='paywall'>Subscribe to continue</div></body></html>"
+        )
+        assert _is_substack_unauth_paywall_shell(html) is True
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_unauth_paywall_pauses_not_inline_synthesize(self, mock_fetch, config, task_dict):
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        mock_fetch.return_value = (
+            "<html><body>Subscribe to continue reading</body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "substack cookie" in str(exc.value).lower()
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_native_video_enqueued_with_text_post(self, mock_fetch, config, task_dict, tmp_path):
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_fetch.return_value = (
+            "<html><body><p>Intro text</p>"
+            '<script>window._preloads = {"post":{"videoUpload":{"id":'
+            '"a7315fa8-8027-4432-a7e3-652479bc5275"}}};</script></body></html>'
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert "awaiting media" in str(exc.value)
+        manifest = json.loads(
+            (config.temp_dir / f"{task_dict['slug']}_media.json").read_text(encoding="utf-8")
+        )
+        assert manifest["total"] == 1
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_auth_plain_text_no_media(self, mock_fetch, config, task_dict):
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        (config.cookie_dir / "substack_cookies.txt").write_text(
+            "# Netscape HTTP Cookie File\n", encoding="utf-8",
+        )
+        mock_fetch.return_value = "<html><body>plain text article</body></html>"
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "no embedded media"
 
 
 # ── Boilerplate Pattern Tests ───────────────────────────────────────────────

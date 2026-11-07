@@ -193,11 +193,59 @@ def _html_unescape(s: str) -> str:
     )
 
 
-def _fetch_substack_html(url: str) -> str:
-    result = subprocess.run(
-        ["curl", "-s", "-L", "--max-time", "20", url],
-        capture_output=True, text=True, timeout=30,
-    )
+_NATIVE_VIDEO_ID_RE = re.compile(
+    r'"videoUpload"\s*:\s*\{\s*"id"\s*:\s*"([a-f0-9-]+)"'
+    r'|/api/v1/video/upload/([a-f0-9-]+)/',
+    re.IGNORECASE,
+)
+
+_PAYWALL_MARKERS = (
+    "subscribe to continue",
+    "data-testid=\"paywall\"",
+    "data-testid='paywall'",
+    "class=\"paywall",
+    "this post is for paid subscribers",
+)
+
+
+def _substack_cookie_configured(config: Config) -> bool:
+    cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+    if not cookie.exists():
+        return False
+    try:
+        return cookie.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _is_substack_unauth_paywall_shell(html: str) -> bool:
+    """Heuristic: login/paywall shell with no article embeds to extract."""
+    if not html.strip():
+        return False
+    lower = html.lower()
+    if any(marker in lower for marker in _PAYWALL_MARKERS):
+        return True
+    # Paywalled shell often lacks body images and article markup
+    if "paywall" in lower and not _IMAGE_KEY_RE.search(html):
+        if "article" not in lower and "post-body" not in lower:
+            return True
+    return False
+
+
+def _extract_native_video_id(html: str) -> str | None:
+    decoded = _html_unescape(html)
+    m = _NATIVE_VIDEO_ID_RE.search(decoded)
+    if not m:
+        return None
+    return m.group(1) or m.group(2)
+
+
+def _fetch_substack_html(url: str, config: Config) -> str:
+    cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+    cmd = ["curl", "-s", "-L", "--max-time", "20", url]
+    if cookie.exists():
+        cmd += ["-b", str(cookie)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return result.stdout or ""
 
 
@@ -298,7 +346,8 @@ def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
 
 
 def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],
-                            rumble_urls: list[str], config: Config, tags) -> int:
+                            rumble_urls: list[str], native_video_ids: list[str],
+                            post_url: str, config: Config, tags) -> int:
     """Enqueue embedded images + videos into the nightly batch, linked to the parent.
 
     Each media item carries ``parent_slug`` + ``media_kind`` so the nightly batch
@@ -306,8 +355,10 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
     parent's deferred synthesis once every sibling is done. Deliberately does NOT
     download or OCR here — media is batch-processed at night (scripts/batch_ingest.py).
     Lazy-imports to avoid a circular import with agent.pipelines.
+
+    Returns the number of ingest_queue rows for ``parent_slug`` (after dedup).
     """
-    if not images and not youtube_ids and not rumble_urls:
+    if not images and not youtube_ids and not rumble_urls and not native_video_ids:
         return 0
     from agent.core.submit import submit_ingest
     from agent.db import AGENT_SCHEMA, init_db
@@ -329,9 +380,18 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                 url, config, conn, content_type="rumble", tags=tags,
                 parent_slug=parent_slug, media_kind="video",
             )
+        for _vid in native_video_ids:
+            submit_ingest(
+                post_url, config, conn, content_type="substack_video", tags=tags,
+                parent_slug=parent_slug, media_kind="video",
+            )
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (parent_slug,),
+        ).fetchone()
+        return row["n"] if hasattr(row, "keys") else row[0]
     finally:
         conn.close()
-    return len(images) + len(youtube_ids) + len(rumble_urls)
 
 
 def step_substack_embedded_media(task: dict, config: Config) -> str:
@@ -350,7 +410,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     url = task["source_url"]
 
-    html = _fetch_substack_html(url)
+    html = _fetch_substack_html(url, config)
     if not html:
         raise StepError(
             "no html fetched",
@@ -361,23 +421,36 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     images = _extract_body_images(html)
     youtube_ids = _extract_youtube_ids(html)
     rumble_urls = _extract_rumble_urls(html)
-    total = len(images) + len(youtube_ids) + len(rumble_urls)
-    if total == 0:
+    native_vid = _extract_native_video_id(html)
+    native_video_ids = [native_vid] if native_vid else []
+    extracted_total = (
+        len(images) + len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
+    )
+    if extracted_total == 0:
+        if not _substack_cookie_configured(config) and _is_substack_unauth_paywall_shell(html):
+            raise StepError(
+                "awaiting substack cookies — paywalled/login HTML without article body",
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
         return "no embedded media"
 
-    _enqueue_embedded_media(slug, images, youtube_ids, rumble_urls, config, task.get("tags"))
+    enqueued_total = _enqueue_embedded_media(
+        slug, images, youtube_ids, rumble_urls, native_video_ids, url, config, task.get("tags"),
+    )
 
     manifest = {
         "url": url,
         "content_type": task.get("content_type", "substack_text"),
-        "total": total,
+        "total": enqueued_total,
     }
     Path(config.temp_dir, f"{slug}_media.json").write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
     )
 
+    n_videos = len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
     raise StepError(
-        f"awaiting media: {len(images)} images + {len(youtube_ids) + len(rumble_urls)} videos enqueued",
+        f"awaiting media: {len(images)} images + {n_videos} videos enqueued",
         error_type=ErrorType.PAUSE, step_name="substack_embedded_media",
     )
 
