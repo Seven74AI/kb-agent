@@ -255,9 +255,12 @@ def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
         parent_slug="article", media_kind="image",
     )
     assert created is False
-    row = conn.execute("SELECT status, error FROM ingest_queue WHERE url=?", (url,)).fetchone()
+    row = conn.execute(
+        "SELECT status, error, attempts FROM ingest_queue WHERE url=?", (url,),
+    ).fetchone()
     assert row["status"] == "queued"
     assert row["error"] is None
+    assert row["attempts"] == 2
 
 
 def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):

@@ -122,8 +122,21 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
     html = result.stdout or ""
 
+    fragment_id = urlparse(url).fragment
+    if fragment_id and re.fullmatch(r"[a-f0-9-]+", fragment_id, re.IGNORECASE):
+        vid_from_frag = fragment_id
+    else:
+        vid_from_frag = None
+
     vid = re.search(r'"videoUpload"\s*:\s*\{\s*"id"\s*:\s*"([a-f0-9-]+)"', html)
-    if not vid:
+    if vid_from_frag:
+        video_id = vid_from_frag
+    elif vid:
+        video_id = vid.group(1)
+    else:
+        video_id = None
+
+    if not video_id:
         raise StepError(
             "No native video id (videoUpload.id) found — paywalled or non-video post",
             error_type=ErrorType.PAUSE, step_name="substack_video_metadata",
@@ -131,13 +144,13 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     title_m = re.search(r"<title>([^<]+)</title>", html)
     meta = {
         "title": title_m.group(1).strip() if title_m else "",
-        "video_id": vid.group(1),
+        "video_id": video_id,
         "domain": domain,
     }
     Path(config.temp_dir, f"{slug}_metadata.json").write_text(
         json.dumps(meta, ensure_ascii=False), encoding="utf-8",
     )
-    return f"video_id={vid.group(1)}"
+    return f"video_id={video_id}"
 
 
 def step_substack_video_download(task: dict, config: Config) -> str:
@@ -153,6 +166,7 @@ def step_substack_video_download(task: dict, config: Config) -> str:
     vid, domain = meta["video_id"], meta["domain"]
     output_path = Path(config.temp_dir) / f"{slug}.mp4"
     endpoint = f"https://{domain}/api/v1/video/upload/{vid}/src?type=mp4"
+    _assert_fetch_url_allowed(endpoint)
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
     cmd = ["curl", "-s", "-L", "--max-time", "600", "-o", str(output_path), endpoint]
@@ -175,6 +189,18 @@ AVATAR_MAX_SIDE = 400
 # Embedded YouTube: iframe src OR data-attrs videoId (HTML-escaped in SSR).
 _YOUTUBE_IFRAME_RE = re.compile(r'youtube(?:-nocookie)?\.com/embed/([A-Za-z0-9_-]{6,})')
 _YOUTUBE_VIDEOID_RE = re.compile(r'"videoId":"([A-Za-z0-9_-]{6,})"')
+_YOUTUBE_WATCH_RE = re.compile(
+    r'(?:https?://)?(?:www\.)?youtube\.com/watch\?(?:[^"\s<>]*&)?v=([A-Za-z0-9_-]{6,})',
+    re.IGNORECASE,
+)
+_YOUTUBE_SHORTS_RE = re.compile(
+    r'(?:https?://)?(?:www\.)?youtube\.com/shorts/([A-Za-z0-9_-]{6,})',
+    re.IGNORECASE,
+)
+_YOUTUBE_BE_RE = re.compile(
+    r'(?:https?://)?youtu\.be/([A-Za-z0-9_-]{6,})',
+    re.IGNORECASE,
+)
 _IMAGE_KEY_RE = re.compile(
     r'substack-post-media\.s3\.amazonaws\.com(?:%2F|/)public(?:%2F|/)images(?:%2F|/)'
     r'([a-z0-9-]+_\d+x\d+\.\w+)'
@@ -234,12 +260,15 @@ def _is_substack_unauth_paywall_shell(html: str) -> bool:
     return False
 
 
-def _extract_native_video_id(html: str) -> str | None:
+def _extract_native_video_ids(html: str) -> list[str]:
+    """All native Substack ``videoUpload.id`` values, deduped, order-preserved."""
     decoded = _html_unescape(html)
-    m = _NATIVE_VIDEO_ID_RE.search(decoded)
-    if not m:
-        return None
-    return m.group(1) or m.group(2)
+    out: list[str] = []
+    for m in _NATIVE_VIDEO_ID_RE.finditer(decoded):
+        vid = m.group(1) or m.group(2)
+        if vid and vid not in out:
+            out.append(vid)
+    return out
 
 
 def _fetch_substack_html(url: str, config: Config | None = None) -> str:
@@ -310,15 +339,19 @@ def _extract_body_images(html: str) -> list[str]:
 
 
 def _extract_youtube_ids(html: str) -> list[str]:
-    """Embedded YouTube video IDs, deduped, from iframe src + data-attrs videoId."""
+    """Embedded YouTube video IDs, deduped (iframe, videoId JSON, prose links)."""
     decoded = _html_unescape(html)
     ids: list[str] = []
-    for m in _YOUTUBE_IFRAME_RE.finditer(decoded):
-        if m.group(1) not in ids:
-            ids.append(m.group(1))
-    for m in _YOUTUBE_VIDEOID_RE.finditer(decoded):
-        if m.group(1) not in ids:
-            ids.append(m.group(1))
+    for pattern in (
+        _YOUTUBE_IFRAME_RE,
+        _YOUTUBE_VIDEOID_RE,
+        _YOUTUBE_WATCH_RE,
+        _YOUTUBE_SHORTS_RE,
+        _YOUTUBE_BE_RE,
+    ):
+        for m in pattern.finditer(decoded):
+            if m.group(1) not in ids:
+                ids.append(m.group(1))
     return ids
 
 
@@ -340,6 +373,7 @@ def _extract_rumble_urls(html: str) -> list[str]:
 
 def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
     """Download an image and run Tesseract OCR; return the text (or '' on failure)."""
+    _assert_fetch_url_allowed(img_url)
     img_path = Path(config.temp_dir) / f"{slug}_img{idx}"
     dl = subprocess.run(
         ["curl", "-s", "-L", "--max-time", "30", "-o", str(img_path), img_url],
@@ -389,9 +423,9 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                 url, config, conn, content_type="rumble", tags=tags,
                 parent_slug=parent_slug, media_kind="video",
             )
-        for _vid in native_video_ids:
+        for vid in native_video_ids:
             submit_ingest(
-                post_url, config, conn, content_type="substack_video", tags=tags,
+                f"{post_url}#{vid}", config, conn, content_type="substack_video", tags=tags,
                 parent_slug=parent_slug, media_kind="video",
             )
         row = conn.execute(
@@ -430,8 +464,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     images = _extract_body_images(html)
     youtube_ids = _extract_youtube_ids(html)
     rumble_urls = _extract_rumble_urls(html)
-    native_vid = _extract_native_video_id(html)
-    native_video_ids = [native_vid] if native_vid else []
+    native_video_ids = _extract_native_video_ids(html)
     extracted_total = (
         len(images) + len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
     )
@@ -444,6 +477,9 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             )
         return "no embedded media"
 
+    manifest_path = Path(config.temp_dir, f"{slug}_media.json")
+    had_manifest = manifest_path.exists()
+
     enqueued_total = _enqueue_embedded_media(
         slug, images, youtube_ids, rumble_urls, native_video_ids, url, config, task.get("tags"),
     )
@@ -453,11 +489,25 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         "content_type": task.get("content_type", "substack_text"),
         "total": enqueued_total,
     }
-    Path(config.temp_dir, f"{slug}_media.json").write_text(
+    manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
     )
 
     n_videos = len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
+    from agent.db import AGENT_SCHEMA, count_pending_media, init_db
+
+    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    try:
+        pending = count_pending_media(conn, slug)
+    finally:
+        conn.close()
+
+    if had_manifest and pending == 0:
+        return (
+            f"media ready: {len(images)} images + {n_videos} videos "
+            f"({enqueued_total} siblings dispatched)"
+        )
+
     raise StepError(
         f"awaiting media: {len(images)} images + {n_videos} videos enqueued",
         error_type=ErrorType.PAUSE, step_name="substack_embedded_media",
