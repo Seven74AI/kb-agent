@@ -1,7 +1,8 @@
 """Rumble pipeline tests — detection, routing, Flaresolverr resolution + CDN download."""
+import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,7 +14,7 @@ from agent.consumer import Consumer
 from agent.detection import detect_content_subtype, detect_platform
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import get_pipeline
-from agent.pipelines.rumble import resolve_rumble
+from agent.pipelines.rumble import resolve_rumble, step_rumble_download_video
 
 RUMBLE_URL = (
     "https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy"
@@ -117,3 +118,52 @@ class TestResolveRumble:
             assert "No mp4 formats" in str(exc)
         else:
             raise AssertionError("expected StepError")
+
+
+class TestRumbleDownloadUsesCachedMetadata:
+
+    @pytest.fixture
+    def rumble_config(self, tmp_path):
+        temp_dir = tmp_path / "tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        return Config(
+            kb_agent_dir=WORKSPACE,
+            vault_path=tmp_path / "vault",
+            temp_dir=temp_dir,
+            cookie_dir=tmp_path / "cookies",
+        )
+
+    @patch("agent.pipelines.rumble.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.rumble.subprocess.run")
+    @patch("agent.pipelines.rumble.resolve_rumble")
+    def test_download_reads_metadata_json_instead_of_resolve(
+        self, mock_resolve, mock_run, _mock_h264, rumble_config,
+    ):
+        """download_video must not re-hit Flaresolverr when extract_metadata cache exists."""
+        slug = "rumble_test_slug"
+        cdn_url = "https://hugh.cdn.rumble.cloud/video/test-baa.mp4"
+        meta_path = rumble_config.temp_dir / f"{slug}_metadata.json"
+        meta_path.write_text(
+            json.dumps({
+                "title": "Cached Title",
+                "formats": [{"url": cdn_url, "height": 720}],
+                "source_url": "https://rumble.com/v2vk68c-test",
+            }),
+            encoding="utf-8",
+        )
+        video_path = rumble_config.temp_dir / f"{slug}.mp4"
+        video_path.write_bytes(b"\x00" * 2000)
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        task = {
+            "id": "task-rumble-1",
+            "slug": slug,
+            "source_url": "https://rumble.com/v2vk68c-test",
+        }
+        result = step_rumble_download_video(task, rumble_config)
+
+        mock_resolve.assert_not_called()
+        cmd = mock_run.call_args[0][0]
+        assert cdn_url in cmd
+        assert result == str(video_path)
