@@ -31,7 +31,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
     Callers that need to touch the DB only for the enqueue step can run this
     first and skip opening a connection entirely on dedup hits.
     """
-    url = (url or "").strip()
+    url = normalize_url((url or "").strip())
     if not url:
         return {"status": "error", "http_status": 400, "error": "url required"}
 
@@ -55,10 +55,28 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
                 "platform": platform,
             }
 
-    ok, reason = preflight_health(platform)
-    slug = slugify(url)
     subtype = detect_content_subtype(url, platform)
+    if subtype == "unknown":
+        return {
+            "status": "error",
+            "http_status": 400,
+            "error": "unknown content_type",
+            "platform": platform,
+            "url": url,
+        }
+
     steps = get_pipeline_names(subtype, platform)
+    if steps is None:
+        return {
+            "status": "error",
+            "http_status": 400,
+            "error": f"unknown content_type: {subtype}",
+            "platform": platform,
+            "url": url,
+        }
+
+    ok, reason = preflight_health(platform)
+    slug = slugify(url, content_type=subtype)
 
     return {
         "status": "paused" if not ok else "pending",
@@ -189,6 +207,13 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
         }
 
     steps = get_pipeline_names(content_type, platform)
+    if steps is None:
+        return {
+            "status": "error",
+            "http_status": 400,
+            "error": f"unknown content_type: {content_type}",
+            "platform": platform,
+        }
     task_id = create_task(agent_conn, url, content_type, slug, steps, tags=tags)
 
     return {

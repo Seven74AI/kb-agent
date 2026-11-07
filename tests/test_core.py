@@ -23,6 +23,8 @@ from agent.core import (
     slugify,
     submit_url,
 )
+from agent.core.resume import ResumeReasonError
+from agent.core.submit import plan_submission
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, create_task, init_db, pause_task
 
 
@@ -81,6 +83,58 @@ def test_steps_for_mega_video_not_mega_delegate():
     assert "megadl_download" not in steps
     assert "download_video" in steps
     assert steps[-1] == "git_push"
+
+
+def test_get_pipeline_names_unknown_returns_none():
+    from agent.pipelines import get_pipeline_names
+
+    assert get_pipeline_names("nonexistent_typo_xyz", "also_missing") is None
+
+
+def test_slugify_instagram_comment_preserves_comment_id():
+    url = "https://www.instagram.com/reel/ABC123/?comment_id=999888777"
+    a = slugify(url, content_type="instagram_comment")
+    b = slugify(
+        "https://www.instagram.com/reel/ABC123/?comment_id=111222333",
+        content_type="instagram_comment",
+    )
+    assert a.endswith("_c_999888777")
+    assert b.endswith("_c_111222333")
+    assert a != b
+
+
+def test_plan_submission_normalizes_url_before_dedup(core_config, monkeypatch):
+    """Tracking params stripped so dedup matches normalized vault URLs."""
+    canonical = "https://www.instagram.com/reel/AbCd/?comment_id=42"
+    tracked = "https://www.instagram.com/reel/AbCd/?igsh=noise&comment_id=42"
+    note = core_config.vault_path / "Knowledge base" / "articles" / "existing.md"
+    note.write_text(f"---\nsource_url: {canonical}\n---\n", encoding="utf-8")
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    result = plan_submission(tracked, core_config)
+    assert result["status"] == "skipped"
+
+
+def test_plan_submission_unknown_content_type_not_enqueued(core_config, monkeypatch):
+    monkeypatch.setattr(
+        "agent.core.submit.detect_content_subtype",
+        lambda url, platform: "unknown",
+    )
+    result = plan_submission("https://mega.nz/folder/x", core_config)
+    assert result["status"] == "error"
+    assert result["http_status"] == 400
+    assert "unknown" in result["error"].lower()
+
+
+def test_plan_submission_unregistered_pipeline_error(core_config, monkeypatch):
+    monkeypatch.setattr(
+        "agent.core.submit.detect_content_subtype",
+        lambda url, platform: "nonexistent_typo_xyz",
+    )
+    monkeypatch.setattr("agent.core.submit.detect_platform", lambda url: "not_a_pipeline")
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    result = plan_submission("https://example.com/x", core_config)
+    assert result["status"] == "error"
+    assert result["http_status"] == 400
 
 
 def test_bulk_import_passes_tags_when_submit_accepts(core_config, agent_conn):
@@ -221,7 +275,10 @@ def test_get_task_missing(agent_conn):
 
 
 def test_normalize_reason_pattern():
-    assert normalize_reason_pattern("") == "%"
+    with pytest.raises(ResumeReasonError):
+        normalize_reason_pattern("")
+    with pytest.raises(ResumeReasonError):
+        normalize_reason_pattern("%")
     assert normalize_reason_pattern("cookies") == "%cookies%"
     assert normalize_reason_pattern("%fire%") == "%fire%"
 
