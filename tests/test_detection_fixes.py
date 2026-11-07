@@ -1,5 +1,6 @@
 """Tests for detection helpers (dedup, threads cookies)."""
 
+import logging
 import subprocess
 from pathlib import Path
 import pytest
@@ -261,3 +262,40 @@ def test_detect_threads_legacy_curl_disables_redirects_and_cookie_config(
     conf_path = custom_dir / ".curl-threads_cookies.txt.conf"
     assert conf_path.is_file()
     assert oct(conf_path.stat().st_mode)[-3:] == "600"
+
+
+def test_fetch_content_threads_logs_on_failure(monkeypatch, caplog):
+    def boom(cmd, **kwargs):
+        raise OSError("curl vanished")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    caplog.set_level(logging.WARNING)
+    assert _fetch_content("https://threads.net/@u/post/1", "threads") is None
+    assert any("Threads content fetch failed" in rec.message for rec in caplog.records)
+
+
+def test_fetch_content_substack_logs_on_failure(monkeypatch, caplog):
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["curl"], timeout=20)
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    caplog.set_level(logging.WARNING)
+    assert _fetch_content("https://blog.substack.com/p/post", "substack") is None
+    assert any("Substack content fetch failed" in rec.message for rec in caplog.records)
+
+
+def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):
+    def boom(url, content):
+        raise RuntimeError("jev down")
+
+    monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: "<html/>")
+    monkeypatch.setattr("agent.detection.route_jev", boom)
+    monkeypatch.setattr(
+        "agent.detection._detect_substack_subtype", lambda url: "substack_text",
+    )
+    caplog.set_level(logging.WARNING)
+    assert (
+        detect_content_subtype("https://example.substack.com/p/x", "substack")
+        == "substack_text"
+    )
+    assert any("Jev routing failed" in rec.message for rec in caplog.records)

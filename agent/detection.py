@@ -135,7 +135,13 @@ def _fetch_content(url: str, platform: str) -> str | None:
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             return result.stdout or None
-        except (subprocess.TimeoutExpired, Exception):
+        except (subprocess.TimeoutExpired, Exception) as exc:
+            logger.warning(
+                "Threads content fetch failed for %s: %s",
+                url,
+                exc,
+                exc_info=True,
+            )
             return None
     elif platform == "substack":
         try:
@@ -147,7 +153,13 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 capture_output=True, text=True, timeout=20,
             )
             return result.stdout or None
-        except (subprocess.TimeoutExpired, Exception):
+        except (subprocess.TimeoutExpired, Exception) as exc:
+            logger.warning(
+                "Substack content fetch failed for %s: %s",
+                url,
+                exc,
+                exc_info=True,
+            )
             return None
     elif platform == "mega":
         try:
@@ -208,8 +220,14 @@ def detect_content_subtype(url: str, platform: str) -> str:
     # Remaining ambiguous tail (substack/mega/web) → Jev with FULL content.
     try:
         return route_jev(url, content)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Jev routing failed for %s (platform=%s) — falling back to legacy scraper: %s",
+            url,
+            platform,
+            exc,
+            exc_info=True,
+        )
 
     # Legacy fallback (Jev unavailable or failed).
     if platform == "substack":

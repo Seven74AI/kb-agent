@@ -722,7 +722,7 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
 
     result = subprocess.run(
         [
-            "curl", "-s", "--max-time", "60",
+            "curl", "-s", "--max-redirs", "0", "--max-time", "60",
             config.firecrawl_url,
             "-H", "Content-Type: application/json",
             "-d", json.dumps({

@@ -711,6 +711,64 @@ def has_synthesize_task_signal(conn: sqlite3.Connection, slug: str) -> bool:
     return has_active_synthesize_task(conn, slug) or has_completed_synthesize_task(conn, slug)
 
 
+def _slug_has_media_manifest(temp_dir: Path | None, slug: str) -> bool:
+    if temp_dir is None:
+        return False
+    return (temp_dir / f"{slug}_media.json").is_file()
+
+
+def _slug_has_embedded_media_context(
+    conn: sqlite3.Connection, slug: str, temp_dir: Path | None,
+) -> bool:
+    """True when embedded siblings or an on-disk media manifest imply deferred batch synthesis."""
+    return (
+        _parent_sibling_media_count(conn, slug) > 0
+        or _slug_has_media_manifest(temp_dir, slug)
+    )
+
+
+def _non_superseded_parent_terminal(conn: sqlite3.Connection, slug: str) -> bool:
+    """Terminal non-synthesize parent row that was not superseded by batch synthesis."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT error FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "AND status IN ('done', 'completed') "
+        "LIMIT 1",
+        (slug,),
+    ).fetchone()
+    if row is None:
+        return False
+    err = row["error"] if hasattr(row, "keys") else row[0]
+    return not _is_superseded_parent_error(err)
+
+
+def _embedded_media_landing_anchor(conn: sqlite3.Connection, slug: str) -> str | None:
+    """Latest sibling ``dispatched_at`` when embedded media rows exist."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT MAX(dispatched_at) AS latest FROM ingest_queue WHERE parent_slug = ?",
+        (slug,),
+    ).fetchone()
+    if row is None:
+        return None
+    latest = row["latest"] if hasattr(row, "keys") else row[0]
+    return latest or None
+
+
+def _embedded_context_synthesis_complete(conn: sqlite3.Connection, slug: str) -> bool:
+    """Generation-fresh completion when embedded media implies batch-owned synthesis."""
+    anchor = _embedded_media_landing_anchor(conn, slug)
+    if anchor:
+        if _synthesize_terminal_after_anchor(conn, slug, anchor):
+            return True
+        if _parent_terminal_after_anchor(conn, slug, anchor):
+            return True
+        return False
+    if has_completed_synthesize_task(conn, slug):
+        return True
+    return False
+
+
 def has_completed_parent_synthesis(
     conn: sqlite3.Connection,
     slug: str,
@@ -729,9 +787,13 @@ def has_completed_parent_synthesis(
     deferral = get_parent_media_deferral(conn, slug)
 
     if deferral is not None:
-        if _deferral_terminal_parent_fresh(conn, slug, deferral):
-            return True
+        media_anchor = _deferral_media_landing_anchor(conn, slug, deferral)
         if _deferral_synthesize_terminal_fresh(conn, slug, deferral):
+            return True
+        if (
+            _deferral_terminal_parent_fresh(conn, slug, deferral)
+            and _parent_terminal_after_anchor(conn, slug, media_anchor)
+        ):
             return True
         if count_pending_media(conn, slug) > 0:
             return False
@@ -753,26 +815,22 @@ def has_completed_parent_synthesis(
             return False
         if int(deferral.get("media_changed") or 0):
             return False
-        media_anchor = _deferral_media_landing_anchor(conn, slug, deferral)
         if _parent_terminal_after_anchor(conn, slug, media_anchor):
             return True
         if _synthesize_terminal_after_anchor(conn, slug, media_anchor):
             return True
         if _has_stale_deferral_synthesize_terminal(conn, slug, media_anchor):
             return False
-        if raw_path is not None and raw_path.is_file():
-            note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
-            if note.is_file() and note.stat().st_mtime >= raw_path.stat().st_mtime:
-                return True
+        if int(deferral.get("expected_total") or 0) == 0:
+            if raw_path.is_file():
+                if note.stat().st_mtime >= raw_path.stat().st_mtime:
+                    return True
         return False
 
-    row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        "AND status IN ('done', 'completed') "
-        "LIMIT 1",
-        (slug,),
-    ).fetchone()
-    if row is not None:
+    if _slug_has_embedded_media_context(conn, slug, temp_dir):
+        return _embedded_context_synthesis_complete(conn, slug)
+
+    if _non_superseded_parent_terminal(conn, slug):
         return True
     if has_completed_synthesize_task(conn, slug):
         return True

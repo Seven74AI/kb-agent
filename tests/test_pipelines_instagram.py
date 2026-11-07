@@ -519,6 +519,24 @@ class TestCleanup:
         for f in files:
             assert not Path(config.temp_dir / f).exists()
 
+    def test_cleanup_removes_ig_comment_artifacts(self, config, reel_task):
+        slug = reel_task["slug"]
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        comment_json = Path(config.temp_dir) / f"{slug}_ig_comment.json"
+        comment_json.write_text("{}")
+        conf = cookie_dir / ".curl-ig-comment-42.conf"
+        conf.write_text('header = "Cookie: sessionid=x"\n')
+        task = {
+            **reel_task,
+            "source_url": f"https://www.instagram.com/reel/X/?comment_id=42",
+        }
+        result = step_ig_cleanup(task, config)
+        assert "ig_comment.json" in result
+        assert conf.name in result
+        assert not comment_json.exists()
+        assert not conf.exists()
+
 
 # ── MinIO ────────────────────────────────────────────────────────────────────
 
@@ -701,9 +719,7 @@ class TestIgCommentFetchSecurity:
         assert "-b" not in cmd
         assert str(cookie_file) not in argv_str
         conf_path = config.cookie_dir / ".curl-ig-comment-999888777.conf"
-        assert conf_path.is_file()
-        assert secret_session in conf_path.read_text(encoding="utf-8")
-        assert oct(conf_path.stat().st_mode)[-3:] == "600"
+        assert not conf_path.exists(), "credential sidecar must not persist after fetch"
 
     @patch("agent.pipelines.instagram.subprocess.run")
     def test_fetch_ig_comment_rejects_path_traversal_comment_id(
@@ -757,8 +773,7 @@ class TestIgCommentFetchSecurity:
             config,
         )
         conf_path = cookie_dir / ".curl-ig-comment-42.conf"
-        assert conf_path.is_file()
-        assert conf_path.resolve().is_relative_to(cookie_dir.resolve())
+        assert not conf_path.exists(), "credential sidecar must not persist after fetch"
 
     @patch("agent.pipelines.instagram.subprocess.run")
     def test_fetch_ig_comment_paginates_past_first_page(self, mock_run, config):
@@ -796,8 +811,11 @@ class TestIgCommentFetchSecurity:
         info = _fetch_ig_comment(url, config)
         assert info["comment_text"] == "deep comment"
         assert mock_run.call_count == 2
-        conf_text = (cookie_dir / f".curl-ig-comment-{target_pk}.conf").read_text()
-        assert "min_id=cursor-page-2" in conf_text
+        conf_path = cookie_dir / f".curl-ig-comment-{target_pk}.conf"
+        assert not conf_path.exists(), "credential sidecar must not persist after fetch"
+        second_cmd = mock_run.call_args_list[1][0][0]
+        assert "--config" in second_cmd
+        assert str(conf_path) == second_cmd[second_cmd.index("--config") + 1]
 
     @patch("agent.pipelines.instagram.subprocess.run")
     def test_fetch_ig_comment_missing_after_pages_pauses(self, mock_run, config):
