@@ -278,6 +278,26 @@ async def test_execute_task_step_error_logs_sanitized(consumer, agent_db, logs_d
 
 
 @pytest.mark.asyncio
+async def test_execute_task_stdout_traceback_scrubbed(capsys, consumer, agent_db):
+    """Process stdout must not print full tracebacks with absolute paths."""
+    task_id = create_task(agent_db, "https://example.com", "web", "cap_slug", ["cap_step"])
+
+    def cap_step(task, cfg):
+        raise RuntimeError("failed at /root/kb-agent/secret/file.txt")
+
+    register_step("cap_step", cap_step, "fail")
+    await consumer._execute_task({"id": task_id, "content_type": "web"})
+
+    captured = capsys.readouterr().out
+    assert "Traceback (most recent call last)" not in captured
+    assert "/root/kb-agent" not in captured
+    assert "RuntimeError" in captured
+    assert "[path]" in captured
+
+    del STEP_REGISTRY["cap_step"]
+
+
+@pytest.mark.asyncio
 async def test_execute_task_unhandled_exception_logs_sanitized(consumer, agent_db, logs_db):
     """Unhandled exceptions in step_logs must not persist full tracebacks."""
     task_id = create_task(agent_db, "https://example.com", "web", "uh_slug", ["uh_step"])

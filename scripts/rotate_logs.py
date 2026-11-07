@@ -15,11 +15,19 @@ Retention: indefinite on MinIO, 30 days active in DB.
 
 import gzip
 import json
+import re
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent.notify import sanitize_visible_message
+
+_OBVIOUS_SECRET_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*\S+"
+)
+_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -28,6 +36,31 @@ MINIO_BUCKET = "kb-agent-archive"
 MINIO_PREFIX = "logs"
 RETENTION_DAYS = 30
 BATCH_SIZE = 500
+
+
+def _redact_obvious_secrets(text: str) -> str:
+    if not text:
+        return text
+    text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _OBVIOUS_SECRET_RE.sub("[credential redacted]", text)
+    return text
+
+
+def _sanitize_llm_text(text: str) -> str:
+    return _redact_obvious_secrets(sanitize_visible_message(text or ""))
+
+
+def sanitize_archive_record(record: dict) -> dict:
+    """Redact sensitive fields before writing archived log rows to MinIO."""
+    out = dict(record)
+    table = out.get("_table")
+    if table == "step_logs" and out.get("content"):
+        out["content"] = sanitize_visible_message(out["content"])
+    elif table == "llm_archives":
+        for key in ("prompt", "response"):
+            if out.get(key):
+                out[key] = _sanitize_llm_text(out[key])
+    return out
 
 
 def dump_rows(conn: sqlite3.Connection, table: str, columns: list[str],
@@ -142,7 +175,8 @@ def main():
     try:
         with open(tmp_json, "w") as f:
             for record in step_records + llm_records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                safe = sanitize_archive_record(record)
+                f.write(json.dumps(safe, ensure_ascii=False) + "\n")
 
         # Gzip
         with open(tmp_json, "rb") as f_in:

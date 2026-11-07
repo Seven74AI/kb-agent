@@ -96,6 +96,17 @@ def test_get_pipeline_names_unknown_returns_none():
     assert get_pipeline_names("nonexistent_typo_xyz", "also_missing") is None
 
 
+def test_bare_substack_pipeline_matches_substack_text_embedded_media():
+    """Bare content_type=substack (no subtype detect) must still run embedded media enqueue."""
+    from agent.pipelines import get_pipeline_names
+
+    substack = get_pipeline_names("substack", "")
+    substack_text = get_pipeline_names("substack_text", "")
+    assert substack is not None
+    assert "substack_embedded_media" in substack
+    assert substack == substack_text
+
+
 def test_slugify_instagram_comment_preserves_comment_id():
     url = "https://www.instagram.com/reel/ABC123/?comment_id=999888777"
     a = slugify(url, content_type="instagram_comment")

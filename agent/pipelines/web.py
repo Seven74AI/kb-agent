@@ -566,6 +566,12 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                 error_type=ErrorType.PAUSE,
                 step_name="substack_embedded_media",
             )
+        if batch_finished:
+            raise StepError(
+                "batch synthesis dispatched or completed — parent must not re-enter synthesis",
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
         return "no embedded media"
 
     manifest_path = Path(config.temp_dir, f"{slug}_media.json")
@@ -699,19 +705,38 @@ def _parent_article_deferred_to_batch(task: dict, config: Config, conn) -> bool:
     return int(sibling_count) > 0
 
 
-def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> None:
-    """Parent Substack tasks must not inline-synthesize when batch owns the slug."""
+def _supersede_deferred_parent_task(conn, parent_slug: str) -> None:
+    """Mark the original Substack parent ingestion task terminal after batch synthesis."""
+    reason = "deferred synthesis dispatched; parent ingestion superseded"
+    with conn:
+        conn.execute(
+            """
+            UPDATE tasks SET status = 'completed', error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type NOT GLOB '*_synthesize'
+            AND status IN ('paused', 'pending', 'in_progress')
+            """,
+            (reason, parent_slug),
+        )
+
+
+def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
+    """Parent Substack tasks must not inline-synthesize when batch owns the slug.
+
+    Returns True when synthesis already finished and the caller must skip the LLM.
+    """
     content_type = task.get("content_type", "")
     if content_type not in _SUBSTACK_PARENT_CONTENT_TYPES:
-        return
+        return False
     from agent.db import AGENT_SCHEMA, has_completed_parent_synthesis, init_db
 
+    slug = task.get("slug", task["id"][:8])
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
+        if has_completed_parent_synthesis(conn, slug, vault_path=config.vault_path):
+            _supersede_deferred_parent_task(conn, slug)
+            return True
         if not _parent_article_deferred_to_batch(task, config, conn):
-            return
-        if has_completed_parent_synthesis(conn, task.get("slug", task["id"][:8]), vault_path=config.vault_path):
-            return
+            return False
         raise StepError(
             "deferred to batch synthesis — parent must not inline synthesize",
             error_type=ErrorType.PAUSE,
@@ -736,7 +761,8 @@ def step_synthesize_web(task: dict, config: Config) -> str:
         Path to the generated note file.
     """
     slug = task.get("slug", task["id"][:8])
-    _guard_parent_deferred_batch_synthesis(task, config)
+    if _guard_parent_deferred_batch_synthesis(task, config):
+        return "synthesis already completed"
     source_url = task.get("source_url", "")
     source_path = Path(config.temp_dir) / f"{slug}_raw.md"
 
@@ -1203,6 +1229,7 @@ register_pipeline("web", [
 register_pipeline("substack", [
     Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
     Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
+    Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),

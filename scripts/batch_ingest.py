@@ -580,6 +580,8 @@ def main() -> None:
         lock_held = True
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
         recover_stale_ingest(conn)
+        # Requeue failed rows before claim; duplicate ``queue_ingest`` revive
+        # accounts for its own attempt increment on embedded siblings.
         n_retry = recover_failed_media(conn)
         if n_retry:
             print(f"Requeued {n_retry} failed media item(s) for retry.")

@@ -463,7 +463,6 @@ def remove_ingest_item():
         refresh_parent_media_manifest(conn, config, parent_slug)
     conn.close()
     return redirect(url_for("dashboard"))
-    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/dashboard")

@@ -41,9 +41,6 @@ from agent.pipelines.video_common import (
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# yt-dlp cookie file — config.cookie_dir (uploaded via the kba.sevend.io dashboard)
-YT_COOKIES_FILE = "/root/kb-agent/cookies/yt_cookies.txt"
-
 # yt-dlp binary — resolved explicitly so it works regardless of PATH (the cron
 # and MCP run with a system PATH that lacks the py3.11 venv's bin).
 YTDLP_BIN = shutil.which("yt-dlp") or "/usr/local/lib/hermes-agent/venv/bin/yt-dlp"
@@ -66,6 +63,11 @@ YOUTUBE_DENSITY_MIN = VIDEO_DENSITY_MIN
 CHARS_PER_TOKEN = 4
 
 
+def _youtube_cookies_path(config: Config) -> Path:
+    """Netscape cookie file for yt-dlp (uploaded via kba.sevend.io dashboard)."""
+    return Path(config.cookie_dir) / "yt_cookies.txt"
+
+
 def _download_artifact_stem(task: dict) -> str:
     """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
     if task.get("_batch_ingest"):
@@ -75,7 +77,7 @@ def _download_artifact_stem(task: dict) -> str:
 
 # ── Cookie Pre-flight ─────────────────────────────────────────────────────────
 
-def _validate_cookies() -> None:
+def _validate_cookies(config: Config) -> None:
     """Validate YouTube cookies before any yt-dlp operation.
 
     Tier 1: Check cookie file for required auth tokens.
@@ -84,13 +86,16 @@ def _validate_cookies() -> None:
     Raises:
         StepError(PAUSE): If cookies are invalid or missing.
     """
-    cookie_path = Path(YT_COOKIES_FILE)
+    cookie_path = _youtube_cookies_path(config)
     if not cookie_path.exists():
         raise StepError(
-            f"YouTube cookies not found: {YT_COOKIES_FILE}",
+            f"YouTube cookies not found: {cookie_path}",
             error_type=ErrorType.PAUSE,
             step_name="cookie_check",
-            details="Upload fresh cookies via the kba.sevend.io dashboard (saves to /root/kb-agent/cookies/yt_cookies.txt)",
+            details=(
+                "Upload fresh cookies via the kba.sevend.io dashboard "
+                f"(saves to {cookie_path})"
+            ),
         )
 
     cookies_text = cookie_path.read_text()
@@ -134,9 +139,10 @@ def step_extract_metadata(task: dict, config: Config) -> str:
         StepError: On cookie validation failure, PAUSE on fingerprinting,
                    FAIL on 404/private video.
     """
-    _validate_cookies()
+    _validate_cookies(config)
 
     url = task["source_url"]
+    cookies_file = str(_youtube_cookies_path(config))
     slug = task.get("slug", task["id"][:8])
     stem = _download_artifact_stem(task)
     _assert_fetch_url_allowed(url)
@@ -145,7 +151,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", YT_COOKIES_FILE,
+            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -199,7 +205,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     chapter_result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", YT_COOKIES_FILE,
+            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -229,7 +235,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     desc_result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", YT_COOKIES_FILE,
+            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -274,6 +280,7 @@ def step_download_video(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
     stem = _download_artifact_stem(task)
+    cookies_file = str(_youtube_cookies_path(config))
     output_path = Path(config.temp_dir) / f"{stem}.mp4"
     try:
         _assert_fetch_url_allowed(url)
@@ -287,7 +294,7 @@ def step_download_video(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", YT_COOKIES_FILE,
+            "--cookies", cookies_file,
             "--js-runtimes", "node",
             "--remote-components", "ejs:github",
             "--no-update",
@@ -305,7 +312,7 @@ def step_download_video(task: dict, config: Config) -> str:
         result = subprocess.run(
             [
                 YTDLP_BIN,
-                "--cookies", YT_COOKIES_FILE,
+                "--cookies", cookies_file,
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
                 "--no-update",

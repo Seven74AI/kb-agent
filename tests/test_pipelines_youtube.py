@@ -35,7 +35,7 @@ from agent.pipelines.youtube import (
     step_quality_gate,
     step_minio_upload,
     step_git_push,
-    YT_COOKIES_FILE,
+    _youtube_cookies_path,
     YOUTUBE_DENSITY_MIN,
 )
 
@@ -138,31 +138,64 @@ def sample_merged_transcript(config, task_dict, sample_diarization, sample_trans
 
 # ── _validate_cookies tests ──────────────────────────────────────────────────
 
-def test_validate_cookies_missing():
-    """Test when cookies file doesn't exist."""
-    with patch("agent.pipelines.youtube.YT_COOKIES_FILE", "/nonexistent/cookies.txt"):
-        with pytest.raises(StepError, match="cookies not found"):
-            _validate_cookies()
+def test_validate_cookies_missing(config):
+    """Test when cookies file doesn't exist under config.cookie_dir."""
+    with pytest.raises(StepError, match="cookies not found"):
+        _validate_cookies(config)
 
 
-def test_validate_cookies_missing_tokens(tmp_path):
+def test_validate_cookies_missing_tokens(config):
     """Test when cookies file exists but lacks required tokens."""
-    bad_cookies = tmp_path / "bad_cookies.txt"
-    bad_cookies.write_text("# Empty cookies file\n.no_tokens_here\n")
-    
-    with patch("agent.pipelines.youtube.YT_COOKIES_FILE", str(bad_cookies)):
-        with pytest.raises(StepError, match="missing required tokens"):
-            _validate_cookies()
+    cookie_dir = config.cookie_dir
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    bad = cookie_dir / "yt_cookies.txt"
+    bad.write_text("# Empty cookies file\n.no_tokens_here\n")
+
+    with pytest.raises(StepError, match="missing required tokens"):
+        _validate_cookies(config)
 
 
-def test_validate_cookies_valid(tmp_path):
-    """Test with valid cookie tokens."""
-    good_cookies = tmp_path / "good_cookies.txt"
-    good_cookies.write_text("# Netscape HTTP Cookie File\nLOGIN_INFO\ttrue\nSAPISID\t12345\n3PSID\t67890\n")
-    
-    with patch("agent.pipelines.youtube.YT_COOKIES_FILE", str(good_cookies)):
-        # Should not raise
-        _validate_cookies()
+def test_validate_cookies_valid(config):
+    """Test with valid cookie tokens in config.cookie_dir."""
+    cookie_dir = config.cookie_dir
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    good = cookie_dir / "yt_cookies.txt"
+    good.write_text(
+        "# Netscape HTTP Cookie File\nLOGIN_INFO\ttrue\nSAPISID\t12345\n3PSID\t67890\n"
+    )
+    _validate_cookies(config)
+
+
+def test_youtube_cookies_path_uses_config_cookie_dir(config):
+    expected = config.cookie_dir / "yt_cookies.txt"
+    assert _youtube_cookies_path(config) == expected
+
+
+def test_step_extract_metadata_uses_config_cookie_path(config, task_dict):
+    """yt-dlp --cookies must point at config.cookie_dir/yt_cookies.txt."""
+    cookie_dir = config.cookie_dir
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    (cookie_dir / "yt_cookies.txt").write_text(
+        "LOGIN_INFO\ttrue\nSAPISID\t12345\n3PSID\t67890\n"
+    )
+
+    mock_stdout = "Test Title||Test Channel||120||10000||20260101"
+    cookies_arg = str(_youtube_cookies_path(config))
+
+    with patch("subprocess.run") as mock_run:
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if "--cookies" in cmd:
+                assert cookies_arg in cmd
+            if "--print" in cmd and "chapters" in " ".join(cmd):
+                return MagicMock(returncode=0, stdout="[]")
+            if "--print" in cmd and "description" in " ".join(cmd):
+                return MagicMock(returncode=0, stdout="desc")
+            return MagicMock(returncode=0, stdout=mock_stdout)
+
+        mock_run.side_effect = side_effect
+        step_extract_metadata(task_dict, config)
 
 
 # ── Metadata extraction tests ────────────────────────────────────────────────
