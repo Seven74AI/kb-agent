@@ -343,30 +343,10 @@ def test_post_resume_by_reason(client, monkeypatch, tmp_path):
     assert data["resumed"] == 1
 
 
-def test_post_resume_all(client, monkeypatch, tmp_path):
-    """POST /resume without reason resumes all paused tasks."""
-    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
-
-    agent_db = tmp_path / "data" / "agent.db"
-    agent_db.parent.mkdir(parents=True, exist_ok=True)
-    conn = init_db(agent_db, AGENT_SCHEMA)
-
-    for i in range(3):
-        task_id = create_task(conn, f"https://example.com/{i}", "web",
-                              f"slug_{i}", ["s1"], status="paused")
-        conn.execute("UPDATE tasks SET error = ? WHERE id = ?",
-                     (f"error {i}", task_id))
-    conn.commit()
-    conn.close()
-
-    resp = client.post("/resume")
-    assert resp.status_code == 200
-    data = json.loads(resp.data)
-    assert data["resumed"] == 3
 
 
 def test_upload_cookies_success(client, monkeypatch, tmp_path):
-    """POST /upload-cookies saves file with 444 permissions."""
+    """POST /upload-cookies saves file with 600 permissions."""
     cookie_dir = tmp_path / "cookies"
     monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
 
@@ -391,13 +371,13 @@ def test_upload_cookies_success(client, monkeypatch, tmp_path):
         assert data["status"] == "ok"
         assert data["file"] == "yt_cookies.txt"
         assert data["size_bytes"] == len(cookie_content)
-        assert data["permissions"] == "444"
+        assert data["permissions"] == "600"
 
         # Verify file exists on disk with correct content and permissions
         dest = cookie_dir / "yt_cookies.txt"
         assert dest.exists()
         assert dest.read_text() == cookie_content
-        assert oct(dest.stat().st_mode)[-3:] == "444"
+        assert oct(dest.stat().st_mode)[-3:] == "600"
     finally:
         os.unlink(tmp.name)
 

@@ -13,6 +13,7 @@ def test_search_uses_double_dash_before_pattern(tmp_path):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         search_notes("-injected-pattern", vault)
         argv = mock_run.call_args[0][0]
+        assert argv[1] == "-rlF"
         assert "--" in argv
         # the pattern follows --, so a leading dash is treated literally, not as an option
         assert argv[argv.index("--") + 1] == "-injected-pattern"
