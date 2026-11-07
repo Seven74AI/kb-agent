@@ -244,6 +244,8 @@ async def test_execute_task_fail_persists_sanitized_task_and_step_output(consume
     assert len(tasks[0]["error"] or "") <= 2000
     assert "Traceback" not in (tasks[0]["error"] or "")
     assert "yt-dlp: cookiefile" in (tasks[0]["error"] or "")
+    assert "/root/kb-agent" not in (tasks[0]["error"] or "")
+    assert "[path]" in (tasks[0]["error"] or "")
 
     steps = get_task_steps(agent_db, task_id)
     assert steps[0]["status"] == "failed"

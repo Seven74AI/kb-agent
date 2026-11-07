@@ -16,6 +16,7 @@ from agent.db import (
     count_pending_media,
     create_task,
     find_active_task,
+    has_active_synthesize_task,
     get_task_steps,
     init_db,
     queue_ingest,
@@ -264,7 +265,7 @@ def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
     ).fetchone()
     assert row["status"] == "queued"
     assert row["error"] is None
-    assert row["attempts"] == 2
+    assert row["attempts"] == 1
 
 
 def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
@@ -286,6 +287,92 @@ def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
     row = conn.execute("SELECT status, error FROM ingest_queue WHERE url=?", (url,)).fetchone()
     assert row["status"] == "failed"
     assert row["error"] == "gave up"
+
+
+def test_queue_ingest_duplicate_revive_does_not_increment_attempts(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://example.com/revive.png"
+    queue_ingest(
+        conn, url, "substack_image", "img_rev",
+        parent_slug="article", media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='ocr failed', attempts=1 WHERE url=?",
+        (url,),
+    )
+    conn.commit()
+
+    queue_ingest(
+        conn, url, "substack_image", "img_rev",
+        parent_slug="article", media_kind="image",
+    )
+    assert recover_failed_media(conn, max_attempts=3) == 0
+    row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url=?", (url,)).fetchone()
+    assert row["status"] == "queued"
+    assert row["attempts"] == 1
+
+    conn.execute("UPDATE ingest_queue SET status='failed' WHERE url=?", (url,))
+    conn.commit()
+    assert recover_failed_media(conn, max_attempts=3) == 1
+    row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url=?", (url,)).fetchone()
+    assert row["status"] == "queued"
+    assert row["attempts"] == 2
+
+
+def test_has_active_synthesize_task_excludes_failed(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "parent_slug"
+    create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="failed",
+    )
+    assert has_active_synthesize_task(conn, slug) is False
+    create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="pending",
+    )
+    assert has_active_synthesize_task(conn, slug) is True
+
+
+def test_retry_task_skips_when_synthesize_sibling_active(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "deferred_parent"
+    parent_id = create_task(
+        conn,
+        "https://author.substack.com/p/post",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("awaiting media: 1 images enqueued", parent_id),
+    )
+    create_task(
+        conn,
+        "https://author.substack.com/p/post",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="in_progress",
+    )
+    conn.commit()
+
+    assert retry_task(conn, parent_id) is False
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (parent_id,)).fetchone()[0] == "paused"
 
 
 def test_find_active_task_synthesize_slug_wide(tmp_path):
@@ -730,7 +817,7 @@ def test_process_videos_upload_failure_sets_failed(tmp_path, monkeypatch):
         if "batch_transcribe.py" in cmd[1]:
             out_dir = Path(cmd[cmd.index("--out-dir") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "yt_up.json").write_text('{"segments": [{"text": "hello"}]}', encoding="utf-8")
+            (out_dir / f"{q['id']}.json").write_text('{"segments": [{"text": "hello"}]}', encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
         return subprocess.run(cmd, **kwargs)
 
@@ -835,7 +922,7 @@ def test_embedded_videos_empty_transcript_sets_failed(tmp_path, monkeypatch):
         if "batch_transcribe.py" in cmd[1]:
             out_dir = Path(cmd[cmd.index("--out-dir") + 1])
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "yt_empty.json").write_text('{"segments": [{"text": "  "}]}', encoding="utf-8")
+            (out_dir / f"{q['id']}.json").write_text('{"segments": [{"text": "  "}]}', encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return subprocess.run(cmd, **kwargs)
 

@@ -378,7 +378,7 @@ class Consumer:
                 self._log_error(
                     task_id,
                     step_name,
-                    f"StepError({error_type}): {error_msg}\n{tb}",
+                    f"StepError({error_type}): {error_msg}",
                 )
 
                 if error_type == "fail":
@@ -427,14 +427,14 @@ class Consumer:
                     f"[consumer] Step '{step_name}' unhandled traceback:\n{tb}",
                     flush=True,
                 )
-                self._log_error(
-                    task_id,
-                    step_name,
-                    f"Unhandled exception:\n{tb}",
-                )
                 # Fall back to step's on_error setting
                 _, default_on_error = STEP_REGISTRY.get(step_name, (None, "retry"))
                 error_msg = sanitize_visible_message(f"{type(e).__name__}: {e}")
+                self._log_error(
+                    task_id,
+                    step_name,
+                    f"Unhandled exception: {error_msg}",
+                )
 
                 if default_on_error == "fail":
                     print(f"[consumer] Step '{step_name}' FAILED (unexpected): {error_msg}")

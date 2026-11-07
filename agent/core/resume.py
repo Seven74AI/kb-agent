@@ -2,7 +2,7 @@
 
 import sqlite3
 
-from agent.db import resume_tasks_by_reason
+from agent.db import has_active_synthesize_task, resume_tasks_by_reason
 
 
 class ResumeReasonError(ValueError):
@@ -47,10 +47,12 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
         True if the task was retried, False if not found or wrong status.
     """
     row = agent_conn.execute(
-        "SELECT status, error FROM tasks WHERE id = ?",
+        "SELECT status, error, slug FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None or row[0] not in ("failed", "paused"):
+        return False
+    if row[2] and has_active_synthesize_task(agent_conn, row[2]):
         return False
 
     with agent_conn:
