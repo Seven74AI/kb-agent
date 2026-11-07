@@ -2,30 +2,39 @@
 """#101: migrate note media URLs -> object keys (idempotent).
 
 Strips the MinIO host prefix from `source_files` (and any other media field)
-so notes reference portable keys (videos/x.mp4) instead of the Tailscale
+so notes reference portable keys (videos/x.mp4) instead of a deployment-specific
 host URL. Dry-run by default; pass --apply to write.
 
 Re-runnable: after migration the prefix is gone, so a second pass is a no-op.
 """
 
+import os
 import sys
 from pathlib import Path
 
-VAULT = Path("/root/Documents/Obsidian Vault")
+_vault_env = (os.environ.get("KB_VAULT_PATH") or "").strip()
+VAULT = Path(_vault_env) if _vault_env else Path()
 KB = VAULT / "Knowledge base"
 
 # media hosts whose "<host>/knowledge-base/" prefix is stripped to a bare key.
-PREFIXES = [
-    "http://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/",
-    "https://vmi3304846.tail5c02a1.ts.net:9000/knowledge-base/",
-    "http://media.sevend.io/knowledge-base/",
-    "https://media.sevend.io/knowledge-base/",
+_PREFIX_DEFAULTS = (
+    "http://127.0.0.1:9000/knowledge-base/",
+    "https://127.0.0.1:9000/knowledge-base/",
+)
+_extra = [
+    p.strip()
+    for p in (os.environ.get("KB_MIGRATE_MEDIA_PREFIXES") or "").split(",")
+    if p.strip()
 ]
+PREFIXES = list(_PREFIX_DEFAULTS) + _extra
 
 APPLY = "--apply" in sys.argv
 
 
 def main() -> int:
+    if not _vault_env or not KB.is_dir():
+        print("KB_VAULT_PATH must point at an Obsidian vault (Knowledge base/ missing)", file=sys.stderr)
+        return 1
     total = 0
     changed_notes = []
     for p in sorted(KB.rglob("*.md")):

@@ -79,7 +79,11 @@ def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
     xdg_root = Path(config.temp_dir) / "ytdlp_xdg"
     conf_dir = xdg_root / "yt-dlp"
     conf_dir.mkdir(parents=True, exist_ok=True)
-    (conf_dir / "config").write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    os.chmod(xdg_root, 0o700)
+    os.chmod(conf_dir, 0o700)
+    conf_path = conf_dir / "config"
+    conf_path.write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    os.chmod(conf_path, 0o600)
     env = os.environ.copy()
     env["XDG_CONFIG_HOME"] = str(xdg_root)
     return env
@@ -647,7 +651,7 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
 
     # Pass 1: Extract concepts
     concepts = _pass1_extract_concepts(
-        transcript_text, target_concepts, llm, slug,
+        transcript_text, target_concepts, llm, slug, config,
     )
 
     # Pass 2: Build full note
@@ -669,6 +673,7 @@ def _pass1_extract_concepts(
     target_range: tuple[int, int],
     llm: LLMClient,
     slug: str,
+    config: Config,
 ) -> str:
     """Pass 1: Extract key concepts from transcript.
 
@@ -729,11 +734,14 @@ Respond with ONLY valid JSON:
     try:
         concepts = json.loads(concepts_json)
     except json.JSONDecodeError:
-        # Save raw response for debugging
-        debug_path = Path(f"/tmp/{slug}_pass1_debug.txt")
-        debug_path.write_text(content)
+        debug_root = Path(config.temp_dir) / "pass1_debug"
+        debug_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(debug_root, 0o700)
+        debug_path = debug_root / f"{slug}_pass1_debug.txt"
+        debug_path.write_text(content, encoding="utf-8")
+        os.chmod(debug_path, 0o600)
         raise StepError(
-            f"Pass 1 concepts JSON parse failed. Raw output saved to {debug_path}",
+            f"Pass 1 concepts JSON parse failed. Raw output saved to {debug_path.name}",
             error_type=ErrorType.RETRY,
             step_name="synthesize_youtube_pass1",
         )

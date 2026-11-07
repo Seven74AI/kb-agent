@@ -62,7 +62,11 @@ def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
     xdg_root = Path(config.temp_dir) / "ytdlp_xdg"
     conf_dir = xdg_root / "yt-dlp"
     conf_dir.mkdir(parents=True, exist_ok=True)
-    (conf_dir / "config").write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    os.chmod(xdg_root, 0o700)
+    os.chmod(conf_dir, 0o700)
+    conf_path = conf_dir / "config"
+    conf_path.write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    os.chmod(conf_path, 0o600)
     env = os.environ.copy()
     env["XDG_CONFIG_HOME"] = str(xdg_root)
     return env

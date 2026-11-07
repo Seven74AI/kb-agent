@@ -8,8 +8,6 @@ import os
 import re
 import subprocess
 import sys
-import urllib.request
-
 sys.path.insert(0, "/root/kb-agent")
 from agent.config import load_config  # noqa: E402
 from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
@@ -48,8 +46,21 @@ def sh(cmd, **kw):
 
 def fetch(url, headers=None):
     _assert_fetch_url_allowed(url)
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
-    return urllib.request.urlopen(req, timeout=40).read().decode("utf-8", "replace")
+    hdrs = headers or {"User-Agent": "Mozilla/5.0"}
+    curl_headers = [
+        arg
+        for name, value in hdrs.items()
+        for arg in ("-H", f"{name}: {value}")
+    ]
+    cmd = [
+        "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "40",
+        *curl_headers,
+        url,
+    ]
+    r = sh(cmd, timeout=45)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"curl failed ({r.returncode})")
+    return r.stdout
 
 
 def bunny_uuid(url_slug):

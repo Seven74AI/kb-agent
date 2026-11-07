@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import subprocess
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -324,13 +325,17 @@ def poll_all_due_sources(
 
 
 def default_fetch_html(url: str) -> str:
-    """Fetch page HTML (stdlib). Used by scheduler and CLI."""
-    import urllib.request
-
+    """Fetch page HTML via curl (--max-redirs 0). Used by scheduler and CLI."""
     _assert_fetch_url_allowed(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "kb-agent-watch/1.0"})
-    with urllib.request.urlopen(req, timeout=40) as resp:
-        return resp.read().decode("utf-8", "replace")
+    cmd = [
+        "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "40",
+        "-H", "User-Agent: kb-agent-watch/1.0",
+        url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"curl failed ({result.returncode})")
+    return result.stdout
 
 
 VIDEO_CONTENT_TYPES = {

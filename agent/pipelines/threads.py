@@ -18,6 +18,7 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
@@ -60,6 +61,50 @@ THREADS_MAX_POSTS_PER_SESSION = 3
 
 # Density target for video notes
 THREADS_VIDEO_DENSITY_MIN = 100
+
+# Meta/Threads video_versions URLs are served from Instagram CDN edge hosts only.
+_THREADS_VIDEO_CDN_HOST_SUFFIXES = (
+    ".fbcdn.net",
+    ".cdninstagram.com",
+    ".threads.net",
+    ".instagram.com",
+)
+_THREADS_VIDEO_CDN_EXACT_HOSTS = ("fbcdn.net", "cdninstagram.com")
+
+
+def _assert_threads_video_cdn_url_allowed(url: str) -> None:
+    """Reject video CDN URLs outside Meta/Threads Instagram CDN hosts."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise StepError(
+            "Threads video CDN URL must use http or https",
+            error_type=ErrorType.FAIL,
+            step_name="extract_video",
+        )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise StepError(
+            "Threads video CDN URL must include a host",
+            error_type=ErrorType.FAIL,
+            step_name="extract_video",
+        )
+    allowed = host in _THREADS_VIDEO_CDN_EXACT_HOSTS or any(
+        host.endswith(suffix) for suffix in _THREADS_VIDEO_CDN_HOST_SUFFIXES
+    )
+    if not allowed:
+        raise StepError(
+            f"Threads video CDN host not allowlisted: {host}",
+            error_type=ErrorType.FAIL,
+            step_name="extract_video",
+        )
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="extract_video",
+        ) from exc
 
 
 def _download_artifact_stem(task: dict) -> str:
@@ -546,14 +591,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
     else:
         output_path = Path(config.temp_dir) / f"{stem}_threads_video.mp4"
 
-    try:
-        _assert_fetch_url_allowed(video_url)
-    except ValueError as exc:
-        raise StepError(
-            str(exc),
-            error_type=ErrorType.FAIL,
-            step_name="extract_video",
-        ) from exc
+    _assert_threads_video_cdn_url_allowed(video_url)
 
     result = subprocess.run(
         [

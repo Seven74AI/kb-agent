@@ -939,6 +939,64 @@ def test_has_completed_parent_synthesis_vault_requires_deferral_reconciled(tmp_p
     assert get_parent_media_deferral(conn, slug)["expected_total"] == 2
     media_tmp = tmp_path / "media_tmp"
     _stamp_parent_raw_media(conn, media_tmp, slug)
+    note_path = note_dir / f"{slug}.md"
+    note_path.write_text("# stale after media\n", encoding="utf-8")
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is True
+
+
+def test_queue_ingest_rejects_javascript_scheme(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    with pytest.raises(ValueError, match="http or https"):
+        queue_ingest(conn, "javascript:alert(1)", "web", "jev")
+    assert conn.execute("SELECT COUNT(*) FROM ingest_queue").fetchone()[0] == 0
+
+
+def test_has_completed_parent_synthesis_vault_shortcut_needs_terminal_or_fresh_note(tmp_path):
+    import os
+    import time
+
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    slug = "vault_shortcut_gate"
+    vault = tmp_path / "vault"
+    url = "https://blog.substack.com/p/shortcut"
+    note_dir = vault / "Knowledge base" / "articles"
+    note_dir.mkdir(parents=True)
+    (note_dir / f"{slug}.md").write_text("# pre-existing\n", encoding="utf-8")
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/x.png", "substack_image", "x",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    conn.commit()
+    media_tmp = tmp_path / "media_tmp"
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    stale = time.time() - 3600
+    os.utime(note_dir / f"{slug}.md", (stale, stale))
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is False
+
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
     assert has_completed_parent_synthesis(
         conn, slug, vault_path=vault, temp_dir=media_tmp,
     ) is True

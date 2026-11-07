@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.config import Config
-from agent.notify import notify_task, sanitize_visible_message
+from agent.notify import notify_batch, notify_task, sanitize_visible_message
 
 
 def test_sanitize_visible_message_strips_traceback_frames():
@@ -58,6 +58,27 @@ def test_sanitize_visible_message_redacts_credential_shapes():
     assert "[credential redacted]" in out
     assert "Bearer [redacted]" in out
     assert "upstream failed" in out
+
+
+def test_notify_batch_sanitizes_causes():
+    cfg = Config(
+        kb_agent_dir=Path("/tmp/k"),
+        vault_path=Path("/tmp/v"),
+        temp_dir=Path("/tmp/t"),
+        cookie_dir=Path("/tmp/c"),
+        telegram_bot_token="tok",
+        telegram_chat_id="123",
+    )
+    causes = [
+        "download failed: cookie at /root/kb-agent/cookies/yt.txt",
+        "download failed: cookie at /root/kb-agent/cookies/yt.txt",
+    ]
+    with patch("agent.notify.send_message") as send:
+        notify_batch(cfg, failed=1, total=2, dispatched=0, causes=causes)
+        text = send.call_args[0][1]
+        assert "/root/kb-agent" not in text
+        assert "[path]" in text
+        assert "cause:" in text
 
 
 def test_notify_task_sanitizes_reason():

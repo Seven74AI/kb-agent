@@ -5,6 +5,9 @@ import os
 import re
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlparse
+
+_ALLOWED_INGEST_SCHEMES = frozenset({"http", "https"})
 
 # Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``).
 INGEST_MAX_MEDIA_ATTEMPTS = 3
@@ -364,6 +367,13 @@ def _reset_dispatched_parent_siblings_if_deferral_cycle(
         )
 
 
+def _reject_non_http_ingest_url(url: str) -> None:
+    """Ingest queue URLs are rendered as dashboard hrefs — only http(s) may be stored."""
+    scheme = urlparse((url or "").strip()).scheme.lower()
+    if scheme not in _ALLOWED_INGEST_SCHEMES:
+        raise ValueError("URL must use http or https")
+
+
 def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
                  status: str = "queued", tags=None, parent_slug=None, media_kind=None,
                  max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> tuple[str, bool]:
@@ -401,6 +411,7 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
                     (url, parent_key),
                 )
         return row["id"], False
+    _reject_non_http_ingest_url(url)
     import uuid
     ingest_id = str(uuid.uuid4())
     with conn:
@@ -695,7 +706,11 @@ def has_completed_parent_synthesis(
             return True
         if _has_stale_deferral_synthesize_terminal(conn, slug, media_anchor):
             return False
-        return True
+        if raw_path is not None and raw_path.is_file():
+            note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
+            if note.is_file() and note.stat().st_mtime >= raw_path.stat().st_mtime:
+                return True
+        return False
 
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
