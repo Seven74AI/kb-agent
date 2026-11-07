@@ -10,6 +10,7 @@ Reads the durable ingest_queue (status='queued'):
 Runs as a --no-agent cron. Idempotent: a link is marked 'dispatched' only after
 its task is created; a crash re-runs cleanly next night.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -35,6 +36,7 @@ sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
     claim_ingest_items,
+    count_pending_media,
     finish_batch_run,
     init_db,
     record_batch_run,
@@ -190,6 +192,133 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
     return failed, dispatched, causes
 
 
+def _append_to_parent(config, parent_slug: str, section: str, body: str) -> None:
+    """Append a media reading/transcript to the parent article's raw markdown."""
+    raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
+    if not raw_path.exists():
+        return
+    raw_path.write_text(
+        raw_path.read_text(encoding="utf-8") + f"\n\n## {section}\n\n{body.strip()}\n",
+        encoding="utf-8",
+    )
+
+
+def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
+    """Fire the parent's deferred synthesis once every sibling media item is done."""
+    if count_pending_media(conn, parent_slug) > 0:
+        return False
+    manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
+    if not manifest_path.exists():
+        return False
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dispatch_synthesize(
+        manifest["url"], config, conn,
+        content_type=f"{manifest['content_type']}_synthesize", slug=parent_slug,
+    )
+    print(f"  [deferred] {parent_slug}: all media done -> synthesize")
+    return True
+
+
+def _process_embedded_images(image_items: list[dict], config, conn, run_id: int) -> None:
+    """VLM-read embedded images in ONE Modal batch, append readings to parents."""
+    base = Path(config.temp_dir)
+    stage_dir = base / "batch_images" / f"run_{run_id}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = base / "batch_imgout" / f"run_{run_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    staged: list[tuple[dict, Path]] = []
+    for q in image_items:
+        ext = Path(q["url"].split("?")[0]).suffix.lower() or ".png"
+        dest = stage_dir / f"{q['id']}{ext}"
+        r = subprocess.run(
+            ["curl", "-s", "-L", "--max-time", "60", "-o", str(dest), q["url"]],
+            capture_output=True, text=True, timeout=70,
+        )
+        if r.returncode != 0 or not dest.exists() or dest.stat().st_size < 100:
+            update_ingest_status(conn, q["id"], "failed", error="image download failed")
+            continue
+        update_ingest_status(conn, q["id"], "staged")
+        staged.append((q, dest))
+    if not staged:
+        return
+
+    r = subprocess.run(
+        [sys.executable, str(Path(config.kb_agent_dir) / "scripts" / "batch_ocr.py"),
+         str(stage_dir), "--out-dir", str(out_dir)],
+        capture_output=True, text=True, timeout=3600,
+    )
+    print((r.stdout or r.stderr)[-800:])
+    if r.returncode != 0:
+        for q, _ in staged:
+            update_ingest_status(conn, q["id"], "queued", error="batch_ocr failed")
+        return
+
+    for q, dest in staged:
+        ocr_json = out_dir / f"{dest.name}.ocr.json"
+        if not ocr_json.exists():
+            update_ingest_status(conn, q["id"], "failed", error="no OCR output")
+            continue
+        reading = json.loads(ocr_json.read_text(encoding="utf-8")).get("reading", "")
+        if not reading.strip():
+            update_ingest_status(conn, q["id"], "failed", error="empty OCR reading")
+            continue
+        _append_to_parent(config, q["parent_slug"], "Image", reading)
+        update_ingest_status(conn, q["id"], "dispatched")
+        _maybe_dispatch_parent_synthesize(conn, config, q["parent_slug"])
+
+
+def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int) -> None:
+    """Download + batch-transcribe embedded videos, append transcripts to parents."""
+    base = Path(config.temp_dir)
+    run_tag = f"run_{run_id}"
+    staged: dict[str, list[tuple[dict, Path]]] = {}
+    for q in video_items:
+        vp, err = _download_video(q, config)
+        if vp is None:
+            update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
+            continue
+        ctype = q["content_type"]
+        bdir = base / "batch_videos" / run_tag / ctype
+        bdir.mkdir(parents=True, exist_ok=True)
+        dest = bdir / f"{q['slug']}{vp.suffix.lower()}"
+        shutil.copy(vp, dest)
+        update_ingest_status(conn, q["id"], "staged")
+        staged.setdefault(ctype, []).append((q, dest))
+    if not staged:
+        return
+
+    for ctype, items in staged.items():
+        bdir = base / "batch_videos" / run_tag / ctype
+        out_dir = base / "batch_out" / run_tag / ctype
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for q, _ in items:
+            update_ingest_status(conn, q["id"], "transcribing")
+        transcribe_script = Path(config.kb_agent_dir) / "scripts" / "batch_transcribe.py"
+        r = subprocess.run(
+            [sys.executable, str(transcribe_script),
+             str(bdir), "--out-dir", str(out_dir)] + TRANSCRIBE_ARGS.get(ctype, []),
+            capture_output=True, text=True, timeout=7200,
+        )
+        if r.returncode != 0:
+            for q, _ in items:
+                update_ingest_status(conn, q["id"], "queued", error=f"batch_transcribe failed ({r.returncode})")
+            continue
+        for q, vdest in items:
+            merged = out_dir / f"{q['slug']}.json"
+            if not merged.exists():
+                update_ingest_status(conn, q["id"], "failed", error="no merged transcript")
+                continue
+            segs = json.loads(merged.read_text(encoding="utf-8")).get("segments", [])
+            transcript = " ".join(s.get("text", "") for s in segs).strip()
+            if not transcript:
+                update_ingest_status(conn, q["id"], "failed", error="empty transcript")
+                continue
+            _append_to_parent(config, q["parent_slug"], "Video Transcript", transcript)
+            update_ingest_status(conn, q["id"], "dispatched")
+            _maybe_dispatch_parent_synthesize(conn, config, q["parent_slug"])
+
+
 def main() -> None:
     config = load_config()
     conn = None
@@ -210,9 +339,28 @@ def main() -> None:
 
         total = len(claimed)
         print(f"Claimed: {total} link(s)")
-        video = [q for q in claimed if q["content_type"] in VIDEO_DOWNLOAD_STEPS]
-        non_video = [q for q in claimed if q["content_type"] not in VIDEO_DOWNLOAD_STEPS]
+        media = [q for q in claimed if q.get("parent_slug")]
+        video = [q for q in claimed if q["content_type"] in VIDEO_DOWNLOAD_STEPS and not q.get("parent_slug")]
+        non_video = [q for q in claimed if q["content_type"] not in VIDEO_DOWNLOAD_STEPS and not q.get("parent_slug")]
 
+        # 1. embedded media (linked to a parent article) → append to parent's raw.md
+        img_items = [q for q in media if q.get("media_kind") == "image"]
+        vid_items = [q for q in media if q.get("media_kind") == "video"]
+        if img_items:
+            print(f"Reading {len(img_items)} embedded image(s) via Modal VLM...")
+            _process_embedded_images(img_items, config, conn, run_id)
+        if vid_items:
+            print(f"Processing {len(vid_items)} embedded video(s)...")
+            _process_embedded_videos(vid_items, config, conn, run_id)
+
+        # 2. standalone videos (existing flow)
+        if video:
+            vf, vd, vcauses = _process_videos(video, config, conn, run_id)
+            failed += vf
+            dispatched += vd
+            causes += vcauses
+
+        # 3. standalone non-video (existing flow)
         for q in non_video:
             r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
             status = r.get("status")
@@ -225,12 +373,6 @@ def main() -> None:
                 failed += 1
                 causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or status}")
                 print(f"  [failed] {q['slug']} -> {status}")
-
-        if video:
-            vf, vd, vcauses = _process_videos(video, config, conn, run_id)
-            failed += vf
-            dispatched += vd
-            causes += vcauses
 
         summary = "; ".join(dict.fromkeys(causes[:5])) or None
         finish_batch_run(conn, run_id, "failed" if failed else "ok", total, failed, dispatched, summary)

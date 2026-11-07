@@ -289,44 +289,55 @@ def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
     return ocr.stdout.strip()
 
 
-def _enqueue_embedded_media(youtube_ids: list[str], rumble_urls: list[str], config: Config, tags) -> int:
-    """Enqueue embedded YouTube + Rumble videos into the nightly batch queue.
+def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],
+                            rumble_urls: list[str], config: Config, tags) -> int:
+    """Enqueue embedded images + videos into the nightly batch, linked to the parent.
 
-    Deliberately does NOT download here — videos are batch-processed at night
-    (scripts/batch_ingest.py). Lazy-imports to avoid a circular import with
-    agent.pipelines (agent.core.submit imports this module).
+    Each media item carries ``parent_slug`` + ``media_kind`` so the nightly batch
+    appends its reading/transcript to the parent's raw markdown and fires the
+    parent's deferred synthesis once every sibling is done. Deliberately does NOT
+    download or OCR here — media is batch-processed at night (scripts/batch_ingest.py).
+    Lazy-imports to avoid a circular import with agent.pipelines.
     """
-    if not youtube_ids and not rumble_urls:
+    if not images and not youtube_ids and not rumble_urls:
         return 0
     from agent.core.submit import submit_ingest
     from agent.db import AGENT_SCHEMA, init_db
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
+        for img_url in images:
+            submit_ingest(
+                img_url, config, conn, content_type="substack_image", tags=tags,
+                parent_slug=parent_slug, media_kind="image",
+            )
         for vid in youtube_ids:
             submit_ingest(
                 f"https://www.youtube.com/watch?v={vid}", config, conn, tags=tags,
+                parent_slug=parent_slug, media_kind="video",
             )
         for url in rumble_urls:
-            submit_ingest(url, config, conn, content_type="rumble", tags=tags)
+            submit_ingest(
+                url, config, conn, content_type="rumble", tags=tags,
+                parent_slug=parent_slug, media_kind="video",
+            )
     finally:
         conn.close()
-    return len(youtube_ids) + len(rumble_urls)
+    return len(images) + len(youtube_ids) + len(rumble_urls)
 
 
 def step_substack_embedded_media(task: dict, config: Config) -> str:
-    """OCR every body image inline; enqueue embedded YouTube videos for nightly batch.
+    """Extract embedded media and DEFER synthesis to the nightly batch.
 
-    Images are read synchronously (cheap, one article at a time) so their OCR
-    text reaches the synthesizer. Embedded videos are NOT downloaded here — each
-    YouTube ID is enqueued into ingest_queue and handled by the nightly batch,
-    same as any other YouTube submission.
+    Finds every body image (chart/screenshot) and embedded video (YouTube/Rumble)
+    and enqueues each into ingest_queue linked back to this article
+    (``parent_slug`` + ``media_kind``). Nothing is OCR'd or downloaded inline —
+    the nightly batch reads the images (VLM on Modal) and transcribes the videos,
+    appending both into this article's raw markdown, then dispatches the deferred
+    synthesis once all media has landed.
 
-    Appends each image's OCR to the raw markdown as a `## Image N` section so
-    `step_synthesize_web` sees it. Degrades gracefully: a failed image download
-    or empty OCR is skipped, and a page with no images/videos is a no-op.
-
-    Returns a summary string like 'images_ocr=7 videos_enqueued=1'.
+    Raises StepError(PAUSE) when media was found (the deferral signal); returns
+    normally when the article has no media (plain text synthesizes inline).
     """
     slug = task.get("slug", task["id"][:8])
     url = task["source_url"]
@@ -335,25 +346,28 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     if not html:
         return "no html fetched"
 
-    raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
-    ocr_count = 0
-    for i, img_url in enumerate(_extract_body_images(html)):
-        ocr_text = _download_and_ocr(img_url, slug, i, config)
-        if not ocr_text:
-            continue
-        ocr_count += 1
-        if raw_path.exists():
-            raw_path.write_text(
-                raw_path.read_text(encoding="utf-8")
-                + f"\n\n## Image {i + 1}\n\n{ocr_text}\n",
-                encoding="utf-8",
-            )
-
+    images = _extract_body_images(html)
     youtube_ids = _extract_youtube_ids(html)
     rumble_urls = _extract_rumble_urls(html)
-    enqueued = _enqueue_embedded_media(youtube_ids, rumble_urls, config, task.get("tags"))
+    total = len(images) + len(youtube_ids) + len(rumble_urls)
+    if total == 0:
+        return "no embedded media"
 
-    return f"images_ocr={ocr_count} videos_enqueued={enqueued}"
+    _enqueue_embedded_media(slug, images, youtube_ids, rumble_urls, config, task.get("tags"))
+
+    manifest = {
+        "url": url,
+        "content_type": task.get("content_type", "substack_text"),
+        "total": total,
+    }
+    Path(config.temp_dir, f"{slug}_media.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
+    )
+
+    raise StepError(
+        f"awaiting media: {len(images)} images + {len(youtube_ids) + len(rumble_urls)} videos enqueued",
+        error_type=ErrorType.PAUSE, step_name="substack_embedded_media",
+    )
 
 
 # ── Firecrawl Extraction ─────────────────────────────────────────────────────
@@ -928,6 +942,25 @@ register_pipeline("substack_image", [
     Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
     Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
     Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
+    Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
+])
+
+# Deferred-synthesis variants: the nightly batch reads the article's media
+# (images VLM-read, videos transcribed) into raw.md, then dispatches one of
+# these to synthesize the note with everything in it.
+register_pipeline("substack_text_synthesize", [
+    Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
+    Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_git_push, on_error="retry"),
+])
+
+register_pipeline("substack_image_synthesize", [
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),

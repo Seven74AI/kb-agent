@@ -261,29 +261,32 @@ class TestSubstackVideoMetadata:
         assert "videoUpload.id" in str(exc.value) or "video id" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
-    @patch("agent.pipelines.web._download_and_ocr")
     @patch("agent.pipelines.web._enqueue_embedded_media")
-    def test_ocrs_images_and_enqueues_videos(
-        self, mock_enqueue, mock_ocr, mock_fetch, config, task_dict,
-    ):
+    def test_defers_synthesis_when_media_found(self, mock_enqueue, mock_fetch, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = config.temp_dir / f"{task_dict['slug']}_raw.md"
-        raw_path.write_text("# Title\n\nBody text.\n")
-
         mock_fetch.return_value = (
             '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
             '<iframe src="https://www.youtube-nocookie.com/embed/xyzXYZ12345"></iframe>'
         )
-        mock_ocr.return_value = "OCR text from chart"
-        mock_enqueue.return_value = 1
+        with pytest.raises(Exception) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert "awaiting media" in str(exc.value)
+        manifest = json.loads(
+            (config.temp_dir / f"{task_dict['slug']}_media.json").read_text(encoding="utf-8")
+        )
+        assert manifest["total"] == 2
+        assert manifest["url"] == task_dict["source_url"]
+        mock_enqueue.assert_called_once_with(
+            task_dict["slug"],
+            ["https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"],
+            ["xyzXYZ12345"], [], config, None,
+        )
 
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_no_media_synthesizes_inline(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = "<html><body>plain text article</body></html>"
         result = step_substack_embedded_media(task_dict, config)
-        assert "images_ocr=1" in result
-        assert "videos_enqueued=1" in result
-        content = raw_path.read_text()
-        assert "## Image 1" in content
-        assert "OCR text from chart" in content
-        mock_enqueue.assert_called_once_with(["xyzXYZ12345"], [], config, None)
+        assert result == "no embedded media"
 
     @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._enqueue_embedded_media")

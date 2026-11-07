@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
     content_type TEXT NOT NULL,
     slug TEXT NOT NULL,
     tags TEXT,
+    parent_slug TEXT,
+    media_kind TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     error TEXT,
     created_at TEXT DEFAULT (datetime('now')),
@@ -242,11 +244,16 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
 
 
 def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
-                 status: str = "queued", tags=None) -> tuple[str, bool]:
+                 status: str = "queued", tags=None, parent_slug=None, media_kind=None) -> tuple[str, bool]:
     """Insert a link into the ingest queue (dedup by URL).
 
     Returns ``(ingest_id, created_new)``. A URL already in the queue returns its
     existing id with ``created_new=False`` — never a duplicate row.
+
+    ``parent_slug`` + ``media_kind`` link a media item (embedded image/video)
+    back to the parent article it belongs to, so the nightly batch can append
+    its reading/transcript to the parent's raw markdown and fire the parent's
+    deferred synthesis once every sibling is done.
     """
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -265,10 +272,22 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
     ingest_id = str(uuid.uuid4())
     with conn:
         conn.execute(
-            "INSERT INTO ingest_queue (id, url, content_type, slug, status, tags) VALUES (?, ?, ?, ?, ?, ?)",
-            (ingest_id, url, content_type, slug, status, serialize_tags(tags)),
+            "INSERT INTO ingest_queue (id, url, content_type, slug, status, tags, parent_slug, media_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (ingest_id, url, content_type, slug, status, serialize_tags(tags), parent_slug, media_kind),
         )
     return ingest_id, True
+
+
+def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
+    """Count media items still in-flight (not dispatched/failed) for a parent."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ? "
+        "AND status NOT IN ('dispatched', 'failed')",
+        (parent_slug,),
+    ).fetchone()
+    return row["n"]
 
 
 def list_ingest_by_status(conn: sqlite3.Connection, status: str) -> list[dict]:
