@@ -516,3 +516,54 @@ def test_poll_all_due_sources_isolates_source_errors(core_config, agent_conn, mo
     assert len(results) == 1
     assert results[0]["page_url"] == TDAH_PAGE
     assert "network down" in results[0]["error"]
+
+
+@pytest.mark.parametrize(
+    "poll_fn",
+    ["poll_watch_source", "poll_all_due_sources"],
+)
+def test_poll_error_surfaces_scrub_paths(
+    core_config, agent_conn, monkeypatch, poll_fn
+):
+    register_watch_source(
+        agent_conn,
+        TDAH_PAGE,
+        item_pattern=TDAH_PATTERN,
+        item_url_template=TDAH_TEMPLATE,
+        fetch_html=lambda url: SAMPLE_HTML,
+    )
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    if poll_fn == "poll_watch_source":
+        from agent.core.watch_source import poll_watch_source
+
+        def submit_boom(url, config, conn):
+            raise RuntimeError("failed at /root/kb-agent/cookies/bad.txt")
+
+        result = poll_watch_source(
+            agent_conn,
+            TDAH_PAGE,
+            core_config,
+            fetch_html=lambda url: SAMPLE_HTML_NEW,
+            now=now,
+            submit_fn=submit_boom,
+        )
+        errors = [sub["error"] for sub in result.get("submissions", []) if sub.get("error")]
+    else:
+
+        def fetch_boom(url):
+            raise RuntimeError("failed reading /root/kb-agent/cookies/bad.txt")
+
+        results = poll_all_due_sources(
+            agent_conn,
+            core_config,
+            fetch_html=fetch_boom,
+            now=now,
+            submit_fn=lambda url, config, conn: {"status": "pending", "http_status": 201},
+        )
+        errors = [r["error"] for r in results if r.get("error")]
+
+    assert errors
+    for err in errors:
+        assert "/root/" not in err

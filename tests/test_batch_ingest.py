@@ -114,8 +114,8 @@ class TestAppendToParent:
         ).fetchone()
         assert row["media_appended"] == 1
 
-    def test_append_parent_media_atomic_commits_before_os_replace(self, config, conn, monkeypatch):
-        from agent.db import append_parent_media_atomic, queue_ingest
+    def test_append_parent_media_atomic_writes_disk_before_media_appended(self, config, conn, monkeypatch):
+        from agent.db import append_parent_media_atomic, media_append_marker, queue_ingest
 
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         parent = "article_slug"
@@ -140,7 +140,7 @@ class TestAppendToParent:
                 "SELECT media_appended FROM ingest_queue WHERE id=?",
                 (ingest_id,),
             ).fetchone()
-            assert row["media_appended"] == 1
+            assert row["media_appended"] == 0
             assert src.read_text(encoding="utf-8") != raw.read_text(encoding="utf-8")
             return real_replace(src, dst)
 
@@ -150,7 +150,39 @@ class TestAppendToParent:
         assert order == ["replace"]
         body = raw.read_text(encoding="utf-8")
         assert "OCR text" in body
+        assert media_append_marker(ingest_id) in body
+        row = conn.execute(
+            "SELECT media_appended FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["media_appended"] == 1
         assert not list(config.temp_dir.glob("*.tmp"))
+
+    def test_append_parent_media_atomic_reappends_when_flag_without_marker(self, config, conn):
+        from agent.db import append_parent_media_atomic, media_append_marker, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1 WHERE id = ?",
+            (ingest_id,),
+        )
+        conn.commit()
+
+        assert append_parent_media_atomic(conn, ingest_id, raw, "Image", "OCR text") is True
+        body = raw.read_text(encoding="utf-8")
+        assert "OCR text" in body
+        assert media_append_marker(ingest_id) in body
 
 
 class TestDeferredSynthesizeTags:
@@ -364,6 +396,9 @@ class TestKbOcrSizeCap:
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
         assert "MAX_IMAGE_BYTES = 25 * 1024 * 1024" in text
         assert "size > MAX_IMAGE_BYTES" in text
+        assert "MAX_IMAGE_PIXELS" in text
+        assert "MAX_NEW_OCR_TOKENS" in text
+        assert "w * h > MAX_IMAGE_PIXELS" in text
 
     def test_read_images_returns_structured_errors_per_item(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
@@ -377,6 +412,48 @@ class TestKbOcrSizeCap:
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
         assert 'r.get("error")' in text
         assert '"error": r["error"]' in text
+
+    def test_batch_ingest_rejects_truncated_ocr_flag(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_trunc"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://example.com/huge.png",
+            "substack_image",
+            "img_trunc",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "curl":
+                dest = Path(cmd[cmd.index("-o") + 1])
+                dest.write_bytes(b"\x89PNG" + b"\x00" * 200)
+                return MagicMock(returncode=0)
+            if "batch_ocr.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                stage_dir = Path(cmd[2])
+                for staged in stage_dir.iterdir():
+                    if staged.name.startswith(ingest_id):
+                        (out_dir / f"{staged.name}.ocr.json").write_text(
+                            json.dumps({"reading": "partial", "truncated": True}),
+                            encoding="utf-8",
+                        )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q], config, conn, 99)
+        row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?", (ingest_id,)
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert "truncated" in (row["error"] or "").lower()
 
 
 class TestBatchOcrPartialFailure:

@@ -612,7 +612,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         ).fetchone()
         queue_count = row["n"] if hasattr(row, "keys") else row[0]
 
-        if had_manifest and pending == 0:
+        if pending == 0:
             if gate_total != queue_count:
                 raise StepError(
                     f"media gate: ingest rows {queue_count} != manifest total {gate_total}",

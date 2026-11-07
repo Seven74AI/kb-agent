@@ -26,8 +26,16 @@ from agent.core import (
 )
 from agent.core.bulk import expand_youtube_playlist
 from agent.core.resume import ResumeReasonError
-from agent.core.submit import plan_submission
-from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, create_task, init_db, pause_task
+from agent.core.submit import plan_submission, submit_plan
+from agent.db import (
+    AGENT_SCHEMA,
+    LOGS_SCHEMA,
+    archive_llm_call,
+    create_task,
+    init_db,
+    pause_task,
+)
+from agent.detection import DedupCheckError
 
 METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 PRIVATE_HOST_URL = "http://127.0.0.1/playlist?list=PLfake"
@@ -208,6 +216,37 @@ def test_submit_url_creates_task(core_config, agent_conn, monkeypatch):
     assert result["platform"] == "web"
 
 
+@pytest.mark.parametrize(
+    "surface,invoke",
+    [
+        (
+            "plan_submission",
+            lambda cfg, conn, mp: plan_submission("https://example.com/x", cfg),
+        ),
+        (
+            "submit_url",
+            lambda cfg, conn, mp: submit_url("https://example.com/x", cfg, conn),
+        ),
+    ],
+)
+def test_submission_dedup_error_scrubs_paths(
+    core_config, agent_conn, monkeypatch, surface, invoke
+):
+    """HTTP/MCP clients must not see vault paths from dedup grep stderr."""
+
+    def boom(url, vault_path):
+        raise DedupCheckError(
+            "Vault dedup grep failed (exit 2): grep: /root/Documents/Obsidian Vault/x: denied"
+        )
+
+    monkeypatch.setattr("agent.core.submit.dedup_check", boom)
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    result = invoke(core_config, agent_conn, monkeypatch)
+    assert result["status"] == "error"
+    assert "/root/" not in result["error"]
+    assert "dedup check failed" in result["error"]
+
+
 def test_submit_url_dedup_grep_failure_does_not_enqueue(core_config, agent_conn, monkeypatch):
     """Vault grep errors surface as structured errors without creating tasks."""
     import subprocess
@@ -286,6 +325,62 @@ def test_submit_url_health_pause(core_config, agent_conn, monkeypatch):
     assert result["status"] == "paused"
     assert result["http_status"] == 200
     assert result["task_id"]
+
+
+def test_submit_plan_pause_reason_scrubbed_in_task_row(core_config, agent_conn, monkeypatch):
+    monkeypatch.setattr(
+        "agent.core.submit.preflight_health",
+        lambda p: (False, "missing cookies at /root/kb-agent/cookies/youtube.txt"),
+    )
+    plan = plan_submission("https://youtube.com/watch?v=abc", core_config)
+    assert plan["status"] == "paused"
+    assert "/root/" not in (plan["reason"] or "")
+    result = submit_plan(agent_conn, plan)
+    row = agent_conn.execute(
+        "SELECT error FROM tasks WHERE id = ?", (result["task_id"],)
+    ).fetchone()
+    assert "/root/" not in (row["error"] or "")
+    assert "/root/" not in (result["reason"] or "")
+
+
+def test_archive_llm_call_redacts_paths_and_secrets_at_insert(logs_conn, monkeypatch):
+    monkeypatch.delenv("KB_LLM_ARCHIVE_RAW", raising=False)
+    archive_llm_call(
+        logs_conn,
+        "task-1",
+        "synthesis",
+        "read /root/secret/vault/note.md\napi_key=supersecret",
+        "Bearer eyJhbG.token\n/home/user/out.txt",
+        "test-model",
+        tokens_in=1,
+        tokens_out=2,
+    )
+    row = logs_conn.execute(
+        "SELECT prompt, response FROM llm_archives WHERE task_id = ?", ("task-1",)
+    ).fetchone()
+    assert "/root/" not in row["prompt"]
+    assert "supersecret" not in row["prompt"]
+    assert "[credential redacted]" in row["prompt"]
+    assert "eyJhbG" not in row["response"]
+    assert "[redacted]" in row["response"]
+    assert "/home/" not in row["response"]
+
+
+def test_archive_llm_call_store_raw_opt_in(logs_conn, monkeypatch):
+    monkeypatch.setenv("KB_LLM_ARCHIVE_RAW", "1")
+    raw_prompt = "token=abc123 at /root/kb-agent/data"
+    archive_llm_call(
+        logs_conn,
+        "task-raw",
+        "synthesis",
+        raw_prompt,
+        "ok",
+        "test-model",
+    )
+    row = logs_conn.execute(
+        "SELECT prompt FROM llm_archives WHERE task_id = ?", ("task-raw",)
+    ).fetchone()
+    assert row["prompt"] == raw_prompt
 
 
 def test_list_tasks_and_get_task(core_config, agent_conn, logs_conn):
