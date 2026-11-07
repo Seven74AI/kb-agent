@@ -102,7 +102,8 @@ def read_images(images: list) -> list:
             results.append({"name": name, "reading": reading})
             print(f"[{name}] {len(reading)} chars in {time.time() - t0:.0f}s", flush=True)
         except Exception as exc:
-            print(f"[{name}] skipped: {exc}", flush=True)
+            print(f"[{name}] failed: {exc}", flush=True)
+            results.append({"name": name, "error": str(exc)})
     return results
 
 
@@ -135,5 +136,8 @@ def main(image_dir: str = None, out_dir: str = "."):
     for r in results:
         p = os.path.join(out_dir, f"{r['name']}.ocr.json")
         with open(p, "w") as f:
-            json.dump({"reading": r["reading"]}, f, ensure_ascii=False, indent=2)
+            if r.get("error"):
+                json.dump({"error": r["error"]}, f, ensure_ascii=False, indent=2)
+            else:
+                json.dump({"reading": r["reading"]}, f, ensure_ascii=False, indent=2)
         print(f"wrote {p}")

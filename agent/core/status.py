@@ -91,17 +91,26 @@ def _enrich_task(
     logs_conn: sqlite3.Connection | None,
     now: datetime,
 ) -> dict:
-    steps = get_task_steps(agent_conn, task_row["id"])
+    steps_raw = get_task_steps(agent_conn, task_row["id"])
+    steps = []
+    for step in steps_raw:
+        entry = dict(step)
+        out = entry.get("output")
+        if out:
+            entry["output"] = sanitize_visible_message(out)
+        steps.append(entry)
     raw_last = get_last_log_line(logs_conn, task_row["id"]) if logs_conn else None
     last_log = sanitize_visible_message(raw_last) if raw_last else None
     elapsed = format_elapsed(task_row["created_at"], now)
     staleness_str, is_stale = compute_staleness(task_row, logs_conn, now)
+    raw_error = task_row.get("error")
+    error = sanitize_visible_message(raw_error) if raw_error else None
     return {
         "id": task_row["id"],
         "source_url": task_row["source_url"],
         "content_type": task_row["content_type"],
         "status": task_row["status"],
-        "error": task_row["error"],
+        "error": error,
         "slug": task_row.get("slug"),
         "retries": task_row.get("retries", 0),
         "created_at": task_row["created_at"],

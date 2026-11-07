@@ -65,6 +65,14 @@ YOUTUBE_DENSITY_MIN = VIDEO_DENSITY_MIN
 # Approximate token ratio
 CHARS_PER_TOKEN = 4
 
+
+def _download_artifact_stem(task: dict) -> str:
+    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
+    if task.get("_batch_ingest"):
+        return task["id"]
+    return task.get("slug", task["id"][:8])
+
+
 # ── Cookie Pre-flight ─────────────────────────────────────────────────────────
 
 def _validate_cookies() -> None:
@@ -130,6 +138,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
 
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
+    stem = _download_artifact_stem(task)
     _assert_fetch_url_allowed(url)
 
     # --- Metadata ---
@@ -234,7 +243,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
         metadata["description"] = desc_result.stdout.strip()
 
     # Save metadata to temp
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
 
     # Save slug for later steps
@@ -264,8 +273,8 @@ def step_download_video(task: dict, config: Config) -> str:
         StepError(RETRY): On download failure.
     """
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
-    output_path = Path(config.temp_dir) / f"{slug}.mp4"
+    stem = _download_artifact_stem(task)
+    output_path = Path(config.temp_dir) / f"{stem}.mp4"
     try:
         _assert_fetch_url_allowed(url)
     except ValueError as exc:

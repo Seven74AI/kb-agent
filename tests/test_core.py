@@ -303,6 +303,27 @@ def test_list_tasks_sanitizes_last_log(core_config, agent_conn, logs_conn):
     assert len(last_log) < 500
 
 
+def test_list_tasks_sanitizes_error_and_step_output(core_config, agent_conn, logs_conn):
+    secret = "/root/kb-agent/secret/pipeline.py"
+    task_id = create_task(agent_conn, "https://a.com", "web", "a_slug", ["extract"])
+    agent_conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (f'broke at "{secret}"', task_id),
+    )
+    agent_conn.execute(
+        "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'extract'",
+        (f'stderr from {secret}', task_id),
+    )
+    agent_conn.commit()
+    listed = list_tasks(agent_conn, logs_conn=logs_conn, limit=10)
+    task = listed["tasks"][0]
+    assert secret not in (task["error"] or "")
+    assert secret not in (task["steps"][0]["output"] or "")
+    one = get_task(agent_conn, task_id, logs_conn=logs_conn)
+    assert secret not in (one["error"] or "")
+    assert secret not in (one["steps"][0]["output"] or "")
+
+
 def test_get_task_missing(agent_conn):
     assert get_task(agent_conn, "nonexistent-id") is None
 

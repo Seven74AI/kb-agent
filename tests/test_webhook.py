@@ -415,6 +415,28 @@ def test_dashboard_renders_html(client, monkeypatch, tmp_path):
     assert "youtube" in html
 
 
+def test_dashboard_scrubs_task_error(client, monkeypatch, tmp_path):
+    """Task errors on the dashboard omit host filesystem paths."""
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+
+    agent_db = tmp_path / "data" / "agent.db"
+    agent_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = init_db(agent_db, AGENT_SCHEMA)
+    secret = "/root/kb-agent/secret/task.py"
+    create_task(conn, "https://example.com/fail", "web", "fail_slug", ["extract"], status="failed")
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE slug = ?",
+        (f'extract died at "{secret}"', "fail_slug"),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.get("/dashboard")
+    html = resp.data.decode()
+    assert secret not in html
+    assert "extract died" in html
+
+
 def test_dashboard_scrubs_ingest_error(client, monkeypatch, tmp_path):
     """Ingest queue errors shown on the dashboard omit host filesystem paths."""
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)

@@ -1,5 +1,6 @@
 """Tests for ingest queue dedup/tag updates and schema migration."""
 
+import json
 import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ from agent.db import (
     create_task,
     find_active_task,
     has_active_synthesize_task,
+    has_completed_parent_synthesis,
     has_completed_synthesize_task,
     has_synthesize_task_signal,
     get_task_steps,
@@ -552,6 +554,69 @@ def test_embedded_video_download_failure_sets_failed(tmp_path, monkeypatch):
     assert status == "failed"
 
 
+def test_has_completed_parent_synthesis_parent_task_or_vault(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "synth_owner"
+    vault = tmp_path / "vault"
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is False
+
+    parent_id = create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    conn.commit()
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is True
+
+    conn.execute("DELETE FROM tasks WHERE id = ?", (parent_id,))
+    conn.commit()
+    note_dir = vault / "Knowledge base" / "articles"
+    note_dir.mkdir(parents=True)
+    (note_dir / f"{slug}.md").write_text("# Note\n", encoding="utf-8")
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is True
+
+
+def test_maybe_dispatch_skips_when_parent_synthesis_completed(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "inline_done_parent"
+    url = "https://blog.substack.com/p/inline-done"
+    create_task(conn, url, "substack_text", parent, ["synthesize_note"], status="completed")
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 1}',
+        encoding="utf-8",
+    )
+
+    dispatch = MagicMock()
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    dispatch.assert_not_called()
+
+
 def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path, monkeypatch):
     import scripts.batch_ingest as batch_ingest
 
@@ -597,13 +662,21 @@ def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path
         '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 1}',
         encoding="utf-8",
     )
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+
+    queue_ingest(
+        conn, "https://example.com/i2", "substack_image", "i2",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
     assert calls == [parent]
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
     assert len(calls) == 1
 
 
-def test_maybe_dispatch_reconciles_manifest_missing_from_db(tmp_path, monkeypatch):
+def test_maybe_dispatch_fails_closed_without_deferral_record(tmp_path, monkeypatch):
     import scripts.batch_ingest as batch_ingest
 
     db_path = tmp_path / "agent.db"
@@ -637,8 +710,99 @@ def test_maybe_dispatch_reconciles_manifest_missing_from_db(tmp_path, monkeypatc
     monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
     batch_ingest._deferred_synthesize_dispatched.clear()
 
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    assert calls == []
+
+
+def test_maybe_dispatch_unlocks_when_deferral_and_manifest_match(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "deferral_match_parent"
+    url = "https://blog.substack.com/p/ok"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    def fake_dispatch(dispatch_url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t-ok"}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
     assert calls == [parent]
+
+
+def test_remove_ingest_does_not_unlock_parent_synthesize(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral, remove_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "removed_sibling_parent"
+    url = "https://blog.substack.com/p/two"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
+    id_a, _ = queue_ingest(
+        conn, "https://example.com/a", "substack_image", "a",
+        parent_slug=parent, media_kind="image",
+    )
+    id_b, _ = queue_ingest(
+        conn, "https://example.com/b", "substack_image", "b",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE id=?", (id_a,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 2}),
+        encoding="utf-8",
+    )
+
+    remove_ingest(conn, id_b, temp_dir=config.temp_dir)
+    batch_ingest.refresh_parent_media_manifest(conn, config, parent)
+    manifest = json.loads((config.temp_dir / f"{parent}_media.json").read_text(encoding="utf-8"))
+    assert manifest["total"] == 2
+    assert manifest.get("media_changed") is True
+
+    dispatch = MagicMock()
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    dispatch.assert_not_called()
 
 
 def test_maybe_dispatch_fails_closed_when_manifest_total_null(tmp_path, monkeypatch):

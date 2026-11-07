@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS batch_runs (
     status TEXT NOT NULL DEFAULT 'running',
     summary TEXT
 );
+
+CREATE TABLE IF NOT EXISTS parent_media_deferral (
+    parent_slug TEXT PRIMARY KEY,
+    source_url TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    expected_total INTEGER NOT NULL,
+    media_changed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 LOGS_SCHEMA = """
@@ -437,6 +447,35 @@ def has_synthesize_task_signal(conn: sqlite3.Connection, slug: str) -> bool:
     return has_active_synthesize_task(conn, slug) or has_completed_synthesize_task(conn, slug)
 
 
+def has_completed_parent_synthesis(
+    conn: sqlite3.Connection,
+    slug: str,
+    *,
+    vault_path: Path | None = None,
+) -> bool:
+    """True when synthesis for *slug* already finished on the parent or batch path.
+
+    Used to make parent inline synthesis and batch ``*_synthesize`` dispatch
+    mutually exclusive: once any owner completes, the other path must stand down.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "AND status IN ('done', 'completed') "
+        "LIMIT 1",
+        (slug,),
+    ).fetchone()
+    if row is not None:
+        return True
+    if has_completed_synthesize_task(conn, slug):
+        return True
+    if vault_path is not None:
+        note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
+        if note.is_file():
+            return True
+    return False
+
+
 def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> int:
     """Requeue failed media items for retry, up to ``max_attempts`` each.
 
@@ -516,6 +555,47 @@ def set_ingest_media_appended(conn: sqlite3.Connection, ingest_id: str) -> None:
         )
 
 
+def media_append_marker(ingest_id: str) -> str:
+    """HTML comment embedded in parent raw markdown for crash-safe append idempotency."""
+    return f"<!-- kb-ingest-media:{ingest_id} -->"
+
+
+def append_parent_media_atomic(
+    conn: sqlite3.Connection,
+    ingest_id: str,
+    raw_path: Path,
+    section: str,
+    body: str,
+) -> bool:
+    """Append once; sets ``media_appended`` in the same DB transaction as the file write."""
+    marker = media_append_marker(ingest_id)
+    with conn:
+        row = conn.execute(
+            "SELECT media_appended FROM ingest_queue WHERE id = ?", (ingest_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if bool(row["media_appended"] if hasattr(row, "keys") else row[0]):
+            return True
+        if not raw_path.exists():
+            return False
+        text = raw_path.read_text(encoding="utf-8")
+        if marker in text:
+            conn.execute(
+                "UPDATE ingest_queue SET media_appended = 1, updated_at = datetime('now') "
+                "WHERE id = ?",
+                (ingest_id,),
+            )
+            return True
+        block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
+        raw_path.write_text(text + block, encoding="utf-8")
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1, updated_at = datetime('now') WHERE id = ?",
+            (ingest_id,),
+        )
+    return True
+
+
 def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                          error: str | None = None) -> None:
     """Transition an ingest-queue row to a new status (touches updated_at)."""
@@ -537,10 +617,125 @@ def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
             )
 
 
-def remove_ingest(conn: sqlite3.Connection, ingest_id: str) -> bool:
-    """Delete an ingest-queue row (the dashboard's escape hatch). Returns True if removed."""
+def get_parent_media_deferral(conn: sqlite3.Connection, parent_slug: str) -> dict | None:
+    """Return the persisted deferral gate for a parent article, if any."""
+    if not parent_slug:
+        return None
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM parent_media_deferral WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def ensure_parent_media_deferral(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    source_url: str,
+    content_type: str,
+    expected_total: int,
+) -> None:
+    """Persist the original manifest total at first deferral (never lowered on conflict)."""
+    if not parent_slug:
+        return
     with conn:
-        return conn.execute("DELETE FROM ingest_queue WHERE id = ?", (ingest_id,)).rowcount > 0
+        conn.execute(
+            """
+            INSERT INTO parent_media_deferral
+                (parent_slug, source_url, content_type, expected_total)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(parent_slug) DO NOTHING
+            """,
+            (parent_slug, source_url, content_type, int(expected_total)),
+        )
+
+
+def bootstrap_parent_media_deferral_from_manifest(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    temp_dir: Path,
+) -> None:
+    """Seed the deferral record from on-disk manifest when the DB row is still absent."""
+    if not parent_slug or get_parent_media_deferral(conn, parent_slug):
+        return
+    manifest_path = temp_dir / f"{parent_slug}_media.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return
+    total = data.get("total")
+    if total is None:
+        return
+    source_url = data.get("url")
+    content_type = data.get("content_type")
+    if not source_url or not content_type:
+        parent_row = conn.execute(
+            "SELECT source_url, content_type FROM tasks "
+            "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+            "ORDER BY created_at LIMIT 1",
+            (parent_slug,),
+        ).fetchone()
+        if parent_row:
+            source_url = source_url or (
+                parent_row["source_url"] if hasattr(parent_row, "keys") else parent_row[0]
+            )
+            content_type = content_type or (
+                parent_row["content_type"] if hasattr(parent_row, "keys") else parent_row[1]
+            )
+    if not source_url or not content_type:
+        return
+    ensure_parent_media_deferral(
+        conn, parent_slug, source_url, content_type, int(total),
+    )
+
+
+def mark_parent_media_changed(conn: sqlite3.Connection, parent_slug: str) -> None:
+    """Record that embedded media set changed (e.g. dashboard removed a sibling)."""
+    if not parent_slug:
+        return
+    with conn:
+        conn.execute(
+            """
+            UPDATE parent_media_deferral
+            SET media_changed = 1, updated_at = datetime('now')
+            WHERE parent_slug = ?
+            """,
+            (parent_slug,),
+        )
+
+
+def remove_ingest(
+    conn: sqlite3.Connection,
+    ingest_id: str,
+    *,
+    temp_dir: Path | None = None,
+) -> str | None:
+    """Delete an ingest-queue row (dashboard escape hatch).
+
+    Returns the removed row's ``parent_slug`` when deleted (non-empty parents only),
+    else ``None``. Refreshes the deferral gate — does not shrink ``expected_total``.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT parent_slug FROM ingest_queue WHERE id = ?", (ingest_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    parent_slug = row["parent_slug"] or ""
+    with conn:
+        deleted = conn.execute(
+            "DELETE FROM ingest_queue WHERE id = ?", (ingest_id,),
+        ).rowcount
+    if not deleted:
+        return None
+    if parent_slug:
+        if temp_dir is not None:
+            bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, temp_dir)
+        mark_parent_media_changed(conn, parent_slug)
+    return parent_slug
 
 
 def claim_ingest_items(conn: sqlite3.Connection) -> list[dict]:
