@@ -14,6 +14,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.instagram import (
     _validate_ig_cookies,
+    _fetch_ig_caption,
     _fetch_ig_comment,
     _is_music_only,
     _format_transcript_for_llm,
@@ -152,6 +153,14 @@ class TestCookieValidation:
 
 class TestReelDownload:
     """Tests for step_ig_reel_download."""
+
+    @patch("agent.pipelines.instagram._validate_ig_cookies")
+    @patch("subprocess.run")
+    def test_download_rejects_metadata_ip(self, mock_run, mock_validate, config, reel_task):
+        reel_task["source_url"] = "http://169.254.169.254/latest/meta-data/"
+        with pytest.raises(ValueError, match="not allowed"):
+            step_ig_reel_download(reel_task, config)
+        mock_run.assert_not_called()
 
     @patch("agent.pipelines.instagram._validate_ig_cookies")
     @patch("subprocess.run")

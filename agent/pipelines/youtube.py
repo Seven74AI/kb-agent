@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
@@ -129,6 +130,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
 
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
+    _assert_fetch_url_allowed(url)
 
     # --- Metadata ---
     result = subprocess.run(
@@ -264,6 +266,7 @@ def step_download_video(task: dict, config: Config) -> str:
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
     output_path = Path(config.temp_dir) / f"{slug}.mp4"
+    _assert_fetch_url_allowed(url)
 
     result = subprocess.run(
         [

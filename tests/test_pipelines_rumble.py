@@ -176,3 +176,27 @@ class TestRumbleDownloadUsesCachedMetadata:
         cmd = mock_run.call_args[0][0]
         assert cdn_url in cmd
         assert result == str(video_path)
+
+    @patch("agent.pipelines.rumble.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.rumble.subprocess.run")
+    def test_download_rejects_non_allowlisted_cdn_host(
+        self, mock_run, _mock_h264, rumble_config,
+    ):
+        slug = "rumble_evil_cdn"
+        meta_path = rumble_config.temp_dir / f"{slug}_metadata.json"
+        meta_path.write_text(
+            json.dumps({
+                "title": "Evil CDN",
+                "formats": [{"url": "https://evil.example.com/video.mp4", "height": 720}],
+                "source_url": "https://rumble.com/v2vk68c-test",
+            }),
+            encoding="utf-8",
+        )
+        task = {
+            "id": "task-rumble-evil",
+            "slug": slug,
+            "source_url": "https://rumble.com/v2vk68c-test",
+        }
+        with pytest.raises(StepError, match="allowlisted"):
+            step_rumble_download_video(task, rumble_config)
+        mock_run.assert_not_called()

@@ -263,6 +263,23 @@ def test_step_extract_metadata_with_chapters(config, task_dict):
     assert meta["chapters"][1]["start_time"] == 120
 
 
+@patch("agent.pipelines.youtube._validate_cookies")
+@patch("subprocess.run")
+def test_step_extract_metadata_rejects_metadata_ip(mock_run, mock_validate, config, task_dict):
+    task_dict["source_url"] = "http://169.254.169.254/latest/meta-data/"
+    with pytest.raises(ValueError, match="not allowed"):
+        step_extract_metadata(task_dict, config)
+    mock_run.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_step_download_video_rejects_metadata_ip(mock_run, config, task_dict):
+    task_dict["source_url"] = "http://169.254.169.254/latest/meta-data/"
+    with pytest.raises(ValueError, match="not allowed"):
+        step_download_video(task_dict, config)
+    mock_run.assert_not_called()
+
+
 def test_step_extract_metadata_private_video(config, task_dict):
     """Test handling of private/unavailable video."""
     with patch("agent.pipelines.youtube._validate_cookies"):
