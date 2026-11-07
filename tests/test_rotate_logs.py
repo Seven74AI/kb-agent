@@ -23,6 +23,7 @@ from scripts.rotate_logs import (
     dump_rows,
     main,
     rebuild_fts,
+    sanitize_archive_record,
 )
 
 
@@ -75,6 +76,27 @@ def _old_date(days_ago):
 
 
 # ── Unit tests: dump_rows ─────────────────────────────────────────────────────
+
+
+def test_sanitize_archive_record_scrubs_step_logs_and_llm_fields():
+    step = {
+        "_table": "step_logs",
+        "content": "yt-dlp: cookiefile /root/kb-agent/cookies/yt_cookies.txt",
+    }
+    llm = {
+        "_table": "llm_archives",
+        "prompt": "read /root/kb-agent/data/logs.db",
+        "response": "api_key=supersecretvalue",
+    }
+    step_out = sanitize_archive_record(step)
+    llm_out = sanitize_archive_record(llm)
+
+    assert "/root/kb-agent" not in step_out["content"]
+    assert "[path]" in step_out["content"]
+    assert "/root/kb-agent" not in llm_out["prompt"]
+    assert "[path]" in llm_out["prompt"]
+    assert "supersecretvalue" not in llm_out["response"]
+    assert "[credential redacted]" in llm_out["response"]
 
 
 def test_dump_rows_returns_empty_for_no_rows(logs_conn):
@@ -265,6 +287,44 @@ def test_main_nothing_to_rotate(mock_run, logs_db_path):
         result = main()
     assert result == 0
     mock_run.assert_not_called()  # No upload because nothing to archive
+
+
+@patch("scripts.rotate_logs.subprocess.run")
+def test_main_archive_export_scrubs_sensitive_content(mock_run, logs_db_path):
+    """MinIO export must not contain raw paths or credentials from archived rows."""
+    mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+    old = _old_date(60)
+    conn = sqlite3.connect(str(logs_db_path))
+    conn.row_factory = sqlite3.Row
+    leaky = "stderr: /root/kb-agent/cookies/yt_cookies.txt missing"
+    _insert_step_log(conn, "old-task", "download", leaky, old)
+    _insert_llm_archive(
+        conn,
+        "old-task",
+        "synthesis",
+        "prompt with /root/secret/prompt.txt",
+        "done token=abc12345",
+        "deepseek",
+        old,
+    )
+    conn.commit()
+    conn.close()
+
+    with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
+        with patch("pathlib.Path.unlink", return_value=None):
+            assert main() == 0
+
+    tmp_gz = Path(mock_run.call_args[0][0][2])
+    with gzip.open(tmp_gz, "rb") as f:
+        lines = [json.loads(line) for line in f.read().decode("utf-8").strip().split("\n")]
+
+    step_line = next(l for l in lines if l["_table"] == "step_logs")
+    llm_line = next(l for l in lines if l["_table"] == "llm_archives")
+    assert "/root" not in step_line["content"]
+    assert "[path]" in step_line["content"]
+    assert "/root" not in llm_line["prompt"]
+    assert "abc12345" not in llm_line["response"]
 
 
 @patch("scripts.rotate_logs.subprocess.run")

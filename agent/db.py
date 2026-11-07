@@ -1,6 +1,7 @@
 """Database initialization — SQLite schemas for agent.db and logs.db."""
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -346,7 +347,8 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             if row["status"] == "failed" and row["attempts"] < max_attempts:
                 conn.execute(
                     "UPDATE ingest_queue SET status='queued', error=NULL, "
-                    "updated_at=datetime('now') WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+                    "attempts = attempts + 1, updated_at=datetime('now') "
+                    "WHERE url = ? AND COALESCE(parent_slug, '') = ?",
                     (url, parent_key),
                 )
         return row["id"], False
@@ -471,8 +473,21 @@ def has_completed_parent_synthesis(
         return True
     if vault_path is not None:
         note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
-        if note.is_file():
-            return True
+        if not note.is_file():
+            return False
+        if count_pending_media(conn, slug) > 0:
+            return False
+        deferral = get_parent_media_deferral(conn, slug)
+        if deferral is None:
+            return False
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (slug,),
+        ).fetchone()
+        actual = row["n"] if hasattr(row, "keys") else row[0]
+        if actual != deferral["expected_total"]:
+            return False
+        return True
     return False
 
 
@@ -567,8 +582,9 @@ def append_parent_media_atomic(
     section: str,
     body: str,
 ) -> bool:
-    """Append once; sets ``media_appended`` in the same DB transaction as the file write."""
+    """Append once; commit ``media_appended`` before atomically replacing the raw file."""
     marker = media_append_marker(ingest_id)
+    pending_text: str | None = None
     with conn:
         row = conn.execute(
             "SELECT media_appended FROM ingest_queue WHERE id = ?", (ingest_id,)
@@ -588,11 +604,15 @@ def append_parent_media_atomic(
             )
             return True
         block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
-        raw_path.write_text(text + block, encoding="utf-8")
+        pending_text = text + block
         conn.execute(
             "UPDATE ingest_queue SET media_appended = 1, updated_at = datetime('now') WHERE id = ?",
             (ingest_id,),
         )
+    if pending_text is not None:
+        tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
+        tmp_path.write_text(pending_text, encoding="utf-8")
+        os.replace(tmp_path, raw_path)
     return True
 
 
@@ -636,7 +656,7 @@ def ensure_parent_media_deferral(
     content_type: str,
     expected_total: int,
 ) -> None:
-    """Persist the original manifest total at first deferral (never lowered on conflict)."""
+    """Persist the deferral manifest total (never lowered; may grow on conflict)."""
     if not parent_slug:
         return
     with conn:
@@ -645,7 +665,8 @@ def ensure_parent_media_deferral(
             INSERT INTO parent_media_deferral
                 (parent_slug, source_url, content_type, expected_total)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(parent_slug) DO NOTHING
+            ON CONFLICT(parent_slug) DO UPDATE SET
+                expected_total = MAX(expected_total, excluded.expected_total)
             """,
             (parent_slug, source_url, content_type, int(expected_total)),
         )

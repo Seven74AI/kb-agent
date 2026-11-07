@@ -17,9 +17,12 @@ Process management:
 
 import asyncio
 import inspect
+import logging
 import sqlite3
 import traceback
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from agent.config import Config
 from agent.db import (
@@ -40,6 +43,20 @@ STEP_REGISTRY: dict[str, tuple[Any, str]] = {}
 def _sanitize_step_log_message(message: str) -> str:
     """Alias for step_logs — same rules as other user-visible error surfaces."""
     return sanitize_visible_message(message)
+
+
+def _format_stdout_traceback(exc: BaseException, *, limit: int = 5) -> str:
+    """Scrubbed exception summary for process stdout (not step_logs or tasks.error)."""
+    formatted = traceback.format_exception(type(exc), exc, exc.__traceback__, limit=limit)
+    lines: list[str] = []
+    for line in formatted:
+        stripped = line.rstrip()
+        if not stripped or stripped.startswith("Traceback"):
+            continue
+        clean = sanitize_visible_message(stripped)
+        if clean:
+            lines.append(clean)
+    return "\n".join(lines)
 
 # Content types routed through _execute_video (video semaphore — pyannote RAM).
 VIDEO_TASK_CONTENT_TYPES = (
@@ -370,9 +387,14 @@ class Consumer:
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
                 error_msg = sanitize_visible_message(str(e))
-                tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                logger.exception(
+                    "[consumer] Step '%s' StepError (%s)",
+                    step_name,
+                    error_type,
+                )
+                tb_summary = _format_stdout_traceback(e)
                 print(
-                    f"[consumer] Step '{step_name}' traceback:\n{tb}",
+                    f"[consumer] Step '{step_name}' traceback:\n{tb_summary}",
                     flush=True,
                 )
                 self._log_error(
@@ -421,10 +443,13 @@ class Consumer:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                # Unclassified exception — full traceback on server stdout only.
-                tb = traceback.format_exc()
+                logger.exception(
+                    "[consumer] Step '%s' unhandled exception",
+                    step_name,
+                )
+                tb_summary = _format_stdout_traceback(e)
                 print(
-                    f"[consumer] Step '{step_name}' unhandled traceback:\n{tb}",
+                    f"[consumer] Step '{step_name}' unhandled traceback:\n{tb_summary}",
                     flush=True,
                 )
                 # Fall back to step's on_error setting

@@ -469,7 +469,7 @@ class TestSubstackVideoMetadata:
         assert "prior deferral" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
-    def test_zero_embeds_deferral_marker_allows_inline_when_synthesize_task_exists(
+    def test_zero_embeds_batch_finished_pauses_not_reenter_synthesis(
         self, mock_fetch, config, task_dict, tmp_path,
     ):
         from agent.db import AGENT_SCHEMA, create_task, init_db
@@ -498,8 +498,10 @@ class TestSubstackVideoMetadata:
         conn.close()
 
         task_dict["id"] = task_id
-        result = step_substack_embedded_media(task_dict, config)
-        assert result == "no embedded media"
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "must not re-enter synthesis" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_zero_embeds_raw_media_sections_alone_do_not_unblock_deferral(
@@ -881,6 +883,46 @@ class TestSubstackVideoMetadata:
         assert exc.value.error_type == ErrorType.PAUSE
         assert "deferred to batch synthesis" in str(exc.value).lower()
         assert not (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").exists()
+
+    @patch("agent.pipelines.web._synthesize_single_pass")
+    @patch("agent.pipelines.web.get_llm_client")
+    def test_parent_skips_synthesize_when_synthesis_already_completed(
+        self, _mock_llm, mock_single_pass, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "content_type": "substack_text", "total": 1}),
+            encoding="utf-8",
+        )
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+        vault_note = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
+        vault_note.parent.mkdir(parents=True, exist_ok=True)
+        vault_note.write_text("# Existing batch note\n", encoding="utf-8")
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        task_id = create_task(
+            conn, post, "substack_text", slug,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+            status="in_progress",
+        )
+        from agent.db import ensure_parent_media_deferral
+
+        # Vault note alone no longer gates; deferral must be reconciled (ingest count = expected).
+        ensure_parent_media_deferral(conn, slug, post, "substack_text", 0)
+        conn.commit()
+        conn.close()
+        task_dict["id"] = task_id
+
+        result = step_synthesize_web(task_dict, config)
+        assert result == "synthesis already completed"
+        mock_single_pass.assert_not_called()
+        assert vault_note.read_text(encoding="utf-8") == "# Existing batch note\n"
 
     def test_deferred_media_batch_finished_requires_synthesize_signal(self, config, tmp_path):
         from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest, update_ingest_status

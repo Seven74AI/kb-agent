@@ -114,6 +114,44 @@ class TestAppendToParent:
         ).fetchone()
         assert row["media_appended"] == 1
 
+    def test_append_parent_media_atomic_commits_before_os_replace(self, config, conn, monkeypatch):
+        from agent.db import append_parent_media_atomic, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+        order: list[str] = []
+
+        real_replace = os.replace
+
+        def tracking_replace(src, dst):
+            order.append("replace")
+            assert conn.in_transaction is False
+            row = conn.execute(
+                "SELECT media_appended FROM ingest_queue WHERE id=?",
+                (ingest_id,),
+            ).fetchone()
+            assert row["media_appended"] == 1
+            assert src.read_text(encoding="utf-8") != raw.read_text(encoding="utf-8")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", tracking_replace)
+
+        assert append_parent_media_atomic(conn, ingest_id, raw, "Image", "OCR text") is True
+        assert order == ["replace"]
+        body = raw.read_text(encoding="utf-8")
+        assert "OCR text" in body
+        assert not list(config.temp_dir.glob("*.tmp"))
+
 
 class TestDeferredSynthesizeTags:
     def test_dispatch_includes_parent_tags_from_task(self, tmp_path, monkeypatch, config, conn):
@@ -864,7 +902,7 @@ class TestBatchPipelineIdKeyedDownloadArtifacts:
                 return MagicMock(returncode=0)
             return MagicMock(returncode=0)
 
-        monkeypatch.setattr("agent.pipelines.youtube._validate_cookies", lambda: None)
+        monkeypatch.setattr("agent.pipelines.youtube._validate_cookies", lambda _cfg: None)
         monkeypatch.setattr("agent.pipelines.youtube.subprocess.run", fake_run)
         monkeypatch.setattr("agent.pipelines.youtube.ensure_h264", lambda p: p)
 

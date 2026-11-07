@@ -270,7 +270,7 @@ def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
     ).fetchone()
     assert row["status"] == "queued"
     assert row["error"] is None
-    assert row["attempts"] == 1
+    assert row["attempts"] == 2
 
 
 def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
@@ -294,7 +294,7 @@ def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
     assert row["error"] == "gave up"
 
 
-def test_queue_ingest_duplicate_revive_does_not_increment_attempts(tmp_path):
+def test_queue_ingest_revive_and_recover_single_attempt_accounting(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
     conn.row_factory = sqlite3.Row
@@ -316,14 +316,56 @@ def test_queue_ingest_duplicate_revive_does_not_increment_attempts(tmp_path):
     assert recover_failed_media(conn, max_attempts=3) == 0
     row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url=?", (url,)).fetchone()
     assert row["status"] == "queued"
-    assert row["attempts"] == 1
+    assert row["attempts"] == 2
 
     conn.execute("UPDATE ingest_queue SET status='failed' WHERE url=?", (url,))
     conn.commit()
     assert recover_failed_media(conn, max_attempts=3) == 1
     row = conn.execute("SELECT status, attempts FROM ingest_queue WHERE url=?", (url,)).fetchone()
     assert row["status"] == "queued"
-    assert row["attempts"] == 2
+    assert row["attempts"] == 3
+
+
+def test_queue_ingest_duplicate_revive_reaches_max_attempts(tmp_path):
+    """Permanent failures must exhaust INGEST_MAX_MEDIA_ATTEMPTS via duplicate revive."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://example.com/stuck.png"
+    max_attempts = 3
+    queue_ingest(
+        conn, url, "substack_image", "stuck",
+        parent_slug="article", media_kind="image",
+        max_attempts=max_attempts,
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='ocr failed', attempts=0 WHERE url=?",
+        (url,),
+    )
+    conn.commit()
+    for expected in (1, 2, 3):
+        queue_ingest(
+            conn, url, "substack_image", "stuck",
+            parent_slug="article", media_kind="image",
+            max_attempts=max_attempts,
+        )
+        row = conn.execute(
+            "SELECT status, attempts FROM ingest_queue WHERE url=?", (url,),
+        ).fetchone()
+        assert row["status"] == "queued"
+        assert row["attempts"] == expected
+        conn.execute("UPDATE ingest_queue SET status='failed' WHERE url=?", (url,))
+        conn.commit()
+    queue_ingest(
+        conn, url, "substack_image", "stuck",
+        parent_slug="article", media_kind="image",
+        max_attempts=max_attempts,
+    )
+    row = conn.execute(
+        "SELECT status, attempts FROM ingest_queue WHERE url=?", (url,),
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["attempts"] == 3
 
 
 def test_has_active_synthesize_task_excludes_failed(tmp_path):
@@ -554,7 +596,7 @@ def test_embedded_video_download_failure_sets_failed(tmp_path, monkeypatch):
     assert status == "failed"
 
 
-def test_has_completed_parent_synthesis_parent_task_or_vault(tmp_path):
+def test_has_completed_parent_synthesis_parent_task_or_synthesize(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
     slug = "synth_owner"
@@ -577,7 +619,68 @@ def test_has_completed_parent_synthesis_parent_task_or_vault(tmp_path):
     note_dir = vault / "Knowledge base" / "articles"
     note_dir.mkdir(parents=True)
     (note_dir / f"{slug}.md").write_text("# Note\n", encoding="utf-8")
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is False
+
+    syn_id = create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    conn.commit()
     assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is True
+    conn.execute("DELETE FROM tasks WHERE id = ?", (syn_id,))
+
+
+def test_has_completed_parent_synthesis_vault_requires_deferral_reconciled(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    slug = "stale_vault_parent"
+    vault = tmp_path / "vault"
+    url = "https://blog.substack.com/p/stale"
+    note_dir = vault / "Knowledge base" / "articles"
+    note_dir.mkdir(parents=True)
+    (note_dir / f"{slug}.md").write_text("# stale\n", encoding="utf-8")
+
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is False
+
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    queue_ingest(
+        conn, "https://example.com/a.png", "substack_image", "a",
+        parent_slug=slug, media_kind="image",
+    )
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is False
+
+    queue_ingest(
+        conn, "https://example.com/b.png", "substack_image", "b",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (slug,))
+    conn.commit()
+    assert get_parent_media_deferral(conn, slug)["expected_total"] == 2
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is True
+
+
+def test_ensure_parent_media_deferral_grows_expected_total(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "grow_parent"
+    url = "https://blog.substack.com/p/grow"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 1
+
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 3)
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 3
+
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 3
 
 
 def test_maybe_dispatch_skips_when_parent_synthesis_completed(tmp_path, monkeypatch):
@@ -615,6 +718,62 @@ def test_maybe_dispatch_skips_when_parent_synthesis_completed(tmp_path, monkeypa
 
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
     dispatch.assert_not_called()
+
+
+def test_maybe_dispatch_unlocks_when_expected_total_grows(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "embed_growth_parent"
+    url = "https://blog.substack.com/p/growth"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 2}),
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    def fake_dispatch(dispatch_url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t-growth"}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    assert calls == []
+
+    queue_ingest(
+        conn, "https://example.com/i2", "substack_image", "i2",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched' WHERE slug='i2' AND parent_slug=?",
+        (parent,),
+    )
+    conn.commit()
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 2
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+    assert calls == [parent]
 
 
 def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path, monkeypatch):
