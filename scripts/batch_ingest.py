@@ -271,6 +271,23 @@ def _parent_tags(conn, parent_slug: str):
     return None
 
 
+def _supersede_deferred_parent_task(conn, parent_slug: str, *, synthesize_task_id: str | None = None) -> None:
+    """Mark the original Substack parent ingestion task terminal after batch synthesis."""
+    detail = "deferred synthesis dispatched"
+    if synthesize_task_id:
+        detail = f"{detail} (task {synthesize_task_id})"
+    reason = f"{detail}; parent ingestion superseded"
+    with conn:
+        conn.execute(
+            """
+            UPDATE tasks SET status = 'completed', error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type NOT GLOB '*_synthesize'
+            AND status IN ('paused', 'pending', 'in_progress')
+            """,
+            (reason, parent_slug),
+        )
+
+
 def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     """Fire the parent's deferred synthesis once every sibling media item is done."""
     if parent_slug in _deferred_synthesize_dispatched:
@@ -303,8 +320,10 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     )
     if rr.get("duplicate"):
         _deferred_synthesize_dispatched.add(parent_slug)
+        _supersede_deferred_parent_task(conn, parent_slug, synthesize_task_id=rr.get("task_id"))
         return False
     _deferred_synthesize_dispatched.add(parent_slug)
+    _supersede_deferred_parent_task(conn, parent_slug, synthesize_task_id=rr.get("task_id"))
     print(f"  [deferred] {parent_slug}: all media done -> synthesize")
     return True
 

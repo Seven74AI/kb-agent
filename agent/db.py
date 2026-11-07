@@ -365,23 +365,44 @@ def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
     return row["n"]
 
 
+def is_synthesize_content_type(content_type: str) -> bool:
+    """True when *content_type* is a deferred synthesize-only pipeline variant."""
+    return (content_type or "").endswith("_synthesize")
+
+
+_ACTIVE_TASK_STATUSES = (
+    "'pending', 'in_progress', 'paused', 'done', 'completed'"
+)
+
+
 def find_active_task(
     conn: sqlite3.Connection, slug: str, content_type: str,
 ) -> str | None:
     """Return a task id when ``dispatch_synthesize`` must not enqueue another.
 
-    Cross-run idempotency: any successful or in-flight synthesis for
-    (slug, content_type) is treated as a duplicate — including terminal
-    ``done`` / ``completed``. Only ``failed`` is omitted so reconciliation or
-    a later batch run may dispatch a retry; a done synthesis must never run twice.
+    Cross-run idempotency: any successful or in-flight synthesis for the slug
+    is treated as a duplicate — including terminal ``done`` / ``completed``.
+    For synthesize pipelines (``*_synthesize``), idempotency is slug-wide so
+    ``substack_text_synthesize`` and ``substack_image_synthesize`` collide and
+    a later parent retry cannot race a batch-dispatched synthesize task.
+    Only ``failed`` is omitted so reconciliation or a later batch run may
+    dispatch a retry; a done synthesis must never run twice.
     """
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT id FROM tasks WHERE slug = ? AND content_type = ? "
-        "AND status IN ('pending', 'in_progress', 'paused', 'done', 'completed') "
-        "LIMIT 1",
-        (slug, content_type),
-    ).fetchone()
+    if is_synthesize_content_type(content_type):
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+            f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
+            "LIMIT 1",
+            (slug,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE slug = ? AND content_type = ? "
+            f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
+            "LIMIT 1",
+            (slug, content_type),
+        ).fetchone()
     return row["id"] if row else None
 
 
@@ -482,18 +503,37 @@ def claim_ingest_items(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def recover_stale_ingest(conn: sqlite3.Connection, max_age_minutes: int = 120) -> int:
+def recover_stale_ingest(
+    conn: sqlite3.Connection,
+    max_age_minutes: int = 120,
+    max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS,
+) -> int:
     """Reset in-flight items abandoned by a crashed batch back to queued.
 
     A crash mid-run leaves items in downloading/staged/transcribing/dispatching.
-    Anything stuck in those states past max_age_minutes is stale -> queued + error.
+    Anything stuck in those states past max_age_minutes is stale. Each recovery
+    increments ``attempts``; items that exceed ``max_attempts`` are marked
+    ``failed`` instead of requeued forever.
     """
+    stale_filter = (
+        "status IN ('downloading','staged','transcribing','dispatching') "
+        "AND updated_at IS NOT NULL AND updated_at < datetime('now', ?)"
+    )
+    age_param = (f"-{max_age_minutes} minutes",)
     with conn:
+        conn.execute(
+            "UPDATE ingest_queue SET status='failed', "
+            "error='stale batch recovery exceeded max attempts', "
+            "attempts = attempts + 1, updated_at = datetime('now') "
+            f"WHERE {stale_filter} AND attempts + 1 >= ?",
+            age_param + (max_attempts,),
+        )
         cur = conn.execute(
-            "UPDATE ingest_queue SET status='queued', error='recovered from stale batch run' "
-            "WHERE status IN ('downloading','staged','transcribing','dispatching') "
-            "AND updated_at IS NOT NULL AND updated_at < datetime('now', ?)",
-            (f"-{max_age_minutes} minutes",),
+            "UPDATE ingest_queue SET status='queued', "
+            "error='recovered from stale batch run', "
+            "attempts = attempts + 1, updated_at = datetime('now') "
+            f"WHERE {stale_filter} AND attempts + 1 < ?",
+            age_param + (max_attempts,),
         )
         return cur.rowcount
 

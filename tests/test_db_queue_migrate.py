@@ -10,14 +10,17 @@ from agent.core.submit import dispatch_synthesize
 from agent.config import Config
 from agent.db import (
     AGENT_SCHEMA,
+    INGEST_MAX_MEDIA_ATTEMPTS,
     _migrate,
     claim_task,
     count_pending_media,
     create_task,
+    find_active_task,
     get_task_steps,
     init_db,
     queue_ingest,
     recover_failed_media,
+    recover_stale_ingest,
     resume_tasks_by_reason,
     serialize_tags,
     update_step,
@@ -219,7 +222,7 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
         ("awaiting media: 1 images enqueued", task_id),
     )
     conn.execute(
-        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        "UPDATE task_steps SET status = 'running', output = 'mid' WHERE task_id = ? AND name = 'substack_cleanup'",
         (task_id,),
     )
     conn.execute(
@@ -230,6 +233,7 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
 
     assert retry_task(conn, task_id) is True
     steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["substack_cleanup"] == "running"
     assert steps["substack_embedded_media"] == "pending"
     assert steps["synthesize_note"] == "pending"
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
@@ -282,6 +286,67 @@ def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
     row = conn.execute("SELECT status, error FROM ingest_queue WHERE url=?", (url,)).fetchone()
     assert row["status"] == "failed"
     assert row["error"] == "gave up"
+
+
+def test_find_active_task_synthesize_slug_wide(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "shared_parent"
+    synth_id = create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="in_progress",
+    )
+    assert find_active_task(conn, slug, "substack_image_synthesize") == synth_id
+    assert find_active_task(conn, slug, "substack_text") is None
+
+
+def test_recover_stale_ingest_increments_attempts(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    ingest_id, _ = queue_ingest(conn, "https://example.com/v.mp4", "youtube", "vid1")
+    conn.execute(
+        "UPDATE ingest_queue SET status='downloading', attempts=0, "
+        "updated_at=datetime('now', '-200 minutes') WHERE id=?",
+        (ingest_id,),
+    )
+    conn.commit()
+
+    assert recover_stale_ingest(conn, max_age_minutes=120) == 1
+    row = conn.execute(
+        "SELECT status, attempts, error FROM ingest_queue WHERE id=?",
+        (ingest_id,),
+    ).fetchone()
+    assert row["status"] == "queued"
+    assert row["attempts"] == 1
+    assert "recovered from stale" in row["error"]
+
+
+def test_recover_stale_ingest_fails_when_attempts_exhausted(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    ingest_id, _ = queue_ingest(conn, "https://example.com/v2.mp4", "youtube", "vid2")
+    conn.execute(
+        "UPDATE ingest_queue SET status='transcribing', "
+        f"attempts={INGEST_MAX_MEDIA_ATTEMPTS - 1}, "
+        "updated_at=datetime('now', '-200 minutes') WHERE id=?",
+        (ingest_id,),
+    )
+    conn.commit()
+
+    assert recover_stale_ingest(conn, max_age_minutes=120) == 0
+    row = conn.execute(
+        "SELECT status, attempts, error FROM ingest_queue WHERE id=?",
+        (ingest_id,),
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["attempts"] == INGEST_MAX_MEDIA_ATTEMPTS
+    assert "exceeded max attempts" in row["error"]
 
 
 def test_dispatch_synthesize_idempotent_when_task_pending(tmp_path):
