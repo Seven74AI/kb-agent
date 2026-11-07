@@ -24,7 +24,8 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         "torch==2.9.1",
-        "transformers",
+        "torchvision",
+        "transformers>=4.49,<5",
         "qwen-vl-utils",
         "accelerate",
     )
