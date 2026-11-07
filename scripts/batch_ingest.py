@@ -13,6 +13,7 @@ its task is created; a crash re-runs cleanly next night.
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -130,7 +131,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
     for q in video_links:
         vp, err = _download_video(q, config)
         if vp is None:
-            update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
+            update_ingest_status(conn, q["id"], "failed", error=err or "download failed")
             failed += 1
             causes.append(f"{q['slug']}: {err}")
             print(f"  [failed] {q['slug']}: {err}")
@@ -164,29 +165,29 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
         print((r.stdout or r.stderr)[-1500:])
         if r.returncode != 0:
             for q, _ in items:
-                update_ingest_status(conn, q["id"], "queued", error=f"batch_transcribe failed (exit {r.returncode})")
+                update_ingest_status(conn, q["id"], "failed", error=f"batch_transcribe failed (exit {r.returncode})")
             failed += len(items)
             causes.append(f"{ctype}: batch_transcribe exit {r.returncode}")
-            print(f"  [error] batch_transcribe failed ({r.returncode}); leaving {ctype} queued")
+            print(f"  [error] batch_transcribe failed ({r.returncode}); marking {ctype} failed")
             continue
 
         # 3. upload video + transcript, then dispatch synthesize-only
         for q, vdest in items:
             merged = out_dir / f"{q['slug']}.json"
             if not merged.exists():
-                update_ingest_status(conn, q["id"], "queued", error="no merged transcript produced")
+                update_ingest_status(conn, q["id"], "failed", error="no merged transcript produced")
                 failed += 1
                 causes.append(f"{q['slug']}: no merged transcript")
-                print(f"  [warn] {q['slug']}: no merged transcript; leaving queued")
+                print(f"  [warn] {q['slug']}: no merged transcript; marked failed")
                 continue
             try:
                 upload_file_to_minio(vdest, f"{config.minio_bucket}/videos/{q['slug']}{vdest.suffix.lower()}")
                 upload_file_to_minio(merged, f"{config.minio_bucket}/transcripts/{q['slug']}.json")
             except Exception as exc:  # noqa: BLE001
-                update_ingest_status(conn, q["id"], "queued", error=f"upload failed: {exc}")
+                update_ingest_status(conn, q["id"], "failed", error=f"upload failed: {exc}")
                 failed += 1
                 causes.append(f"{q['slug']}: upload failed")
-                print(f"  [warn] {q['slug']}: upload failed ({exc}); leaving queued")
+                print(f"  [warn] {q['slug']}: upload failed ({exc}); marked failed")
                 continue
             update_ingest_status(conn, q["id"], "dispatching")
             rr = dispatch_synthesize(
@@ -252,14 +253,30 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
                 f"  [skip] {parent_slug}: ingest rows {actual} != manifest total {expected}"
             )
             return False
-    dispatch_synthesize(
+    rr = dispatch_synthesize(
         manifest["url"], config, conn,
         content_type=f"{manifest['content_type']}_synthesize", slug=parent_slug,
         tags=_parent_tags(conn, parent_slug),
     )
+    if rr.get("duplicate"):
+        _deferred_synthesize_dispatched.add(parent_slug)
+        return False
     _deferred_synthesize_dispatched.add(parent_slug)
     print(f"  [deferred] {parent_slug}: all media done -> synthesize")
     return True
+
+
+def _reconcile_deferred_parent_syntheses(conn, config) -> None:
+    """Dispatch deferred synthesis for parents whose media finished in a prior run."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT DISTINCT parent_slug FROM ingest_queue WHERE COALESCE(parent_slug, '') != ''",
+    ).fetchall()
+    for row in rows:
+        parent_slug = row["parent_slug"]
+        if count_pending_media(conn, parent_slug) > 0:
+            continue
+        _maybe_dispatch_parent_synthesize(conn, config, parent_slug)
 
 
 def _process_embedded_images(image_items: list[dict], config, conn, run_id: int) -> None:
@@ -304,7 +321,7 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
     print((r.stdout or r.stderr)[-800:])
     if r.returncode != 0:
         for q, _ in staged:
-            update_ingest_status(conn, q["id"], "queued", error="batch_ocr failed")
+            update_ingest_status(conn, q["id"], "failed", error="batch_ocr failed")
         return
 
     for q, dest in staged:
@@ -333,7 +350,7 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
     for q in video_items:
         vp, err = _download_video(q, config)
         if vp is None:
-            update_ingest_status(conn, q["id"], "queued", error=err or "download failed")
+            update_ingest_status(conn, q["id"], "failed", error=err or "download failed")
             continue
         ctype = q["content_type"]
         bdir = base / "batch_videos" / run_tag / ctype
@@ -359,7 +376,7 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
         )
         if r.returncode != 0:
             for q, _ in items:
-                update_ingest_status(conn, q["id"], "queued", error=f"batch_transcribe failed ({r.returncode})")
+                update_ingest_status(conn, q["id"], "failed", error=f"batch_transcribe failed ({r.returncode})")
             continue
         for q, vdest in items:
             merged = out_dir / f"{q['slug']}.json"
@@ -403,6 +420,7 @@ def main() -> None:
         claimed = claim_ingest_items(conn)
         if not claimed:
             print("No queued ingest links.")
+            _reconcile_deferred_parent_syntheses(conn, config)
             finish_batch_run(conn, run_id, "ok", 0, 0, 0, "no queued items")
             return
 
@@ -442,6 +460,8 @@ def main() -> None:
                 failed += 1
                 causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or status}")
                 print(f"  [failed] {q['slug']} -> {status}")
+
+        _reconcile_deferred_parent_syntheses(conn, config)
 
         summary = "; ".join(dict.fromkeys(causes[:5])) or None
         finish_batch_run(conn, run_id, "failed" if failed else "ok", total, failed, dispatched, summary)

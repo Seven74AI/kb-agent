@@ -37,6 +37,17 @@ from agent.streaming import log_progress
 # Populated at startup from pipelines/*.py modules
 STEP_REGISTRY: dict[str, tuple[Any, str]] = {}
 
+# Content types routed through _execute_video (video semaphore — pyannote RAM).
+VIDEO_TASK_CONTENT_TYPES = (
+    "youtube",
+    "bunny_stream",
+    "instagram_reel",
+    "mega_video",
+    "rumble",
+    "substack_video",
+    "threads_video",
+)
+
 
 def register_step(name: str, fn, on_error: str = "retry"):
     """Register a pipeline step function with its error handling mode.
@@ -256,10 +267,7 @@ class Consumer:
                 task_id = task["id"]
                 content_type = task.get("content_type", "web")
 
-                if content_type in (
-                    "youtube", "bunny_stream", "instagram_reel", "mega", "mega_video",
-                    "threads_video",
-                ):
+                if content_type in VIDEO_TASK_CONTENT_TYPES:
                     # Video tasks — semaphore-controlled
                     task_obj = asyncio.create_task(self._execute_video(task))
                 else:

@@ -926,13 +926,13 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
             "Instagram sessionid missing — re-export cookies",
             error_type=ErrorType.PAUSE, step_name="ig_comment_fetch",
         )
-    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    cookie_path = config.cookie_dir / "ig_cookies.txt"
     media_id = _shortcode_to_media_id(shortcode)
 
     result = subprocess.run(
         [
             "curl", "-s", "--max-time", "25",
-            "-H", f"Cookie: {cookie_header}",
+            "-b", str(cookie_path),
             "-H", f"x-ig-app-id: {IG_WEB_APP_ID}",
             "-H", f"x-csrftoken: {cookies.get('csrftoken', '')}",
             "-H", f"User-Agent: {IG_APP_UA}",

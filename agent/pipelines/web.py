@@ -240,12 +240,16 @@ def _extract_native_video_id(html: str) -> str | None:
     return m.group(1) or m.group(2)
 
 
-def _fetch_substack_html(url: str, config: Config) -> str:
-    cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+def _fetch_substack_html(url: str, config: Config | None = None) -> str:
     cmd = ["curl", "-s", "-L", "--max-time", "20", url]
-    if cookie.exists():
-        cmd += ["-b", str(cookie)]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if config is not None:
+        cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+        if cookie.exists():
+            cmd += ["-b", str(cookie)]
+    result = subprocess.run(
+        cmd,
+        capture_output=True, text=True, timeout=30,
+    )
     return result.stdout or ""
 
 

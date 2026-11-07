@@ -14,6 +14,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.instagram import (
     _validate_ig_cookies,
+    _fetch_ig_comment,
     _is_music_only,
     _format_transcript_for_llm,
     _slug_path,
@@ -605,3 +606,52 @@ class TestMusicOnlyDetection:
 
     def test_carousel_slide_cap_constant(self):
         assert CAROUSEL_SLIDE_CAP == 2, "Carousel slide cap must be 2 per spec"
+
+
+class TestIgCommentFetchSecurity:
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_uses_cookie_file_not_argv_header(self, mock_run, config, tmp_path):
+        """Session cookies must not appear in curl argv (visible in ps)."""
+        secret_session = "SUPER_SECRET_SESSIONID_VALUE_XYZ"
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        cookie_file = cookie_dir / "ig_cookies.txt"
+        cookie_file.write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", secret_session,
+            ]) + "\n"
+            + "\t".join([
+                ".instagram.com", "TRUE", "/", "FALSE", "0",
+                "csrftoken", "csrf_test_token",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "comments": [{
+                    "pk": 999888777,
+                    "text": "Test comment body",
+                    "created_at": 1700000000,
+                    "user": {"username": "commenter"},
+                }],
+                "caption": {
+                    "text": "Parent reel caption",
+                    "user": {"username": "parent_user"},
+                },
+            }),
+        )
+
+        url = "https://www.instagram.com/reel/ShortCode1/?comment_id=999888777"
+        _fetch_ig_comment(url, config)
+
+        cmd = mock_run.call_args[0][0]
+        argv_str = " ".join(cmd)
+        assert secret_session not in argv_str
+        assert "Cookie:" not in argv_str
+        assert "-b" in cmd
+        assert str(cookie_file) in cmd
