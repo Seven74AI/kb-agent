@@ -42,7 +42,7 @@ fast, free first pass; route the ambiguous tail through Jev.
 **Positive:** ambiguous-tail accuracy ~100% (was 44%); cheap (~$0.0002/month
 at current volume); fast (~200 ms); isolated in `agent/router.py`.
 
-**Negative:** the ingest path now depends on a hosted API (OpenRouter) and an
+**Negative:** the ingest path depends on a hosted API (OpenRouter) and an
 `OPENROUTER_API_KEY`. Mitigated by the regex fast path (most URLs never call
 Jev) and the legacy fallback (Jev outage degrades to the old behavior, not a
 hard failure).
