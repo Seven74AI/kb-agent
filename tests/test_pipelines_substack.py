@@ -1,5 +1,6 @@
-"""Tests for the Substack pipeline — detection, cleanup, video pause, image OCR."""
+"""Tests for the Substack pipeline — detection, cleanup, embedded media, native video."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,7 +16,9 @@ from agent.detection import _detect_substack_subtype
 from agent.pipelines.web import (
     step_substack_cleanup,
     step_substack_embedded_media,
+    step_substack_video_extract_metadata,
     _extract_body_images,
+    _extract_rumble_urls,
     _extract_youtube_ids,
     SUBSTACK_BOILERPLATE,
 )
@@ -215,9 +218,51 @@ class TestSubstackEmbeddedMedia:
         ids = _extract_youtube_ids(html)
         assert ids == ["xwmL7Qr6ft4", "abcDEF12345"]
 
+    def test_extract_rumble_urls(self):
+        html = (
+            '<a href="https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy">a</a>'
+            '<a href="https://rumble.com/vabc123-short">b</a>'
+            '<a href="https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy">dup</a>'
+        )
+        assert _extract_rumble_urls(html) == [
+            "https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy",
+            "https://rumble.com/vabc123-short",
+        ]
+
+
+class TestSubstackVideoMetadata:
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_finds_video_upload_id(self, mock_run, config, task_dict):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                '<title>I MADE A VLOG</title>'
+                '<script>window._preloads = {"post":{"type":"video",'
+                '"videoUpload":{"id":"a7315fa8-8027-4432-a7e3-652479bc5275"}}};</script>'
+            ),
+        )
+        result = step_substack_video_extract_metadata(task_dict, config)
+        assert "a7315fa8" in result
+        meta = json.loads(
+            (config.temp_dir / f"{task_dict['slug']}_metadata.json").read_text(encoding="utf-8")
+        )
+        assert meta["video_id"] == "a7315fa8-8027-4432-a7e3-652479bc5275"
+        assert meta["title"] == "I MADE A VLOG"
+        assert meta["domain"] == "testblog.substack.com"
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_no_video_id_raises_pause(self, mock_run, config, task_dict):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="<html><body>text post</body></html>")
+        with pytest.raises(Exception) as exc:
+            step_substack_video_extract_metadata(task_dict, config)
+        assert "videoUpload.id" in str(exc.value) or "video id" in str(exc.value)
+
     @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._download_and_ocr")
-    @patch("agent.pipelines.web._enqueue_embedded_videos")
+    @patch("agent.pipelines.web._enqueue_embedded_media")
     def test_ocrs_images_and_enqueues_videos(
         self, mock_enqueue, mock_ocr, mock_fetch, config, task_dict,
     ):
@@ -238,10 +283,10 @@ class TestSubstackEmbeddedMedia:
         content = raw_path.read_text()
         assert "## Image 1" in content
         assert "OCR text from chart" in content
-        mock_enqueue.assert_called_once_with(["xyzXYZ12345"], config, None)
+        mock_enqueue.assert_called_once_with(["xyzXYZ12345"], [], config, None)
 
     @patch("agent.pipelines.web._fetch_substack_html")
-    @patch("agent.pipelines.web._enqueue_embedded_videos")
+    @patch("agent.pipelines.web._enqueue_embedded_media")
     def test_no_html_is_noop(self, mock_enqueue, mock_fetch, config, task_dict):
         mock_fetch.return_value = ""
         result = step_substack_embedded_media(task_dict, config)
