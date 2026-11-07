@@ -732,7 +732,12 @@ def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
     slug = task.get("slug", task["id"][:8])
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
-        if has_completed_parent_synthesis(conn, slug, vault_path=config.vault_path):
+        if has_completed_parent_synthesis(
+            conn,
+            slug,
+            vault_path=config.vault_path,
+            temp_dir=Path(config.temp_dir),
+        ):
             _supersede_deferred_parent_task(conn, slug)
             return True
         if not _parent_article_deferred_to_batch(task, config, conn):

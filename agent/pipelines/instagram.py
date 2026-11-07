@@ -64,6 +64,14 @@ MUSIC_ONLY_CHAR_THRESHOLD = 50
 CAROUSEL_SLIDE_CAP = 2
 
 
+def _download_artifact_stem(task: dict) -> str:
+    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
+    if task.get("_batch_ingest"):
+        return task["id"]
+    slug = task.get("slug", task["id"][:8])
+    return _slug_path(slug)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _validate_ig_cookies(cookie_dir: Path | None = None) -> None:
@@ -179,10 +187,17 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
+    stem = _download_artifact_stem(task)
+    batch = task.get("_batch_ingest")
 
-    output_path = Path(config.temp_dir) / f"{safe_slug}_reel.mp4"
+    if batch:
+        output_path = Path(config.temp_dir) / f"{stem}.mp4"
+        ytdlp_out = str(output_path.with_suffix(""))
+        glob_pattern = f"{stem}.*"
+    else:
+        output_path = Path(config.temp_dir) / f"{stem}_reel.mp4"
+        ytdlp_out = str(output_path.with_suffix(""))
+        glob_pattern = f"{stem}_reel.*"
 
     try:
         _assert_fetch_url_allowed(url)
@@ -197,7 +212,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
             YTDLP_BIN,
             "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
-            "--output", str(output_path.with_suffix("")),
+            "--output", ytdlp_out,
             *IGDL_RATE_FLAGS,
             url,
         ],
@@ -226,10 +241,14 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
         )
 
     # yt-dlp may add extension automatically; find the actual file
-    actual_files = list(Path(config.temp_dir).glob(f"{safe_slug}_reel.*"))
+    actual_files = [
+        p for p in Path(config.temp_dir).glob(glob_pattern)
+        if p.is_file()
+        and (not batch or p.suffix.lower() in (".mp4", ".webm", ".mkv", ".mov"))
+    ]
     if not actual_files:
         raise StepError(
-            f"No output file found for slug {safe_slug}",
+            f"No output file found for stem {stem}",
             error_type=ErrorType.RETRY,
             step_name="reel_download",
         )

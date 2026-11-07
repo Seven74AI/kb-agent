@@ -31,6 +31,8 @@ from agent.db import (
     recover_stale_ingest,
     resume_tasks_by_reason,
     serialize_tags,
+    fail_task,
+    pause_task,
     update_step,
 )
 
@@ -229,6 +231,41 @@ def test_resume_deferred_media_denies_bulk_resume(tmp_path, pause_reason):
     assert is_deferred_media_pause(pause_reason)
     assert resume_tasks_by_reason(conn, f"%{pause_reason[:12]}%") == 0
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "paused"
+
+
+def test_get_next_step_blocks_pending_synthesize_when_embedded_media_paused(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note", "quality_gate"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("awaiting media: 2 images enqueued", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    )
+    defer_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'defer' WHERE id = ?",
+        (defer_id,),
+    )
+    conn.commit()
+
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "substack_embedded_media"
+    assert nxt["status"] == "paused"
 
 
 @pytest.mark.parametrize(
@@ -786,6 +823,130 @@ def test_has_completed_parent_synthesis_vault_requires_deferral_reconciled(tmp_p
     ) is True
 
 
+def test_has_completed_parent_synthesis_vault_without_raw_unverified(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "vault_only_parent"
+    vault = tmp_path / "vault"
+    url = "https://blog.substack.com/p/vault-only"
+    note_dir = vault / "Knowledge base" / "articles"
+    note_dir.mkdir(parents=True)
+    (note_dir / f"{slug}.md").write_text("# note\n", encoding="utf-8")
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 0)
+    conn.commit()
+
+    assert has_completed_parent_synthesis(conn, slug, vault_path=vault) is False
+
+
+def test_reingest_new_media_redispatches_after_prior_cycle(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "reingest_parent"
+    url = "https://blog.substack.com/p/reingest"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    parent_id = create_task(
+        conn, url, "substack_text", parent,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("deferred synthesis dispatched; parent ingestion superseded", parent_id),
+    )
+    create_task(
+        conn, url, "substack_text_synthesize", parent,
+        ["synthesize_note"], status="completed",
+    )
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    _stamp_parent_raw_media(conn, config.temp_dir, parent)
+    note = config.vault_path / "Knowledge base" / "articles" / f"{parent}.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# cycle 1\n", encoding="utf-8")
+
+    assert has_completed_parent_synthesis(
+        conn, parent, vault_path=config.vault_path, temp_dir=config.temp_dir,
+    ) is True
+
+    queue_ingest(
+        conn, "https://example.com/i2", "substack_image", "i2",
+        parent_slug=parent, media_kind="image",
+    )
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched' WHERE id IN "
+        "(SELECT id FROM ingest_queue WHERE parent_slug=?)",
+        (parent,),
+    )
+    conn.commit()
+    _stamp_parent_raw_media(conn, config.temp_dir, parent)
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 2
+    assert get_parent_media_deferral(conn, parent)["media_changed"] == 1
+
+    assert has_completed_parent_synthesis(
+        conn, parent, vault_path=config.vault_path, temp_dir=config.temp_dir,
+    ) is False
+
+    calls: list[str] = []
+
+    def fake_dispatch(dispatch_url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t-reingest", "duplicate": False}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+    assert calls == [parent]
+    old_syn = conn.execute(
+        "SELECT status, error FROM tasks WHERE slug=? AND content_type GLOB '*_synthesize'",
+        (parent,),
+    ).fetchone()
+    assert old_syn["status"] == "failed"
+    assert "superseded by deferral media cycle" in (old_syn["error"] or "")
+
+
+def test_fresh_deferral_generation_ignores_superseded_parent(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "sup_parent"
+    url = "https://blog.substack.com/p/sup"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    tid = create_task(
+        conn, url, "substack_text", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("deferred synthesis dispatched; parent ingestion superseded", tid),
+    )
+    conn.commit()
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    conn.commit()
+
+    assert has_completed_parent_synthesis(conn, slug) is False
+
+
 def test_ensure_parent_media_deferral_grows_expected_total(tmp_path):
     from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
 
@@ -1254,6 +1415,61 @@ def test_update_step_failed_sets_finished_at(tmp_path):
     assert row["finished_at"] is not None
 
 
+def test_update_step_persists_scrubbed_output_at_rest(tmp_path):
+    """Invariant: task_steps.output must not retain raw paths at write time."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ?", (task_id,)
+    ).fetchone()["id"]
+
+    raw = "wrote /root/kb-agent/data/out.md via yt-dlp: cookiefile /root/secret/cookies.txt"
+    update_step(conn, step_id, "done", raw)
+    row = conn.execute(
+        "SELECT output FROM task_steps WHERE id = ?", (step_id,)
+    ).fetchone()
+    assert "/root/kb-agent" not in (row["output"] or "")
+    assert "[path]" in (row["output"] or "")
+    assert "cookiefile" in (row["output"] or "").lower()
+
+
+def test_fail_task_persists_scrubbed_error_at_rest(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    leaky = (
+        "Traceback (most recent call last):\n"
+        '  File "/root/kb-agent/agent/pipelines/video.py", line 9\n'
+        "RuntimeError: disk at /root/kb-agent/tmp/foo\n"
+    )
+    fail_task(conn, task_id, leaky)
+    row = conn.execute(
+        "SELECT error FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert "Traceback" not in (row["error"] or "")
+    assert "/root" not in (row["error"] or "")
+    assert "RuntimeError" in (row["error"] or "")
+
+
+def test_pause_task_persists_scrubbed_reason_at_rest(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    pause_task(conn, task_id, "cookies missing at /root/kb-agent/cookies/yt_cookies.txt")
+    row = conn.execute(
+        "SELECT error FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert "/root" not in (row["error"] or "")
+    assert "[path]" in (row["error"] or "")
+
+
 def test_update_step_paused_sets_finished_at(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -1435,6 +1651,85 @@ def test_process_videos_upload_failure_sets_failed(tmp_path, monkeypatch):
     assert failed == 1
     assert dispatched == 0
     assert conn.execute("SELECT status FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "failed"
+
+
+def test_process_videos_dispatch_failure_sets_failed(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(conn, "https://www.youtube.com/watch?v=tx4", "youtube", "yt_dispatch")
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_dispatch.mp4"
+    fake_video.write_bytes(b"x" * 200)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{q['id']}.json").write_text('{"segments": [{"text": "hello"}]}', encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        batch_ingest, "upload_file_to_minio", lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        batch_ingest,
+        "dispatch_synthesize",
+        lambda *a, **k: {"status": "error", "error": "unknown content_type: bad"},
+    )
+
+    failed, dispatched, causes = batch_ingest._process_videos([q], config, conn, 5)
+    assert failed == 1
+    assert dispatched == 0
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()
+    assert row["status"] == "failed"
+    assert "unknown content_type" in row["error"]
+    assert any("unknown content_type" in c for c in causes)
+
+
+def test_process_videos_dispatch_success_marks_dispatched(tmp_path, monkeypatch):
+    import subprocess
+
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(conn, "https://www.youtube.com/watch?v=tx5", "youtube", "yt_ok")
+    q = dict(conn.execute("SELECT * FROM ingest_queue").fetchone())
+    config = _batch_test_config(tmp_path)
+    fake_video = config.temp_dir / "yt_ok.mp4"
+    fake_video.write_bytes(b"x" * 200)
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+    def fake_run(cmd, **kwargs):
+        if "batch_transcribe.py" in cmd[1]:
+            out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{q['id']}.json").write_text('{"segments": [{"text": "hello"}]}', encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        return subprocess.run(cmd, **kwargs)
+
+    monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+    monkeypatch.setattr(batch_ingest, "upload_file_to_minio", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        batch_ingest,
+        "dispatch_synthesize",
+        lambda *a, **k: {"status": "pending", "task_id": "synth-1", "duplicate": True},
+    )
+
+    failed, dispatched, _ = batch_ingest._process_videos([q], config, conn, 6)
+    assert failed == 0
+    assert dispatched == 1
+    assert conn.execute("SELECT status FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "dispatched"
 
 
 def test_embedded_images_batch_ocr_failure_sets_failed(tmp_path, monkeypatch):

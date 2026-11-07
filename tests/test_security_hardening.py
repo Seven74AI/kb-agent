@@ -80,7 +80,7 @@ def test_upload_cookies_saves_mode_600(client, monkeypatch, tmp_path):
     cookie_dir = tmp_path / "cookies"
     monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
 
-    cookie_content = "LOGIN_INFO\n"
+    cookie_content = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tLOGIN_INFO\tabc\n"
     tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
     tmp.write(cookie_content.encode())
     tmp.close()

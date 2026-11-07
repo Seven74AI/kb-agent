@@ -278,6 +278,35 @@ async def test_execute_task_step_error_logs_sanitized(consumer, agent_db, logs_d
 
 
 @pytest.mark.asyncio
+async def test_consumer_logger_emits_scrubbed_error_without_traceback(caplog, consumer, agent_db):
+    """Journal-facing logger must not include exc_info frames; detail logger may."""
+    import logging
+
+    task_id = create_task(agent_db, "https://example.com", "web", "log_slug", ["log_step"])
+
+    def log_step(task, cfg):
+        raise RuntimeError("failed at /root/kb-agent/secret/file.txt")
+
+    register_step("log_step", log_step, "fail")
+
+    with caplog.at_level(logging.DEBUG):
+        await consumer._execute_task({"id": task_id, "content_type": "web"})
+
+    public = [r for r in caplog.records if r.name == "agent.consumer"]
+    assert public, "expected agent.consumer log records"
+    for record in public:
+        assert record.exc_info is None
+        assert "/root/kb-agent" not in record.getMessage()
+        assert "RuntimeError" in record.getMessage()
+
+    detail = [r for r in caplog.records if r.name == "agent.consumer.detail"]
+    assert detail, "expected detail logger record with traceback"
+    assert any(r.exc_info is not None for r in detail)
+
+    del STEP_REGISTRY["log_step"]
+
+
+@pytest.mark.asyncio
 async def test_execute_task_stdout_traceback_scrubbed(capsys, consumer, agent_db):
     """Process stdout must not print full tracebacks with absolute paths."""
     task_id = create_task(agent_db, "https://example.com", "web", "cap_slug", ["cap_step"])

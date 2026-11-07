@@ -357,7 +357,11 @@ def test_upload_cookies_success(client, monkeypatch, tmp_path):
     cookie_dir = tmp_path / "cookies"
     monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
 
-    cookie_content = "LOGIN_INFO\nSAPISID\n__Secure-3PSID\n"
+    cookie_content = (
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tFALSE\t0\tLOGIN_INFO\tabc\n"
+        ".youtube.com\tTRUE\t/\tFALSE\t0\tSAPISID\tdef\n"
+    )
     tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
     tmp.write(cookie_content.encode())
     tmp.close()
@@ -395,6 +399,79 @@ def test_upload_cookies_invalid_type(client):
     assert resp.status_code == 400
     data = json.loads(resp.data)
     assert "error" in data
+
+
+def test_upload_cookies_rejects_empty_file(client, monkeypatch, tmp_path):
+    cookie_dir = tmp_path / "cookies"
+    monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+    tmp.close()
+    try:
+        with open(tmp.name, "rb") as f:
+            resp = client.post(
+                "/upload-cookies",
+                data={
+                    "cookie_type": "yt_cookies.txt",
+                    "cookie_file": (f, "yt_cookies.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+        assert resp.status_code == 400
+        assert "empty" in json.loads(resp.data)["error"].lower()
+        assert not (cookie_dir / "yt_cookies.txt").exists()
+    finally:
+        os.unlink(tmp.name)
+
+
+def test_upload_cookies_rejects_non_netscape_content(client, monkeypatch, tmp_path):
+    cookie_dir = tmp_path / "cookies"
+    monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+    tmp.write(b"LOGIN_INFO\nnot-a-netscape-file\n")
+    tmp.close()
+    try:
+        with open(tmp.name, "rb") as f:
+            resp = client.post(
+                "/upload-cookies",
+                data={
+                    "cookie_type": "yt_cookies.txt",
+                    "cookie_file": (f, "yt_cookies.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+        assert resp.status_code == 400
+        assert "Netscape" in json.loads(resp.data)["error"]
+    finally:
+        os.unlink(tmp.name)
+
+
+def test_upload_cookies_rejects_oversized_payload(client, monkeypatch, tmp_path):
+    from agent.webhook import MAX_COOKIE_UPLOAD_BYTES
+
+    cookie_dir = tmp_path / "cookies"
+    monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
+
+    header = b"# Netscape HTTP Cookie File\n"
+    payload = header + (b"x" * (MAX_COOKIE_UPLOAD_BYTES - len(header) + 1))
+    tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+    tmp.write(payload)
+    tmp.close()
+    try:
+        with open(tmp.name, "rb") as f:
+            resp = client.post(
+                "/upload-cookies",
+                data={
+                    "cookie_type": "yt_cookies.txt",
+                    "cookie_file": (f, "yt_cookies.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+        assert resp.status_code == 400
+        assert "byte limit" in json.loads(resp.data)["error"].lower()
+    finally:
+        os.unlink(tmp.name)
 
 
 def test_dashboard_renders_html(client, monkeypatch, tmp_path):
