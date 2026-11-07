@@ -16,6 +16,7 @@ transcript-backed video note, same shape as YouTube.
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from agent.config import Config
@@ -38,6 +39,8 @@ from agent.pipelines.youtube import (
 )
 
 MAX_HEIGHT = 720
+# CDN mp4 URLs expire; only reuse metadata written during the current ingest.
+RUMBLE_METADATA_MAX_AGE_SEC = 6 * 3600
 
 
 def _flaresolverr_get(url: str) -> str:
@@ -123,13 +126,37 @@ def resolve_rumble(url: str) -> tuple[str, list[dict]]:
     return title, formats
 
 
+def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
+    """Use cached ``{slug}_metadata.json`` from extract_metadata when still fresh."""
+    slug = task.get("slug", task["id"][:8])
+    source_url = task["source_url"]
+    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    if meta_path.exists():
+        age_sec = time.time() - meta_path.stat().st_mtime
+        if age_sec <= RUMBLE_METADATA_MAX_AGE_SEC:
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                meta = None
+            if meta:
+                formats = meta.get("formats")
+                url_ok = meta.get("source_url", source_url) == source_url
+                if url_ok and isinstance(formats, list) and formats:
+                    return formats
+    _, formats = resolve_rumble(source_url)
+    return formats
+
+
 def step_rumble_extract_metadata(task: dict, config: Config) -> str:
     """Resolve title + formats and write ``{slug}_metadata.json``."""
     slug = task.get("slug", task["id"][:8])
     title, formats = resolve_rumble(task["source_url"])
     meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
     meta_path.write_text(
-        json.dumps({"title": title, "formats": formats}, ensure_ascii=False),
+        json.dumps(
+            {"title": title, "formats": formats, "source_url": task["source_url"]},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     return f"title={title[:60]} formats={len(formats)}"
@@ -140,7 +167,7 @@ def step_rumble_download_video(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     output_path = Path(config.temp_dir) / f"{slug}.mp4"
 
-    _, formats = resolve_rumble(task["source_url"])
+    formats = _load_rumble_formats(task, config)
     pick = None
     for f in formats:
         if f["height"] <= MAX_HEIGHT:
