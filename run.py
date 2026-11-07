@@ -83,14 +83,18 @@ def _recover_orphans(config: Config):
             )
             continue
 
-        # Dead process or no PID — reset to pending
+        # Dead process or no PID — reset step and task so claim_task can pick it up
         conn.execute(
             "UPDATE task_steps SET status = 'pending' WHERE id = ?",
             (step_id,),
         )
+        conn.execute(
+            "UPDATE tasks SET status = 'pending' WHERE id = ?",
+            (task_id,),
+        )
         print(
             f"[run] Recovered orphan task {task_id[:8]} — "
-            f"resetting step '{step_name}'"
+            f"resetting step '{step_name}' and task to pending"
         )
 
     conn.commit()

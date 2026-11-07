@@ -13,12 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
 from agent.detection import _classify_mega_filenames
+from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.pipelines.books import (
     _pdf_preflight,
     quality_score,
     step_extract_epub,
     step_extract_pdf,
     step_classify_content,
+    step_delegate_books,
     step_book_quality_gate,
     step_synthesize_book,
     step_megadl_download,
@@ -641,6 +643,68 @@ class TestContentClassification:
             assert book["extension"] == ".pdf"
             assert "classification" in book
             assert "quality_score" in book
+
+
+class TestDelegateBooks:
+    """Regression: delegate must fan out into per-book child tasks."""
+
+    def test_delegate_creates_child_tasks_per_book(self, config, mega_task, tmp_path):
+        """delegate creates one pending child task per classified epub/pdf book."""
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        epub_a = dl_dir / "alpha.epub"
+        epub_b = dl_dir / "beta.epub"
+        epub_a.write_text("epub a")
+        epub_b.write_text("epub b")
+
+        classify_json = step_classify_content(mega_task, config)
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'done', output = ? "
+            "WHERE task_id = ? AND name = 'classify_content'",
+            (classify_json, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        mega_task["id"] = parent_id
+        result = step_delegate_books(mega_task, config)
+        summary = json.loads(result)
+
+        assert summary["child_tasks_created"] == 2
+        child_ids = {c["task_id"] for c in summary["created"]}
+        assert len(child_ids) == 2
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        rows = conn.execute(
+            "SELECT id, content_type, status, slug FROM tasks "
+            "WHERE id != ? ORDER BY slug",
+            (parent_id,),
+        ).fetchall()
+        conn.close()
+
+        assert len(rows) == 2
+        for row in rows:
+            assert row[1] == "book_epub"
+            assert row[2] == "pending"
+        slugs = {row[3] for row in rows}
+        assert slugs == {
+            f"{mega_task['slug']}_alpha",
+            f"{mega_task['slug']}_beta",
+        }
 
 
 # ── Pipeline Registration Tests ───────────────────────────────────────────────

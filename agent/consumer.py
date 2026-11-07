@@ -172,11 +172,16 @@ class Consumer:
                 # Leave it — consumer will pick up when step finishes
                 continue
 
-            # Dead process or no PID — reset to pending
+            # Dead process or no PID — reset step and task so claim_task can pick it up
             update_step(self.agent_conn, step_id, "pending")
+            self.agent_conn.execute(
+                "UPDATE tasks SET status = 'pending' WHERE id = ?",
+                (task_id,),
+            )
+            self.agent_conn.commit()
             print(
                 f"[consumer] Recovered orphan task {task_id[:8]} — "
-                f"resetting step '{step_name}'"
+                f"resetting step '{step_name}' and task to pending"
             )
 
     @staticmethod
@@ -461,6 +466,12 @@ class Consumer:
         from agent.pipelines import get_pipeline
         content_type = task.get("content_type", "web")
         pipeline = get_pipeline(content_type)
+        if pipeline is None:
+            raise StepError(
+                f"No pipeline registered for content_type={content_type!r}",
+                error_type=ErrorType.FAIL,
+                step_name=step_name,
+            )
         entry = None
         if pipeline:
             for s in pipeline:

@@ -16,6 +16,7 @@ sys.path.insert(0, str(_here))
 from agent.config import Config
 from agent.db import (
     AGENT_SCHEMA,
+    claim_task,
     create_task,
     get_all_tasks,
     get_task_steps,
@@ -535,6 +536,15 @@ def test_recover_orphans_dead_process(consumer, agent_db):
         (task_id,),
     ).fetchone()
     assert step[0] == "pending"
+
+    task_row = agent_db.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert task_row[0] == "pending"
+
+    claimed = claim_task(agent_db)
+    assert claimed is not None
+    assert claimed["id"] == task_id
 
 
 def test_recover_orphans_alive_process(consumer, agent_db):

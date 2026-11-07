@@ -200,7 +200,7 @@ def _search_vault(
     for kw in keywords[:5]:  # Limit keywords to avoid excessive grep calls
         try:
             proc = subprocess.run(
-                ["grep", "-rl", "--include=*.md", kw, str(knowledge_dir)],
+                ["grep", "-rl", "--include=*.md", "--", kw, str(knowledge_dir)],
                 capture_output=True, text=True, timeout=30,
             )
             for line in proc.stdout.strip().split("\n"):

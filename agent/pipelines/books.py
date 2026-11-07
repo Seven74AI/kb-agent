@@ -252,6 +252,104 @@ def step_classify_content(task: dict, config: Config) -> str:
     })
 
 
+def step_delegate_books(task: dict, config: Config) -> str:
+    """Create one child task per classified book using its registered pipeline.
+
+    Reads the classify_content step output from agent.db and enqueues pending
+    tasks for each book whose pipeline is registered (e.g. book_epub, book_pdf).
+    """
+    from agent.core.slugify import SLUG_MAX_LEN
+    from agent.db import AGENT_SCHEMA, create_task, init_db
+    from agent.pipelines import PIPELINES, get_pipeline_names, import_all_pipelines
+
+    import_all_pipelines()
+
+    task_id = task["id"]
+    db_path = config.kb_agent_dir / "data" / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    try:
+        row = conn.execute(
+            "SELECT output FROM task_steps "
+            "WHERE task_id = ? AND name = 'classify_content' AND status = 'done' "
+            "ORDER BY step_order LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row or not row[0]:
+        raise StepError(
+            "classify_content output not found — cannot delegate",
+            error_type=ErrorType.FAIL,
+            step_name="delegate",
+        )
+
+    try:
+        classification = json.loads(row[0])
+    except json.JSONDecodeError as e:
+        raise StepError(
+            f"Invalid classify_content JSON: {e}",
+            error_type=ErrorType.FAIL,
+            step_name="delegate",
+        ) from e
+
+    books = classification.get("books") or []
+    parent_slug = task.get("slug", task["id"][:8])
+    tags = task.get("tags")
+
+    conn = init_db(db_path, AGENT_SCHEMA)
+    created: list[dict] = []
+    skipped: list[dict] = []
+    try:
+        for book in books:
+            pipeline = book.get("pipeline") or ""
+            if pipeline not in PIPELINES:
+                skipped.append({
+                    "filename": book.get("filename"),
+                    "pipeline": pipeline,
+                    "reason": "pipeline_not_registered",
+                })
+                continue
+
+            file_path = book.get("path") or ""
+            if not file_path or not Path(file_path).exists():
+                skipped.append({
+                    "filename": book.get("filename"),
+                    "pipeline": pipeline,
+                    "reason": "missing_file",
+                })
+                continue
+
+            stem = Path(file_path).stem
+            child_slug = f"{parent_slug}_{stem}"[:SLUG_MAX_LEN]
+            steps = get_pipeline_names(pipeline, "")
+            child_id = create_task(
+                conn,
+                file_path,
+                pipeline,
+                child_slug,
+                steps,
+                tags=tags,
+            )
+            created.append({
+                "task_id": child_id,
+                "slug": child_slug,
+                "pipeline": pipeline,
+                "path": file_path,
+            })
+        conn.commit()
+    finally:
+        conn.close()
+
+    return json.dumps({
+        "parent_task_id": task_id,
+        "child_tasks_created": len(created),
+        "skipped": len(skipped),
+        "created": created,
+        "skipped_books": skipped,
+    })
+
+
 def _pdf_preflight(pdf_path: Path) -> tuple[str, int]:
     """Run 3-tier PDF pre-flight check.
 
@@ -1143,20 +1241,14 @@ register_pipeline("book_pdf", [
 register_pipeline("mega", [
     Step(name="megadl_download", fn=step_megadl_download, on_error="pause"),
     Step(name="classify_content", fn=step_classify_content, on_error="retry"),
-    # FIXME: delegate step currently re-runs step_classify_content instead of
-    # delegating to per-book sub-pipelines. Replace with a real delegation
-    # function once sub-task dispatch is implemented.
-    Step(name="delegate", fn=step_classify_content, on_error="fail"),
+    Step(name="delegate", fn=step_delegate_books, on_error="fail"),
 ])
 
 # Register book_batch pipeline (for mega.nz book archives)
 register_pipeline("book_batch", [
     Step(name="megadl_download", fn=step_megadl_download, on_error="pause"),
     Step(name="classify_content", fn=step_classify_content, on_error="retry"),
-    # FIXME: delegate step currently re-runs step_classify_content instead of
-    # delegating to per-book sub-pipelines. Replace with a real delegation
-    # function once sub-task dispatch is implemented.
-    Step(name="delegate", fn=step_classify_content, on_error="fail"),
+    Step(name="delegate", fn=step_delegate_books, on_error="fail"),
 ])
 
 # Registers mega_video pipeline (Mega-hosted video files)

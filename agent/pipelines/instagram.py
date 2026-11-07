@@ -522,7 +522,7 @@ async def main():
         page = await context.new_page()
         
         try:
-            await page.goto("{url}", wait_until="networkidle", timeout=30000)
+            await page.goto({json.dumps(url)}, wait_until="networkidle", timeout=30000)
         except Exception:
             pass
         
