@@ -387,9 +387,7 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
     )
     print((r.stdout or r.stderr)[-800:])
     if r.returncode != 0:
-        for q, _ in staged:
-            update_ingest_status(conn, q["id"], "failed", error="batch_ocr failed")
-        return
+        print(f"  [warn] batch_ocr exit {r.returncode}; processing available outputs")
 
     for q, dest in staged:
         ocr_json = out_dir / f"{dest.name}.ocr.json"

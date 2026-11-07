@@ -28,7 +28,7 @@ from agent.db import (
     init_db, pause_task, update_step,
 )
 from agent.exceptions import ErrorType, StepError
-from agent.notify import notify_task
+from agent.notify import notify_task, sanitize_visible_message
 from agent.streaming import log_progress
 
 # ── Pipeline step registry ───────────────────────────────────────────────────
@@ -37,25 +37,9 @@ from agent.streaming import log_progress
 # Populated at startup from pipelines/*.py modules
 STEP_REGISTRY: dict[str, tuple[Any, str]] = {}
 
-_STEP_LOG_MAX_LEN = 2000
-
-
 def _sanitize_step_log_message(message: str) -> str:
-    """Strip stack frames from persisted step log text (dashboard-visible)."""
-    marker = "Traceback (most recent call last):"
-    if marker not in message:
-        return message[:_STEP_LOG_MAX_LEN]
-    head, tail = message.split(marker, 1)
-    exc_line = ""
-    for line in reversed(tail.splitlines()):
-        stripped = line.strip()
-        if stripped and not stripped.startswith("File "):
-            exc_line = stripped
-            break
-    summary = head.rstrip()
-    if exc_line and exc_line not in summary:
-        summary = f"{summary}\n{exc_line}" if summary else exc_line
-    return summary[:_STEP_LOG_MAX_LEN]
+    """Alias for step_logs — same rules as other user-visible error surfaces."""
+    return sanitize_visible_message(message)
 
 # Content types routed through _execute_video (video semaphore — pyannote RAM).
 VIDEO_TASK_CONTENT_TYPES = (
@@ -385,7 +369,7 @@ class Consumer:
 
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
-                error_msg = str(e)
+                error_msg = sanitize_visible_message(str(e))
                 tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
                 print(
                     f"[consumer] Step '{step_name}' traceback:\n{tb}",
@@ -418,7 +402,9 @@ class Consumer:
                             f"[consumer] Step '{step_name}' exhausted retries "
                             f"({retries}/{self.config.max_retries}) → PAUSING"
                         )
-                        pause_msg = f"Exhausted {retries} retries: {error_msg}"
+                        pause_msg = sanitize_visible_message(
+                            f"Exhausted {retries} retries: {error_msg}"
+                        )
                         pause_task(self.agent_conn, task_id, pause_msg)
                         update_step(self.agent_conn, step_id, "paused", pause_msg)
                         self._alert_failure(task, "paused", pause_msg)
@@ -448,7 +434,7 @@ class Consumer:
                 )
                 # Fall back to step's on_error setting
                 _, default_on_error = STEP_REGISTRY.get(step_name, (None, "retry"))
-                error_msg = f"{type(e).__name__}: {e}"
+                error_msg = sanitize_visible_message(f"{type(e).__name__}: {e}")
 
                 if default_on_error == "fail":
                     print(f"[consumer] Step '{step_name}' FAILED (unexpected): {error_msg}")
@@ -471,7 +457,9 @@ class Consumer:
                             f"[consumer] Step '{step_name}' exhausted retries "
                             f"({retries}/{self.config.max_retries}) → PAUSING"
                         )
-                        pause_msg = f"Exhausted {retries} retries: {error_msg}"
+                        pause_msg = sanitize_visible_message(
+                            f"Exhausted {retries} retries: {error_msg}"
+                        )
                         pause_task(self.agent_conn, task_id, pause_msg)
                         update_step(self.agent_conn, step_id, "paused", pause_msg)
                         self._alert_failure(task, "paused", pause_msg)

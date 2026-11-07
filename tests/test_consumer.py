@@ -217,6 +217,42 @@ async def test_execute_task_fail_error(consumer, agent_db):
 
 
 @pytest.mark.asyncio
+async def test_execute_task_fail_persists_sanitized_task_and_step_output(consumer, agent_db):
+    """tasks.error and task_steps.output must not embed full tracebacks or huge stderr."""
+    task_id = create_task(agent_db, "https://example.com", "web", "san_slug", ["san_step"])
+    leaky = (
+        "yt-dlp: cookiefile /root/kb-agent/cookies/yt.txt\n"
+        "Traceback (most recent call last):\n"
+        '  File "/root/kb-agent/agent/pipelines/video.py", line 99\n'
+        "    subprocess failed\n"
+        "CalledProcessError: exit 1\n"
+        + ("stderr-padding " * 200)
+    )
+
+    def san_step(task, cfg):
+        raise StepError(leaky, error_type=ErrorType.FAIL)
+
+    register_step("san_step", san_step, "retry")
+    with patch("agent.consumer.notify_task") as notify:
+        await consumer._execute_task({"id": task_id, "content_type": "web"})
+        reason = notify.call_args[0][4]
+        assert "Traceback" not in reason
+        assert 'File "/root' not in reason
+
+    tasks = get_all_tasks(agent_db)
+    assert tasks[0]["status"] == "failed"
+    assert len(tasks[0]["error"] or "") <= 2000
+    assert "Traceback" not in (tasks[0]["error"] or "")
+    assert "yt-dlp: cookiefile" in (tasks[0]["error"] or "")
+
+    steps = get_task_steps(agent_db, task_id)
+    assert steps[0]["status"] == "failed"
+    assert "Traceback" not in (steps[0]["output"] or "")
+
+    del STEP_REGISTRY["san_step"]
+
+
+@pytest.mark.asyncio
 async def test_execute_task_step_error_logs_sanitized(consumer, agent_db, logs_db):
     """StepError stderr logs should keep the message, not stack frames or paths."""
     task_id = create_task(agent_db, "https://example.com", "web", "tb_slug", ["tb_step"])

@@ -69,37 +69,40 @@ def read_images(images: list) -> list:
     results = []
     for item in images:
         name = item["name"]
-        path = f"/tmp/{name}"
-        with open(path, "wb") as f:
-            f.write(item["bytes"])
+        try:
+            path = f"/tmp/{name}"
+            with open(path, "wb") as f:
+                f.write(item["bytes"])
 
-        t0 = time.time()
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": path},
-                {"type": "text", "text": PROMPT},
-            ],
-        }]
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = processor(
-            text=[text], images=image_inputs, videos=video_inputs,
-            padding=True, return_tensors="pt",
-        ).to(model.device)
-        generated_ids = model.generate(**inputs, max_new_tokens=768)
-        trimmed = [
-            out[len(inp):]
-            for inp, out in zip(inputs.input_ids, generated_ids)
-        ]
-        reading = processor.batch_decode(
-            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
-        )[0].strip()
+            t0 = time.time()
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": path},
+                    {"type": "text", "text": PROMPT},
+                ],
+            }]
+            text = processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(
+                text=[text], images=image_inputs, videos=video_inputs,
+                padding=True, return_tensors="pt",
+            ).to(model.device)
+            generated_ids = model.generate(**inputs, max_new_tokens=768)
+            trimmed = [
+                out[len(inp):]
+                for inp, out in zip(inputs.input_ids, generated_ids)
+            ]
+            reading = processor.batch_decode(
+                trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+            )[0].strip()
 
-        results.append({"name": name, "reading": reading})
-        print(f"[{name}] {len(reading)} chars in {time.time() - t0:.0f}s", flush=True)
+            results.append({"name": name, "reading": reading})
+            print(f"[{name}] {len(reading)} chars in {time.time() - t0:.0f}s", flush=True)
+        except Exception as exc:
+            print(f"[{name}] skipped: {exc}", flush=True)
     return results
 
 

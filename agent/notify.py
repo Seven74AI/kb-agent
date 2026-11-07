@@ -11,6 +11,26 @@ import urllib.request
 
 from agent.config import Config
 
+_VISIBLE_ERROR_MAX_LEN = 2000
+
+
+def sanitize_visible_message(message: str) -> str:
+    """Strip stack frames from user-visible error text (dashboard, Telegram, tasks)."""
+    marker = "Traceback (most recent call last):"
+    if marker not in message:
+        return message[:_VISIBLE_ERROR_MAX_LEN]
+    head, tail = message.split(marker, 1)
+    exc_line = ""
+    for line in reversed(tail.splitlines()):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("File "):
+            exc_line = stripped
+            break
+    summary = head.rstrip()
+    if exc_line and exc_line not in summary:
+        summary = f"{summary}\n{exc_line}" if summary else exc_line
+    return summary[:_VISIBLE_ERROR_MAX_LEN]
+
 
 def send_message(config: Config, text: str) -> bool:
     """Send a Telegram message. Returns True on success, False otherwise.
@@ -40,7 +60,7 @@ def notify_task(config: Config, slug: str, content_type: str, status: str, reaso
         head = f"⏸ Task PAUSED: <code>{slug}</code> ({content_type})"
     lines = [head]
     if reason:
-        lines.append(f"reason: {reason}")
+        lines.append(f"reason: {sanitize_visible_message(reason)}")
     send_message(config, "\n".join(lines))
 
 
