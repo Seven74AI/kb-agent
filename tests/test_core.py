@@ -138,6 +138,13 @@ def test_plan_submission_normalizes_url_before_dedup(core_config, monkeypatch):
     assert result["status"] == "skipped"
 
 
+def test_plan_submission_rejects_javascript_url(core_config):
+    result = plan_submission("javascript:alert(1)", core_config)
+    assert result["status"] == "error"
+    assert result["http_status"] == 400
+    assert "http or https" in result["error"].lower()
+
+
 def test_plan_submission_unknown_content_type_not_enqueued(core_config, monkeypatch):
     monkeypatch.setattr(
         "agent.core.submit.detect_content_subtype",

@@ -33,6 +33,40 @@ def test_route_jev_returns_choice(monkeypatch):
     assert got == "threads_video"
 
 
+def test_route_jev_scrubs_credentials_in_openrouter_payload(monkeypatch):
+    payload = {"answers": {"content_type": {"choice": "substack_text"}}}
+    captured: dict = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs.get("json", {}))
+        return _FakeResp(payload)
+
+    monkeypatch.setattr(router.httpx, "post", fake_post)
+    secret = "api_key=supersecret123"
+    router.route_jev(
+        "https://example.substack.com/p/post",
+        f"<title>Article</title><p>{secret}</p>",
+        api_key="k",
+    )
+    state = captured["state"]
+    assert "supersecret123" not in state
+    assert "[credential redacted]" in state
+    assert "Article" in state
+
+
+def test_route_jev_error_snippet_scrubs_credentials(monkeypatch):
+    body = '{"error":"invalid api_key=leaked-token-here"}'
+
+    def fake_post(url, **kwargs):
+        return _FakeResp(body, status_code=502)
+
+    monkeypatch.setattr(router.httpx, "post", fake_post)
+    with pytest.raises(RuntimeError, match="OpenRouter 502") as excinfo:
+        router.route_jev("https://example.com", api_key="k")
+    assert "leaked-token-here" not in str(excinfo.value)
+    assert "[credential redacted]" in str(excinfo.value)
+
+
 def test_route_jev_raises_on_http_error(monkeypatch):
     monkeypatch.setattr(
         router.httpx, "post", lambda *a, **kw: _FakeResp({"error": "x"}, status_code=400)

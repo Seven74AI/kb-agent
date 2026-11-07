@@ -21,6 +21,7 @@ from pathlib import Path
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.detection import _curl_netscape_cookie_config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -109,7 +110,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
     result = subprocess.run(
         [
             "curl", "-s", "--max-time", str(timeout),
-            "-b", str(cookie_path),
+            *_curl_netscape_cookie_config(cookie_path),
             "-H", f"User-Agent: {GOOGLEBOT_UA}",
             "-H", "Accept: text/html,application/xhtml+xml",
             "-H", "Accept-Language: en-US,en;q=0.9",

@@ -1017,10 +1017,12 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
             f'url = "{api_url}"',
         ]
     ) + "\n"
+    conf_path = config.cookie_dir / f".curl-ig-comment-{comment_id}.conf"
+    conf_path.write_text(curl_cfg, encoding="utf-8")
+    os.chmod(conf_path, 0o600)
 
     result = subprocess.run(
-        ["curl", "-s", "-K", "-"],
-        input=curl_cfg,
+        ["curl", "-s", "--config", str(conf_path)],
         capture_output=True,
         text=True,
         timeout=30,

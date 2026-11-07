@@ -11,6 +11,8 @@ import os
 
 import httpx
 
+from agent.notify import redact_credential_shapes, sanitize_visible_message
+
 MODEL = "typesafe/jev-1.14"
 API_URL = "https://openrouter.ai/api/alpha/decisions"
 
@@ -70,9 +72,10 @@ def route_jev(url: str, content: str | None = None, api_key: str | None = None) 
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
 
-    state = f"URL: {url}"
+    safe_url = redact_credential_shapes(url)
+    state = f"URL: {safe_url}"
     if content:
-        state += f"\nContent: {content}"
+        state += f"\nContent: {redact_credential_shapes(content)}"
 
     try:
         r = httpx.post(
@@ -92,12 +95,16 @@ def route_jev(url: str, content: str | None = None, api_key: str | None = None) 
             timeout=90,
         )
     except httpx.HTTPError as e:
-        raise RuntimeError(f"OpenRouter request failed: {e}") from e
+        raise RuntimeError(
+            f"OpenRouter request failed: {sanitize_visible_message(str(e))}"
+        ) from e
 
     if r.status_code != 200:
-        raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:120]}")
+        snippet = sanitize_visible_message(r.text[:120])
+        raise RuntimeError(f"OpenRouter {r.status_code}: {snippet}")
 
     try:
         return r.json()["answers"]["content_type"]["choice"].lower().strip()
     except (KeyError, TypeError, ValueError) as e:
-        raise RuntimeError(f"Unexpected OpenRouter response: {r.text[:200]}") from e
+        snippet = sanitize_visible_message(r.text[:200])
+        raise RuntimeError(f"Unexpected OpenRouter response: {snippet}") from e

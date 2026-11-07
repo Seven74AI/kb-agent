@@ -5,11 +5,12 @@ The simplest pipeline. No cookies, no video. Verifies the entire architecture.
 """
 
 import json
+import os
 import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
@@ -112,7 +113,76 @@ def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
         return []
     conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
     conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
+    os.chmod(conf_path, 0o600)
     return ["--config", str(conf_path)]
+
+
+# SSRF curl policy (web.py): ``--max-redirs 0`` on first-party Substack fetches whose
+# URL is validated up-front and must not chain off-origin (post HTML for metadata /
+# embedded-media discovery). The ``/api/v1/video/upload/<id>/src?type=mp4`` endpoint is
+# the sole exception: it 307-redirects once to a signed CDN URL (CloudFront / Substack CDN).
+_SUBSTACK_VIDEO_CDN_HOST_SUFFIXES = (".cloudfront.net", ".substackcdn.com")
+_SUBSTACK_VIDEO_CDN_EXACT_HOSTS = ("substack-post-media.s3.amazonaws.com",)
+
+
+def _assert_substack_video_cdn_url_allowed(url: str) -> None:
+    """Reject video CDN URLs outside Substack's CloudFront / CDN hosts."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise StepError(
+            "Substack video CDN URL must use http or https",
+            error_type=ErrorType.FAIL,
+            step_name="substack_video_download",
+        )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise StepError(
+            "Substack video CDN URL must include a host",
+            error_type=ErrorType.FAIL,
+            step_name="substack_video_download",
+        )
+    allowed = host in _SUBSTACK_VIDEO_CDN_EXACT_HOSTS or host == "substackcdn.com" or any(
+        host.endswith(suffix) for suffix in _SUBSTACK_VIDEO_CDN_HOST_SUFFIXES
+    )
+    if not allowed:
+        raise StepError(
+            f"Substack video CDN host not allowlisted: {host}",
+            error_type=ErrorType.FAIL,
+            step_name="substack_video_download",
+        )
+    _assert_fetch_url_allowed(url)
+
+
+def _parse_curl_location_header(headers: str) -> str | None:
+    for line in headers.splitlines():
+        if line.lower().startswith("location:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _resolve_substack_video_mp4_redirect(endpoint: str, cookie_args: list[str]) -> str:
+    """Follow at most one validated hop from the public ``.../src?type=mp4`` endpoint."""
+    head_cmd = [
+        "curl", "-s", "-I", "--max-redirs", "0",
+        "--max-time", "30", *cookie_args, endpoint,
+    ]
+    head = subprocess.run(head_cmd, capture_output=True, text=True, timeout=35)
+    if head.returncode != 0:
+        raise StepError(
+            f"Substack video redirect probe failed: {head.stderr.strip()[:200]}",
+            error_type=ErrorType.RETRY,
+            step_name="substack_video_download",
+        )
+    location = _parse_curl_location_header(head.stdout or "")
+    if not location:
+        raise StepError(
+            "Substack video src endpoint did not return a redirect Location",
+            error_type=ErrorType.RETRY,
+            step_name="substack_video_download",
+        )
+    mp4_url = urljoin(endpoint, location)
+    _assert_substack_video_cdn_url_allowed(mp4_url)
+    return mp4_url
 
 
 def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
@@ -184,10 +254,11 @@ def step_substack_video_download(task: dict, config: Config) -> str:
     _assert_fetch_url_allowed(endpoint)
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+    cookie_args = _curl_netscape_cookie_config(cookie)
+    mp4_url = _resolve_substack_video_mp4_redirect(endpoint, cookie_args)
     cmd = [
-        "curl", "-s", "-L", "--max-redirs", "0",
-        "--max-time", "600", "-o", str(output_path),
-        *_curl_netscape_cookie_config(cookie), endpoint,
+        "curl", "-s", "--max-time", "600", "-o", str(output_path),
+        *cookie_args, mp4_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)
     if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:

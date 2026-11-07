@@ -4,6 +4,7 @@ Deterministic URL pattern matching (no ML, no external calls except health check
 """
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -61,6 +62,9 @@ def normalize_url(url: str) -> str:
     url = (url or "").strip()
     if not url:
         return url
+    parsed_scheme = urlparse(url)
+    if parsed_scheme.scheme.lower() not in ("http", "https"):
+        raise ValueError("URL must use http or https")
     low = url.lower()
     if "instagram.com/" in low or "threads." in low:
         parsed = urlparse(url)
@@ -106,6 +110,7 @@ def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
         return []
     conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
     conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
+    os.chmod(conf_path, 0o600)
     return ["--config", str(conf_path)]
 
 
