@@ -64,7 +64,6 @@ Detailed justification — why this confidence level.
 ## Sources
 - Original source (full citation)
 - Consulted sources (verification, cross-reference)
-- Raw source archived: `minio:` URL (see frontmatter)
 
 ## See Also
 - [[existing-note-slug]] — verified before linking

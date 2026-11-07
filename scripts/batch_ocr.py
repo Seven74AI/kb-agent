@@ -16,7 +16,7 @@ import sys
 os.environ.pop("PYTHONPATH", None)
 
 MODAL = "/root/modal"
-IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".avif")
 
 
 def sh(cmd, **kw):
