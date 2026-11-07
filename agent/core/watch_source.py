@@ -66,7 +66,9 @@ def diff_items(current: frozenset[str], last_seen: frozenset[str]) -> list[str]:
 
 def items_to_urls(items: list[str], item_url_template: str) -> list[str]:
     """Expand item ids to submission URLs via ``{item}`` template placeholder."""
-    return [item_url_template.format(item=item) for item in sorted(items)]
+    return [
+        item_url_template.replace("{item}", item) for item in sorted(items)
+    ]
 
 
 def parse_last_seen(raw: str | None) -> frozenset[str]:

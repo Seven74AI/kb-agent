@@ -22,7 +22,7 @@ def search_notes(query: str, vault_path: Path, *, limit: int = 50) -> list[dict]
 
     try:
         proc = subprocess.run(
-            ["grep", "-rl", "--include=*.md", "--", query, str(knowledge_dir)],
+            ["grep", "-rlF", "--include=*.md", "--", query, str(knowledge_dir)],
             capture_output=True,
             text=True,
             timeout=30,
