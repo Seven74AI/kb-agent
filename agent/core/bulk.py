@@ -10,6 +10,7 @@ from collections.abc import Callable
 import sqlite3
 
 from agent.config import Config
+from agent.fetch_guard import _assert_fetch_url_allowed
 
 # yt-dlp lives in the py3.11 hermes-agent venv; the MCP server runs in a separate
 # mcp-venv with system PATH (no yt-dlp), so resolve it explicitly.
@@ -24,6 +25,7 @@ def expand_youtube_playlist(playlist_url: str) -> list[str]:
     playlist_url = (playlist_url or "").strip()
     if not playlist_url:
         return []
+    _assert_fetch_url_allowed(playlist_url)
     try:
         proc = subprocess.run(
             [
