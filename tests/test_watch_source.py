@@ -10,6 +10,8 @@ import pytest
 
 from agent.config import Config
 from agent.core.watch_source import (
+    VIDEO_CONTENT_TYPES,
+    default_fetch_html,
     diff_items,
     extract_items,
     is_poll_due,
@@ -59,6 +61,17 @@ def core_config(tmp_path):
     vault.mkdir()
     (vault / "Knowledge base" / "articles").mkdir(parents=True)
     return Config(kb_agent_dir=tmp_path, vault_path=vault)
+
+
+def test_video_content_types_match_batch_ingest_video_set():
+    from scripts.batch_ingest import VIDEO_DOWNLOAD_STEPS
+
+    assert VIDEO_CONTENT_TYPES == set(VIDEO_DOWNLOAD_STEPS.keys()) | {"mega_video"}
+
+
+def test_default_fetch_html_rejects_metadata_ip():
+    with pytest.raises(ValueError, match="not allowed"):
+        default_fetch_html("http://169.254.169.254/latest/meta-data/")
 
 
 def test_extract_items_from_html():
