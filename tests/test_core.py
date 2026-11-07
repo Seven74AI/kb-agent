@@ -289,6 +289,20 @@ def test_list_tasks_and_get_task(core_config, agent_conn, logs_conn):
     assert one["steps"][0]["name"] == "extract"
 
 
+def test_list_tasks_sanitizes_last_log(core_config, agent_conn, logs_conn):
+    task_id = create_task(agent_conn, "https://a.com", "web", "a_slug", ["extract"])
+    secret = "/root/kb-agent/private/run.log"
+    logs_conn.execute(
+        "INSERT INTO step_logs (task_id, step_name, stream, content) VALUES (?, ?, ?, ?)",
+        (task_id, "extract", "stderr", f"failed reading {secret}: {'e' * 400}"),
+    )
+    logs_conn.commit()
+    listed = list_tasks(agent_conn, logs_conn=logs_conn, limit=10)
+    last_log = listed["tasks"][0]["last_log"]
+    assert secret not in last_log
+    assert len(last_log) < 500
+
+
 def test_get_task_missing(agent_conn):
     assert get_task(agent_conn, "nonexistent-id") is None
 

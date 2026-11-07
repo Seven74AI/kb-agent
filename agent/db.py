@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
     created_at TEXT DEFAULT (datetime('now')),
     dispatched_at TEXT,
     updated_at TEXT,
+    media_appended INTEGER NOT NULL DEFAULT 0,
     UNIQUE(url, parent_slug)
 );
 
@@ -186,7 +187,7 @@ def _migrate_ingest_queue_url_parent_unique(conn: sqlite3.Connection) -> None:
     if ddl_row is None:
         return
     ddl = ddl_row[0] or ""
-    if "UNIQUE(url, parent_slug)" in ddl.replace(" ", ""):
+    if "UNIQUE(url,parent_slug)" in ddl.replace(" ", ""):
         return
     conn.executescript(
         """
@@ -204,15 +205,18 @@ def _migrate_ingest_queue_url_parent_unique(conn: sqlite3.Connection) -> None:
             created_at TEXT DEFAULT (datetime('now')),
             dispatched_at TEXT,
             updated_at TEXT,
+            media_appended INTEGER NOT NULL DEFAULT 0,
             UNIQUE(url, parent_slug)
         );
         INSERT INTO ingest_queue_new (
             id, url, content_type, slug, tags, parent_slug, media_kind,
-            status, error, attempts, created_at, dispatched_at, updated_at
+            status, error, attempts, created_at, dispatched_at, updated_at,
+            media_appended
         )
         SELECT id, url, content_type, slug, tags,
                COALESCE(parent_slug, ''), media_kind,
-               status, error, attempts, created_at, dispatched_at, updated_at
+               status, error, attempts, created_at, dispatched_at, updated_at,
+               0
         FROM ingest_queue;
         DROP TABLE ingest_queue;
         ALTER TABLE ingest_queue_new RENAME TO ingest_queue;
@@ -416,6 +420,23 @@ def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     return row is not None
 
 
+def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
+    """True when a deferred *_synthesize task for *slug* finished with ``done`` / ``completed``."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "AND status IN ('done', 'completed') "
+        "LIMIT 1",
+        (slug,),
+    ).fetchone()
+    return row is not None
+
+
+def has_synthesize_task_signal(conn: sqlite3.Connection, slug: str) -> bool:
+    """True when batch synthesis is queued, in flight, or finished (any non-``failed`` *_synthesize)."""
+    return has_active_synthesize_task(conn, slug) or has_completed_synthesize_task(conn, slug)
+
+
 def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> int:
     """Requeue failed media items for retry, up to ``max_attempts`` each.
 
@@ -475,9 +496,33 @@ def get_last_batch_run(conn: sqlite3.Connection) -> dict | None:
     return dict(row) if row else None
 
 
+def ingest_media_appended(conn: sqlite3.Connection, ingest_id: str) -> bool:
+    """True when embedded media body was already written to the parent raw markdown."""
+    row = conn.execute(
+        "SELECT media_appended FROM ingest_queue WHERE id = ?", (ingest_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    val = row["media_appended"] if hasattr(row, "keys") else row[0]
+    return bool(val)
+
+
+def set_ingest_media_appended(conn: sqlite3.Connection, ingest_id: str) -> None:
+    """Record that this ingest row's media block was appended to the parent raw file."""
+    with conn:
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1, updated_at = datetime('now') WHERE id = ?",
+            (ingest_id,),
+        )
+
+
 def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                          error: str | None = None) -> None:
     """Transition an ingest-queue row to a new status (touches updated_at)."""
+    if error is not None:
+        from agent.notify import sanitize_visible_message
+
+        error = sanitize_visible_message(error)
     with conn:
         if status == "dispatched":
             conn.execute(

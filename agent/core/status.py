@@ -4,6 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from agent.db import get_all_tasks, get_last_log_line, get_task_steps
+from agent.notify import sanitize_visible_message
 
 
 def format_elapsed(created_at: str, now: datetime) -> str:
@@ -91,7 +92,8 @@ def _enrich_task(
     now: datetime,
 ) -> dict:
     steps = get_task_steps(agent_conn, task_row["id"])
-    last_log = get_last_log_line(logs_conn, task_row["id"]) if logs_conn else None
+    raw_last = get_last_log_line(logs_conn, task_row["id"]) if logs_conn else None
+    last_log = sanitize_visible_message(raw_last) if raw_last else None
     elapsed = format_elapsed(task_row["created_at"], now)
     staleness_str, is_stale = compute_staleness(task_row, logs_conn, now)
     return {

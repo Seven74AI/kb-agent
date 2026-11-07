@@ -56,6 +56,32 @@ class TestAppendToParent:
         assert "## Image" in body
         assert "OCR text" in body
 
+    def test_append_idempotent_on_reprocess(self, config, conn):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+        batch_ingest._append_to_parent(
+            config, parent, "Image", "OCR text", conn=conn, ingest_id=ingest_id,
+        )
+        batch_ingest._append_to_parent(
+            config, parent, "Image", "OCR text", conn=conn, ingest_id=ingest_id,
+        )
+        body = raw.read_text(encoding="utf-8")
+        assert body.count("## Image") == 1
+        assert body.count("OCR text") == 1
+
 
 class TestDeferredSynthesizeTags:
     def test_dispatch_includes_parent_tags_from_task(self, tmp_path, monkeypatch, config, conn):
@@ -607,6 +633,44 @@ class TestVideoStagingUsesQueueId:
         raw_two = (config.temp_dir / "parent_two_raw.md").read_text(encoding="utf-8")
         assert f"words-{id_one}" in raw_one
         assert f"words-{id_two}" in raw_two
+
+
+class TestDownloadVideoResolvesByQueueId:
+    """Temp-dir lookup must use ingest id so shared slugs do not cross-pick siblings."""
+
+    def test_picks_id_keyed_mp4_not_slug_sibling(self, config, monkeypatch, tmp_path):
+        import scripts.batch_ingest as batch_ingest
+
+        class _Step:
+            def __init__(self, name):
+                self.name = name
+
+            def fn(self, _task, _cfg):
+                return None
+
+        monkeypatch.setattr(
+            "agent.pipelines.get_pipeline",
+            lambda ct: [_Step(n) for n in batch_ingest.VIDEO_DOWNLOAD_STEPS[ct]],
+        )
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        shared_slug = "author.substack.com_p_my-post"
+        id_want = "ingest-want-this-one"
+        id_other = "ingest-other-sibling"
+        (config.temp_dir / f"{id_want}.mp4").write_bytes(b"w" * 200)
+        (config.temp_dir / f"{id_other}.mp4").write_bytes(b"o" * 200)
+        (config.temp_dir / f"{shared_slug}.mp4").write_bytes(b"s" * 200)
+
+        q = {
+            "id": id_want,
+            "slug": shared_slug,
+            "url": f"https://author.substack.com/p/my-post#{id_want}",
+            "content_type": "substack_video",
+        }
+        path, err = batch_ingest._download_video(q, config)
+        assert err is None
+        assert path == config.temp_dir / f"{id_want}.mp4"
+        assert path.read_bytes()[0:1] == b"w"
 
 
 class TestDownloadVideoUnsupportedContentType:

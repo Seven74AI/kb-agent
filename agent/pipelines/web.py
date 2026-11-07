@@ -101,8 +101,13 @@ def step_substack_cleanup(task: dict, config: Config) -> str:
     return "cleaned"
 
 
+def _ingest_download_stem(task: dict) -> str:
+    """Filesystem stem for per-ingest download artifacts (queue/task id, not slug)."""
+    return task["id"]
+
+
 def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
-    """Find the native ``videoUpload.id`` and write ``{slug}_metadata.json``.
+    """Find the native ``videoUpload.id`` and write ``{id}_metadata.json``.
 
     Native Substack video is NOT Mux/signed-JWT-gated — the public endpoint
     ``/api/v1/video/upload/<id>/src?type=mp4`` 307-redirects to a CloudFront-
@@ -110,7 +115,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     as ``videoUpload.id``. The Substack cookie is only needed for PAYWALLED
     posts (to see the id at all).
     """
-    slug = task.get("slug", task["id"][:8])
+    stem = _ingest_download_stem(task)
     url = task["source_url"]
     _assert_fetch_url_allowed(url)
     domain = urlparse(url).netloc
@@ -147,7 +152,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
         "video_id": video_id,
         "domain": domain,
     }
-    Path(config.temp_dir, f"{slug}_metadata.json").write_text(
+    Path(config.temp_dir, f"{stem}_metadata.json").write_text(
         json.dumps(meta, ensure_ascii=False), encoding="utf-8",
     )
     return f"video_id={video_id}"
@@ -155,8 +160,8 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
 
 def step_substack_video_download(task: dict, config: Config) -> str:
     """Download native video via the public ``/api/v1/video/upload/<id>/src`` endpoint."""
-    slug = task.get("slug", task["id"][:8])
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    stem = _ingest_download_stem(task)
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if not meta_path.exists():
         raise StepError(
             "metadata missing — run extract_metadata first",
@@ -164,7 +169,7 @@ def step_substack_video_download(task: dict, config: Config) -> str:
         )
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     vid, domain = meta["video_id"], meta["domain"]
-    output_path = Path(config.temp_dir) / f"{slug}.mp4"
+    output_path = Path(config.temp_dir) / f"{stem}.mp4"
     endpoint = f"https://{domain}/api/v1/video/upload/{vid}/src?type=mp4"
     _assert_fetch_url_allowed(endpoint)
 
@@ -483,38 +488,12 @@ def _parent_media_was_deferred(conn, task_id: str, slug: str) -> bool:
 
 
 def _deferred_media_batch_finished(conn, config: Config, slug: str) -> bool:
-    """True when deferred media work is done and batch synthesis may have taken over."""
-    from agent.db import count_pending_media
+    """True when deferred media work is done and batch synthesis has taken over."""
+    from agent.db import count_pending_media, has_synthesize_task_signal
 
     if count_pending_media(conn, slug) > 0:
         return False
-    row = conn.execute(
-        """
-        SELECT 1 FROM tasks
-        WHERE slug = ? AND content_type GLOB '*_synthesize'
-        AND status IN ('done', 'completed')
-        LIMIT 1
-        """,
-        (slug,),
-    ).fetchone()
-    if row:
-        return True
-    manifest_path = Path(config.temp_dir) / f"{slug}_media.json"
-    if not manifest_path.exists():
-        return False
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, TypeError, ValueError):
-        return False
-    expected = manifest.get("total")
-    if expected is None:
-        return False
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-        (slug,),
-    ).fetchone()
-    queue_count = row["n"] if hasattr(row, "keys") else row[0]
-    return queue_count == int(expected)
+    return has_synthesize_task_signal(conn, slug)
 
 
 def step_substack_embedded_media(task: dict, config: Config) -> str:
@@ -634,14 +613,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                     error_type=ErrorType.PAUSE,
                     step_name="substack_embedded_media",
                 )
-            from agent.db import has_active_synthesize_task
-
-            if has_active_synthesize_task(conn, slug):
-                return "media ready — deferred to batch"
-            return (
-                f"media ready: {len(images)} images + {n_videos} videos "
-                f"({queue_count} siblings dispatched)"
-            )
+            return "media ready — deferred to batch"
 
         _persist_parent_media_deferral(conn, task.get("id", ""), slug)
     finally:

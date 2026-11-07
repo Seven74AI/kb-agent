@@ -3,6 +3,7 @@
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -295,11 +296,69 @@ class TestSubstackVideoMetadata:
         result = step_substack_video_extract_metadata(task_dict, config)
         assert "a7315fa8" in result
         meta = json.loads(
-            (config.temp_dir / f"{task_dict['slug']}_metadata.json").read_text(encoding="utf-8")
+            (config.temp_dir / f"{task_dict['id']}_metadata.json").read_text(encoding="utf-8")
         )
         assert meta["video_id"] == "a7315fa8-8027-4432-a7e3-652479bc5275"
         assert meta["title"] == "I MADE A VLOG"
         assert meta["domain"] == "testblog.substack.com"
+
+    @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_two_sibling_native_videos_distinct_download_artifacts(
+        self, mock_run, _h264, config, tmp_path,
+    ):
+        """Shared slug siblings must not clobber metadata or mp4 in temp_dir."""
+        from agent.core.slugify import slugify
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        post = "https://author.substack.com/p/multi-video"
+        slug = slugify(post)
+        vid_a = "aaaaaaaa-1111-4111-8111-111111111111"
+        vid_b = "bbbbbbbb-2222-4222-8222-222222222222"
+        assert slugify(f"{post}#{vid_a}") == slugify(f"{post}#{vid_b}")
+
+        def curl_side_effect(cmd, *args, **kwargs):
+            url = next((c for c in cmd if c.startswith("http")), "")
+            if "extract" in str(kwargs) or "-o" not in cmd:
+                frag = urlparse(url).fragment
+                body = (
+                    f'<title>Post</title>'
+                    f'"videoUpload":{{"id":"{frag or vid_a}"}}'
+                )
+                return MagicMock(returncode=0, stdout=body)
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = curl_side_effect
+
+        task_a = {
+            "id": "ingest-row-aaa",
+            "slug": slug,
+            "source_url": f"{post}#{vid_a}",
+            "content_type": "substack_video",
+        }
+        task_b = {
+            "id": "ingest-row-bbb",
+            "slug": slug,
+            "source_url": f"{post}#{vid_b}",
+            "content_type": "substack_video",
+        }
+        step_substack_video_extract_metadata(task_a, config)
+        step_substack_video_extract_metadata(task_b, config)
+        meta_a = json.loads((config.temp_dir / f"{task_a['id']}_metadata.json").read_text())
+        meta_b = json.loads((config.temp_dir / f"{task_b['id']}_metadata.json").read_text())
+        assert meta_a["video_id"] == vid_a
+        assert meta_b["video_id"] == vid_b
+
+        step_substack_video_download(task_a, config)
+        step_substack_video_download(task_b, config)
+        mp4_a = config.temp_dir / f"{task_a['id']}.mp4"
+        mp4_b = config.temp_dir / f"{task_b['id']}.mp4"
+        assert mp4_a.is_file() and mp4_b.is_file()
+        assert mp4_a != mp4_b
+        assert not (config.temp_dir / f"{slug}_metadata.json").exists()
+        assert not (config.temp_dir / f"{slug}.mp4").exists()
 
     @patch("agent.pipelines.web.subprocess.run")
     def test_no_video_id_raises_pause(self, mock_run, config, task_dict):
@@ -477,7 +536,7 @@ class TestSubstackVideoMetadata:
         assert "prior deferral" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
-    def test_zero_embeds_batch_finished_when_manifest_matches_queue(
+    def test_zero_embeds_manifest_parity_without_synthesize_pauses(
         self, mock_fetch, config, task_dict, tmp_path,
     ):
         from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest, update_ingest_status
@@ -511,8 +570,10 @@ class TestSubstackVideoMetadata:
         conn.close()
 
         task_dict["id"] = task_id
-        result = step_substack_embedded_media(task_dict, config)
-        assert result == "no embedded media"
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "re-fetch found no embeds but siblings pending" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_deferring_media_persists_marker_on_parent_task(
@@ -676,7 +737,7 @@ class TestSubstackVideoMetadata:
             f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
         )
         result = step_substack_embedded_media(task_dict, config)
-        assert "media ready" in result
+        assert result == "media ready — deferred to batch"
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_media_ready_defers_when_synthesize_sibling_active(
@@ -748,7 +809,7 @@ class TestSubstackVideoMetadata:
             "</body></html>"
         )
         result = step_substack_embedded_media(task_dict, config)
-        assert "media ready" in result
+        assert result == "media ready — deferred to batch"
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
         row = conn.execute(
             "SELECT COUNT(*) FROM ingest_queue WHERE parent_slug = ?", (slug,),
@@ -756,6 +817,66 @@ class TestSubstackVideoMetadata:
         conn.close()
         updated = json.loads(manifest.read_text(encoding="utf-8"))
         assert updated["total"] == row[0] == 2
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_media_ready_with_prior_manifest_never_inline_even_without_synthesize_task(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "total": 1}), encoding="utf-8",
+        )
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#{vid}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.close()
+
+        mock_fetch.return_value = (
+            f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+        )
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "media ready — deferred to batch"
+
+    def test_deferred_media_batch_finished_requires_synthesize_signal(self, config, tmp_path):
+        from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest, update_ingest_status
+        from agent.pipelines.web import _deferred_media_batch_finished
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = "defer-batch-finish"
+        post = "https://author.substack.com/p/defer-batch-finish"
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "total": 1}), encoding="utf-8",
+        )
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#vid", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.commit()
+        assert _deferred_media_batch_finished(conn, config, slug) is False
+
+        create_task(
+            conn, post, "substack_text_synthesize", slug,
+            ["synthesize_note"], status="pending",
+        )
+        conn.commit()
+        assert _deferred_media_batch_finished(conn, config, slug) is True
+        conn.close()
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_media_gate_blocks_when_siblings_removed_below_manifest_total(
@@ -806,8 +927,7 @@ class TestSubstackVideoMetadata:
     @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_download_rejects_blocked_endpoint(self, mock_run, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        slug = task_dict["slug"]
-        meta_path = config.temp_dir / f"{slug}_metadata.json"
+        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
         meta_path.write_text(
             json.dumps({
                 "video_id": "vid-1",

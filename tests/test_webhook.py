@@ -18,7 +18,7 @@ from agent.db import (
     AGENT_SCHEMA, LOGS_SCHEMA,
     create_task, init_db, resume_tasks_by_reason,
     get_task_steps, get_all_tasks, get_last_log_line,
-    pause_task, complete_task, fail_task,
+    pause_task, complete_task, fail_task, queue_ingest,
 )
 
 
@@ -413,6 +413,28 @@ def test_dashboard_renders_html(client, monkeypatch, tmp_path):
     assert "KB Agent Dashboard" in html
     assert "example.com" in html
     assert "youtube" in html
+
+
+def test_dashboard_scrubs_ingest_error(client, monkeypatch, tmp_path):
+    """Ingest queue errors shown on the dashboard omit host filesystem paths."""
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+
+    agent_db = tmp_path / "data" / "agent.db"
+    agent_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = init_db(agent_db, AGENT_SCHEMA)
+    secret = "/root/kb-agent/secret/foo.py"
+    ingest_id, _ = queue_ingest(conn, "https://example.com/img.png", "substack_image", "img1")
+    conn.execute(
+        "UPDATE ingest_queue SET status='failed', error=? WHERE id=?",
+        (f'batch failed at "{secret}"', ingest_id),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.get("/dashboard")
+    html = resp.data.decode()
+    assert secret not in html
+    assert "batch failed" in html
 
 
 def test_dashboard_empty(client, monkeypatch, tmp_path):
