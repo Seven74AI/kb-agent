@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client
@@ -125,6 +126,7 @@ def _fetch_ig_caption(url: str, config: Config) -> str:
     music-only reels and adds context for speech reels alike. Degrades to ""
     on any failure (stale cookies, private post, timeout).
     """
+    _assert_fetch_url_allowed(url)
     try:
         result = subprocess.run(
             [
@@ -182,6 +184,14 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
 
     output_path = Path(config.temp_dir) / f"{safe_slug}_reel.mp4"
 
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="reel_download",
+        ) from exc
     result = subprocess.run(
         [
             YTDLP_BIN,
@@ -427,6 +437,15 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
+
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="ig_carousel_metadata",
+        ) from exc
 
     # Extract metadata via yt-dlp print
     result = subprocess.run(

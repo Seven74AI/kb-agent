@@ -14,6 +14,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.instagram import (
     _validate_ig_cookies,
+    _fetch_ig_caption,
     _fetch_ig_comment,
     _is_music_only,
     _format_transcript_for_llm,
@@ -33,6 +34,8 @@ from agent.pipelines.instagram import (
     MUSIC_ONLY_CHAR_THRESHOLD,
 )
 from agent.pipelines.video_common import step_extract_audio
+
+METADATA_URL = "http://169.254.169.254/latest/meta-data/"
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -152,6 +155,15 @@ class TestCookieValidation:
 
 class TestReelDownload:
     """Tests for step_ig_reel_download."""
+
+    @patch("agent.pipelines.instagram._validate_ig_cookies")
+    @patch("subprocess.run")
+    def test_download_rejects_metadata_ip(self, mock_run, mock_validate, config, reel_task):
+        reel_task["source_url"] = METADATA_URL
+        with pytest.raises(StepError, match="not allowed") as exc:
+            step_ig_reel_download(reel_task, config)
+        assert exc.value.error_type == ErrorType.FAIL
+        mock_run.assert_not_called()
 
     @patch("agent.pipelines.instagram._validate_ig_cookies")
     @patch("subprocess.run")
@@ -303,8 +315,27 @@ Music-only reel.""")
 
 # ── Carousel Steps ───────────────────────────────────────────────────────────
 
+class TestFetchIgCaptionSsrf:
+    """SSRF guard on caption fetch helper."""
+
+    @patch("subprocess.run")
+    def test_fetch_caption_rejects_metadata_ip(self, mock_run, config):
+        with pytest.raises(ValueError, match="not allowed"):
+            _fetch_ig_caption(METADATA_URL, config)
+        mock_run.assert_not_called()
+
+
 class TestCarouselMetadata:
     """Tests for step_ig_carousel_metadata."""
+
+    @patch("agent.pipelines.instagram._validate_ig_cookies")
+    @patch("subprocess.run")
+    def test_carousel_metadata_rejects_metadata_ip(self, mock_run, mock_validate, config, post_task):
+        post_task["source_url"] = METADATA_URL
+        with pytest.raises(StepError, match="not allowed") as exc:
+            step_ig_carousel_metadata(post_task, config)
+        assert exc.value.error_type == ErrorType.FAIL
+        mock_run.assert_not_called()
 
     @patch("agent.pipelines.instagram._validate_ig_cookies")
     @patch("subprocess.run")

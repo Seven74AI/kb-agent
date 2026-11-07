@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
-from agent.exceptions import StepError
+from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.youtube import (
     _validate_cookies,
@@ -261,6 +261,24 @@ def test_step_extract_metadata_with_chapters(config, task_dict):
     assert len(meta["chapters"]) == 3
     assert meta["chapters"][0]["title"] == "Introduction"
     assert meta["chapters"][1]["start_time"] == 120
+
+
+@patch("agent.pipelines.youtube._validate_cookies")
+@patch("subprocess.run")
+def test_step_extract_metadata_rejects_metadata_ip(mock_run, mock_validate, config, task_dict):
+    task_dict["source_url"] = "http://169.254.169.254/latest/meta-data/"
+    with pytest.raises(ValueError, match="not allowed"):
+        step_extract_metadata(task_dict, config)
+    mock_run.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_step_download_video_rejects_metadata_ip(mock_run, config, task_dict):
+    task_dict["source_url"] = "http://169.254.169.254/latest/meta-data/"
+    with pytest.raises(StepError, match="not allowed") as exc:
+        step_download_video(task_dict, config)
+    assert exc.value.error_type == ErrorType.FAIL
+    mock_run.assert_not_called()
 
 
 def test_step_extract_metadata_private_video(config, task_dict):

@@ -18,6 +18,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from agent.config import Config
 from agent.constants import FLARESOLVERR_URL
@@ -42,6 +43,36 @@ from agent.pipelines.youtube import (
 MAX_HEIGHT = 720
 # CDN mp4 URLs expire; only reuse metadata written during the current ingest.
 RUMBLE_METADATA_MAX_AGE_SEC = 6 * 3600
+
+_RUMBLE_CDN_HOST_SUFFIXES = (".cdn.rumble.cloud", ".rumble.com")
+
+
+def _assert_rumble_cdn_url_allowed(url: str) -> None:
+    """Reject CDN URLs whose host is outside Rumble's CDN / origin domains."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise StepError(
+            "Rumble CDN URL must use http or https",
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise StepError(
+            "Rumble CDN URL must include a host",
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        )
+    allowed = host in ("rumble.com", "cdn.rumble.cloud") or any(
+        host.endswith(suffix) for suffix in _RUMBLE_CDN_HOST_SUFFIXES
+    )
+    if not allowed:
+        raise StepError(
+            f"Rumble CDN host not allowlisted: {host}",
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        )
+    _assert_fetch_url_allowed(url)
 
 
 def _flaresolverr_get(url: str) -> str:
@@ -177,6 +208,7 @@ def step_rumble_download_video(task: dict, config: Config) -> str:
     if pick is None:
         pick = formats[-1]  # smallest (ascending) when all exceed 720p
 
+    _assert_rumble_cdn_url_allowed(pick["url"])
     result = subprocess.run(
         ["curl", "-s", "-L", "--max-time", "600", "-o", str(output_path), pick["url"]],
         capture_output=True, text=True, timeout=650,
