@@ -81,10 +81,6 @@ def extract_request_token(req) -> str | None:
     return None
 
 
-def api_token_configured() -> bool:
-    return resolve_api_token() is not None
-
-
 @app.before_request
 def _require_api_token():
     endpoint = request.endpoint
