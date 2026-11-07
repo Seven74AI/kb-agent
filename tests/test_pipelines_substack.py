@@ -934,10 +934,28 @@ class TestSubstackVideoMetadata:
 
     @patch("agent.pipelines.web.get_llm_client")
     @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
-    def test_synthesize_pipeline_not_blocked_by_deferred_manifest(
+    def test_synthesize_pipeline_standalone_without_manifest_or_siblings(
         self, _mock_syn, _mock_llm, config, task_dict, tmp_path,
     ):
-        """Without a deferral row, on-disk manifest alone does not gate execute."""
+        """Standalone *_synthesize with no deferral row, manifest, or siblings runs."""
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+        synth_task = {**task_dict, "content_type": "substack_text_synthesize"}
+        step_synthesize_web(synth_task, config)
+        assert (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").is_file()
+
+    @patch("agent.pipelines.web.get_llm_client")
+    @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
+    def test_synthesize_pipeline_bootstraps_manifest_then_pauses_incomplete(
+        self, _mock_syn, _mock_llm, config, task_dict, tmp_path,
+    ):
+        """On-disk manifest seeds the deferral row; incomplete media still pauses execute."""
+        from agent.exceptions import StepError
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
         slug = task_dict["slug"]
         post = task_dict["source_url"]
         (config.temp_dir / f"{slug}_media.json").write_text(
@@ -946,8 +964,8 @@ class TestSubstackVideoMetadata:
         )
         (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
         synth_task = {**task_dict, "content_type": "substack_text_synthesize"}
-        step_synthesize_web(synth_task, config)
-        assert (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").is_file()
+        with pytest.raises(StepError, match="deferred synthesis paused"):
+            step_synthesize_web(synth_task, config)
 
     @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
     @patch("agent.pipelines.web.get_llm_client")

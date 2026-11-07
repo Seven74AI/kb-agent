@@ -907,13 +907,22 @@ def parent_deferral_synthesize_execute_blocked(
 ) -> str | None:
     """Execute-time gate for deferred ``*_synthesize`` tasks.
 
-    When ``parent_media_deferral`` exists, synthesis must not run until sibling
-    media is fully dispatched and landed in the parent raw bundle. Returns a
-    human-readable pause reason when blocked; ``None`` when there is no deferral
-    row or media is complete.
+    Synthesis must not run until sibling media is fully dispatched and landed in
+    the parent raw bundle. Returns a human-readable pause reason when blocked;
+    ``None`` when media is complete or this is standalone synthesis (no siblings).
+
+    Fail closed when the deferral row is missing but siblings may still be
+    incomplete (partial DB loss, manual task, race before batch bootstrap).
     """
     deferral = get_parent_media_deferral(conn, slug)
     if deferral is None:
+        temp_dir = raw_path.parent if raw_path is not None else None
+        if temp_dir is not None:
+            bootstrap_parent_media_deferral_from_manifest(conn, slug, temp_dir)
+        deferral = get_parent_media_deferral(conn, slug)
+    if deferral is None:
+        if count_pending_media(conn, slug) > 0:
+            return "deferred synthesis paused — sibling media still pending"
         return None
     if count_pending_media(conn, slug) > 0:
         return "deferred synthesis paused — sibling media still pending"

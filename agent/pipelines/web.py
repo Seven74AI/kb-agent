@@ -824,7 +824,11 @@ def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
 def _require_parent_media_complete_at_execute(
     task: dict, config: Config, conn, raw_path: Path,
 ) -> None:
-    """Fail closed when a stale ``*_synthesize`` task runs before media landed."""
+    """Fail closed when a ``*_synthesize`` task runs before sibling media landed.
+
+    Uses ``raw_path`` so the DB gate can bootstrap a missing deferral row from
+    ``{temp_dir}/{slug}_media.json`` before applying the sibling-dispatch checks.
+    """
     from agent.db import is_synthesize_content_type, parent_deferral_synthesize_execute_blocked
 
     if not is_synthesize_content_type(task.get("content_type", "")):

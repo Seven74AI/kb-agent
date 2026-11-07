@@ -322,6 +322,90 @@ def test_is_deferred_media_pause_execute_gate_synthesis(pause_reason):
     assert is_deferred_media_pause(pause_reason)
 
 
+def test_parent_deferral_synthesize_blocked_without_deferral_row_pending_siblings(
+    tmp_path,
+):
+    from agent.db import parent_deferral_synthesize_execute_blocked
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "defer_missing_parent"
+    queue_ingest(
+        conn,
+        "https://example.com/img.png",
+        "substack_image",
+        "img1",
+        parent_slug=parent,
+        media_kind="image",
+        status="queued",
+    )
+    conn.commit()
+    raw = tmp_path / f"{parent}_raw.md"
+    raw.write_text("# parent\n", encoding="utf-8")
+    reason = parent_deferral_synthesize_execute_blocked(
+        conn, parent, raw_path=raw,
+    )
+    assert reason == "deferred synthesis paused — sibling media still pending"
+
+
+def test_parent_deferral_synthesize_not_blocked_standalone_no_deferral_row(tmp_path):
+    from agent.db import parent_deferral_synthesize_execute_blocked
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "standalone_article"
+    conn.commit()
+    raw = tmp_path / f"{slug}_raw.md"
+    raw.write_text("# standalone\n", encoding="utf-8")
+    assert parent_deferral_synthesize_execute_blocked(conn, slug, raw_path=raw) is None
+
+
+def test_parent_deferral_synthesize_execute_blocked_bootstraps_deferral_from_manifest(
+    tmp_path,
+):
+    from agent.db import (
+        bootstrap_parent_media_deferral_from_manifest,
+        get_parent_media_deferral,
+        parent_deferral_synthesize_execute_blocked,
+        queue_ingest,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "manifest_parent"
+    queue_ingest(
+        conn,
+        "https://example.com/vid.mp4",
+        "youtube",
+        "vid1",
+        parent_slug=parent,
+        media_kind="video",
+        status="queued",
+    )
+    manifest = tmp_path / f"{parent}_media.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "url": "https://blog.substack.com/p/post",
+                "content_type": "substack_text",
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn.commit()
+
+    bootstrap_parent_media_deferral_from_manifest(conn, parent, tmp_path)
+    deferral = get_parent_media_deferral(conn, parent)
+    assert deferral is not None
+    assert deferral["expected_total"] == 1
+
+    raw = tmp_path / f"{parent}_raw.md"
+    raw.write_text("# parent\n", encoding="utf-8")
+    reason = parent_deferral_synthesize_execute_blocked(conn, parent, raw_path=raw)
+    assert reason == "deferred synthesis paused — sibling media still pending"
+
+
 @pytest.mark.parametrize(
     "content_type,pause_reason",
     [

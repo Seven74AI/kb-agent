@@ -67,7 +67,10 @@ Python consumer loop (async)
   (tasks + steps + config) and `logs.db` (step outputs + LLM archives). FTS5 for search.
 - **Config:** YAML for structured config (paths, concurrency, thresholds, retry),
   `.env` for secrets (API keys). Same pattern as Hermes.
-- **Auth:** Tailscale-only. No login on web dashboard.
+- **Auth:** Bearer `KB_API_TOKEN` (env or `config.yaml` `api_token`) on webhook
+  mutating routes, GET /dashboard, and MCP when configured; webhook and MCP bind
+  loopback by default (see `config.yaml`). Tailscale and Cloudflare Access are
+  optional outer network layers — not a substitute for the API token when exposed.
 
 ### Ingestion — Full Detection & Pre-Flight Model
 

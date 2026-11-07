@@ -464,6 +464,16 @@ class TestRunBatchLock:
         assert hasattr(mcp_server, "is_locked")
         assert not hasattr(mcp_server, "release")
 
+    def test_run_batch_log_path_is_relative_to_kb_agent_dir(self, config):
+        from agent.mcp.server import agent_relative_path
+
+        log_path = config.kb_agent_dir / "data" / "batch_manual.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        visible = agent_relative_path(log_path, config.kb_agent_dir)
+        assert not Path(visible).is_absolute()
+        assert visible == "data/batch_manual.log"
+        assert str(config.kb_agent_dir) not in visible
+
 
 class TestKbOcrSizeCap:
     def test_max_image_bytes_in_source(self):
