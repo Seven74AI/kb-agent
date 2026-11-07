@@ -32,7 +32,7 @@ def test_spec_declares_mcp_hostname_and_tunnel(spec: dict):
     mcp = spec["mcp"]
     assert mcp["hostname"] == "mcp.sevend.io"
     assert mcp["origin"].startswith("http://")
-    assert "8000" in mcp["origin"]
+    assert "8002" in mcp["origin"]
 
 
 def test_spec_ingress_includes_mcp_and_catch_all(spec: dict):

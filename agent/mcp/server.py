@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
+import secrets
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -12,6 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import AuthorizationError, ToolError
+from fastmcp.server.dependencies import get_http_request
+from fastmcp.server.middleware.middleware import CallNext, Middleware, MiddlewareContext
 
 from agent.config import Config, load_config
 from agent.core.bulk import bulk_import as core_bulk_import
@@ -29,8 +33,34 @@ from agent.core.batch_lock import is_locked
 from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
 from agent.mcp.db import open_agent_conn, open_logs_conn
+from agent.webhook import (
+    _TOKEN_NOT_CONFIGURED_MSG,
+    extract_request_token,
+    resolve_api_token,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class KbApiTokenMiddleware(Middleware):
+    """Reject tool calls unless the request presents the shared API token."""
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ):
+        configured = resolve_api_token()
+        if not configured:
+            raise ToolError(_TOKEN_NOT_CONFIGURED_MSG)
+        try:
+            http_request = get_http_request()
+        except RuntimeError:
+            raise AuthorizationError("Unauthorized") from None
+        provided = extract_request_token(http_request)
+        if not provided or not secrets.compare_digest(provided, configured):
+            raise AuthorizationError("Unauthorized")
+        return await call_next(context)
 
 _MAX_CLIENT_ERROR_LEN = 300
 _HOME_ROOT_PATH_RE = re.compile(r"/(?:root|home)(?:/[^\s\"')]+)?", re.IGNORECASE)
@@ -254,6 +284,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
             "message": "Batch running in background; results appended to the log.",
         }
 
+    mcp.add_middleware(KbApiTokenMiddleware())
     return mcp
 
 

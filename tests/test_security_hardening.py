@@ -18,10 +18,16 @@ from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.pipelines.see_also import _search_vault
 
 
+@pytest.fixture(autouse=True)
+def _kb_api_token(monkeypatch):
+    monkeypatch.setenv("KB_API_TOKEN", "test-api-token")
+
+
 @pytest.fixture
 def client():
     app.config["TESTING"] = True
     with app.test_client() as c:
+        c.environ_base["HTTP_AUTHORIZATION"] = "Bearer test-api-token"
         yield c
 
 
