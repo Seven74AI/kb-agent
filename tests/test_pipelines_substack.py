@@ -14,7 +14,9 @@ from agent.config import Config
 from agent.detection import _detect_substack_subtype
 from agent.pipelines.web import (
     step_substack_cleanup,
-    step_substack_image_extract,
+    step_substack_embedded_media,
+    _extract_body_images,
+    _extract_youtube_ids,
     SUBSTACK_BOILERPLATE,
 )
 
@@ -160,70 +162,91 @@ class TestSubstackCleanup:
         assert result == "no raw file to clean"
 
 
-# ── Image Extraction Tests ────────────────────────────────────────────────────
+# ── Embedded Media Tests (body images + embedded videos) ─────────────────────
 
-class TestSubstackImageExtract:
+class TestSubstackEmbeddedMedia:
 
-    @patch("agent.pipelines.web.subprocess.run")
-    def test_extract_from_preloads(self, mock_run, config, task_dict):
-        config.temp_dir.mkdir(parents=True, exist_ok=True)
-        slug = task_dict["slug"]
-        raw_path = config.temp_dir / f"{slug}_raw.md"
-        raw_path.write_text("# Article Title\n\nContent before image.\n")
-
-        # Pre-create a fake image file so the stat checks pass
-        img_path = config.temp_dir / f"{slug}_image"
-        img_path.write_bytes(b"x" * 200)
-
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout='<script>window.__preloads = {"attachments":[{"type":"image","url":"https://img.example.com/photo.jpg"}]};</script>'),
-            MagicMock(returncode=0, stderr=""),
-            MagicMock(returncode=0, stdout="OCR text from image"),
-        ]
-
-        result = step_substack_image_extract(task_dict, config)
-        assert "image_extracted" in result
-        cleaned = raw_path.read_text()
-        assert "## Image" in cleaned
-        assert "OCR text from image" in cleaned
-
-    @patch("agent.pipelines.web.subprocess.run")
-    def test_extract_from_og_image(self, mock_run, config, task_dict):
-        config.temp_dir.mkdir(parents=True, exist_ok=True)
-        slug = task_dict["slug"]
-        raw_path = config.temp_dir / f"{slug}_raw.md"
-        raw_path.write_text("# Article Title\n")
-
-        img_path = config.temp_dir / f"{slug}_image"
-        img_path.write_bytes(b"y" * 200)
-
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout='<html><head><meta property="og:image" content="https://cdn.example.com/og-photo.jpg"></head><body></body></html>'),
-            MagicMock(returncode=0, stderr=""),
-            MagicMock(returncode=0, stdout="Fallback OCR text"),
-        ]
-
-        result = step_substack_image_extract(task_dict, config)
-        assert "image_extracted" in result
-
-    @patch("agent.pipelines.web.subprocess.run")
-    def test_no_image_found(self, mock_run, config, task_dict):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="<html><body>No images here</body></html>",
+    def test_extract_body_images_multiple(self):
+        html = (
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/aaa-1_1458x704.png&quot;}"></div>'
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/bbb-1_1664x1184.png&quot;}"></div>'
         )
-        result = step_substack_image_extract(task_dict, config)
-        assert result == "no image found"
+        imgs = _extract_body_images(html)
+        assert len(imgs) == 2
+        assert imgs[0].endswith("aaa-1_1458x704.png")
 
-    @patch("agent.pipelines.web.subprocess.run")
-    def test_image_download_fails(self, mock_run, config, task_dict):
-        config.temp_dir.mkdir(parents=True, exist_ok=True)
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout='<meta property="og:image" content="https://broken.example.com/img.jpg">'),
-            MagicMock(returncode=7, stderr="Could not resolve host"),
+    def test_extract_body_images_filters_avatars(self):
+        html = (
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/avatar_144x144.png&quot;}"></div>'
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/content_1664x1184.png&quot;}"></div>'
+        )
+        imgs = _extract_body_images(html)
+        assert imgs == [
+            "https://substack-post-media.s3.amazonaws.com/public/images/content_1664x1184.png"
         ]
-        result = step_substack_image_extract(task_dict, config)
-        assert "image download failed" in result
+
+    def test_extract_body_images_encoded_cdn_form(self):
+        html = (
+            '<img src="https://substackcdn.com/image/fetch/p,g_auto/'
+            'https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fchart_1086x518.png">'
+        )
+        imgs = _extract_body_images(html)
+        assert imgs == [
+            "https://substack-post-media.s3.amazonaws.com/public/images/chart_1086x518.png"
+        ]
+
+    def test_extract_body_images_drops_square_and_banner(self):
+        html = (
+            '<img src="https://substackcdn.com/image/fetch/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fheadshot_553x554.jpeg">'
+            '<img src="https://substackcdn.com/image/fetch/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fbanner_1100x210.png">'
+            '<img src="https://substackcdn.com/image/fetch/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fchart_1664x1184.png">'
+        )
+        imgs = _extract_body_images(html)
+        assert imgs == [
+            "https://substack-post-media.s3.amazonaws.com/public/images/chart_1664x1184.png"
+        ]
+
+    def test_extract_youtube_ids_iframe_and_videoid(self):
+        html = (
+            '<iframe src="https://www.youtube-nocookie.com/embed/xwmL7Qr6ft4?rel=0"></iframe>'
+            '<div data-attrs="{&quot;videoId&quot;:&quot;xwmL7Qr6ft4&quot;}"></div>'
+            '<div data-attrs="{&quot;videoId&quot;:&quot;abcDEF12345&quot;}"></div>'
+        )
+        ids = _extract_youtube_ids(html)
+        assert ids == ["xwmL7Qr6ft4", "abcDEF12345"]
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    @patch("agent.pipelines.web._download_and_ocr")
+    @patch("agent.pipelines.web._enqueue_embedded_videos")
+    def test_ocrs_images_and_enqueues_videos(
+        self, mock_enqueue, mock_ocr, mock_fetch, config, task_dict,
+    ):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = config.temp_dir / f"{task_dict['slug']}_raw.md"
+        raw_path.write_text("# Title\n\nBody text.\n")
+
+        mock_fetch.return_value = (
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
+            '<iframe src="https://www.youtube-nocookie.com/embed/xyzXYZ12345"></iframe>'
+        )
+        mock_ocr.return_value = "OCR text from chart"
+        mock_enqueue.return_value = 1
+
+        result = step_substack_embedded_media(task_dict, config)
+        assert "images_ocr=1" in result
+        assert "videos_enqueued=1" in result
+        content = raw_path.read_text()
+        assert "## Image 1" in content
+        assert "OCR text from chart" in content
+        mock_enqueue.assert_called_once_with(["xyzXYZ12345"], config, None)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    @patch("agent.pipelines.web._enqueue_embedded_videos")
+    def test_no_html_is_noop(self, mock_enqueue, mock_fetch, config, task_dict):
+        mock_fetch.return_value = ""
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "no html fetched"
+        mock_enqueue.assert_not_called()
 
 
 # ── Boilerplate Pattern Tests ───────────────────────────────────────────────
