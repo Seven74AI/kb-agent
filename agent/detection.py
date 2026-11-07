@@ -100,6 +100,15 @@ def _resolve_threads_cookie_path() -> Path:
     return _resolve_cookie_path("threads_cookies.txt")
 
 
+def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
+    """Load Netscape cookie jar via curl --config (cookie path must not appear on argv/ps)."""
+    if not cookie_file.is_file():
+        return []
+    conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
+    conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
+    return ["--config", str(conf_path)]
+
+
 def _fetch_content(url: str, platform: str) -> str | None:
     """Fetch the raw content signal Jev needs for subtype resolution.
 
@@ -111,13 +120,12 @@ def _fetch_content(url: str, platform: str) -> str | None:
         try:
             cookie_path = _resolve_threads_cookie_path()
             cmd = [
-                "curl", "-s", "-L", "--max-time", "15",
+                "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "15",
                 "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
                 "-H", "Accept: text/html,application/xhtml+xml",
+                *_curl_netscape_cookie_config(cookie_path),
+                url,
             ]
-            if cookie_path.exists():
-                cmd.extend(["-b", str(cookie_path)])
-            cmd.append(url)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             return result.stdout or None
         except (subprocess.TimeoutExpired, Exception):
@@ -125,7 +133,10 @@ def _fetch_content(url: str, platform: str) -> str | None:
     elif platform == "substack":
         try:
             result = subprocess.run(
-                ["curl", "-s", "-L", "--max-time", "15", url],
+                [
+                    "curl", "-s", "-L", "--max-redirs", "0",
+                    "--max-time", "15", url,
+                ],
                 capture_output=True, text=True, timeout=20,
             )
             return result.stdout or None
@@ -214,13 +225,12 @@ def _detect_threads_subtype(url: str) -> str:
     try:
         cookie_path = _resolve_threads_cookie_path()
         cmd = [
-            "curl", "-s", "-L", "--max-time", "15",
+            "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "15",
             "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
             "-H", "Accept: text/html,application/xhtml+xml",
+            *_curl_netscape_cookie_config(cookie_path),
+            url,
         ]
-        if cookie_path.exists():
-            cmd.extend(["-b", str(cookie_path)])
-        cmd.append(url)
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=20,
@@ -244,7 +254,10 @@ def _detect_substack_subtype(url: str) -> str:
     _assert_fetch_url_allowed(url)
     try:
         result = subprocess.run(
-            ["curl", "-s", "-L", "--max-time", "15", url],
+            [
+                "curl", "-s", "-L", "--max-redirs", "0",
+                "--max-time", "15", url,
+            ],
             capture_output=True, text=True, timeout=20,
         )
         html = result.stdout

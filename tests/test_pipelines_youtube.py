@@ -171,8 +171,8 @@ def test_youtube_cookies_path_uses_config_cookie_dir(config):
     assert _youtube_cookies_path(config) == expected
 
 
-def test_step_extract_metadata_uses_config_cookie_path(config, task_dict):
-    """yt-dlp --cookies must point at config.cookie_dir/yt_cookies.txt."""
+def test_step_extract_metadata_keeps_cookies_off_argv(config, task_dict):
+    """yt-dlp cookies load via XDG config env, not --cookies on argv."""
     cookie_dir = config.cookie_dir
     cookie_dir.mkdir(parents=True, exist_ok=True)
     (cookie_dir / "yt_cookies.txt").write_text(
@@ -180,14 +180,20 @@ def test_step_extract_metadata_uses_config_cookie_path(config, task_dict):
     )
 
     mock_stdout = "Test Title||Test Channel||120||10000||20260101"
-    cookies_arg = str(_youtube_cookies_path(config))
+    cookies_path = str(_youtube_cookies_path(config))
 
     with patch("subprocess.run") as mock_run:
 
         def side_effect(*args, **kwargs):
             cmd = args[0]
-            if "--cookies" in cmd:
-                assert cookies_arg in cmd
+            assert "--cookies" not in cmd
+            assert cookies_path not in cmd
+            env = kwargs.get("env") or {}
+            xdg = env.get("XDG_CONFIG_HOME")
+            assert xdg
+            conf = Path(xdg) / "yt-dlp" / "config"
+            assert conf.is_file()
+            assert cookies_path in conf.read_text()
             if "--print" in cmd and "chapters" in " ".join(cmd):
                 return MagicMock(returncode=0, stdout="[]")
             if "--print" in cmd and "description" in " ".join(cmd):

@@ -396,7 +396,8 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             if row["status"] == "failed" and row["attempts"] < max_attempts:
                 conn.execute(
                     "UPDATE ingest_queue SET status='queued', error=NULL, "
-                    "updated_at=datetime('now') WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+                    "attempts = attempts + 1, updated_at=datetime('now') "
+                    "WHERE url = ? AND COALESCE(parent_slug, '') = ?",
                     (url, parent_key),
                 )
         return row["id"], False

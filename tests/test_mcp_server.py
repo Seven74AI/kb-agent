@@ -107,7 +107,22 @@ def test_safe_tool_returns_sanitized_error_without_traceback():
     assert "detail" in result["error"]
     assert "Traceback" not in result["error"]
     assert "/agent/secret" not in result["error"]
-    mock_logger.exception.assert_called_once()
+    mock_logger.exception.assert_not_called()
+    mock_logger.error.assert_called_once()
+    log_msg = mock_logger.error.call_args[0][-1]
+    assert "/agent/secret" not in log_msg
+    assert "sk_live" not in log_msg
+
+
+def test_safe_tool_redacts_credential_shapes_in_error_envelope():
+    @_safe_tool
+    def leaky() -> dict:
+        raise RuntimeError("upstream rejected api_key=sk_live_secret123")
+
+    result = leaky()
+    assert result["status"] == "error"
+    assert "sk_live_secret123" not in result["error"]
+    assert "[credential redacted]" in result["error"]
 
 
 @pytest.mark.asyncio

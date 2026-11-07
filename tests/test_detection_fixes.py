@@ -207,5 +207,51 @@ def test_fetch_content_threads_uses_resolved_cookie_path(monkeypatch, tmp_path):
     _fetch_content("https://threads.net/@u/post/1", "threads")
     assert captured
     cmd = captured[0]
-    assert "-b" in cmd
-    assert str(cookie) in cmd
+    assert "--config" in cmd
+    assert "-b" not in cmd
+    assert str(cookie) not in cmd
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
+
+
+def test_fetch_content_substack_curl_disables_redirects(monkeypatch):
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="<html></html>", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    _fetch_content("https://blog.substack.com/p/post", "substack")
+    cmd = captured[0]
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
+
+
+def test_detect_threads_legacy_curl_disables_redirects_and_cookie_config(
+    monkeypatch, tmp_path,
+):
+    custom_dir = tmp_path / "cookies"
+    custom_dir.mkdir()
+    cookie = custom_dir / "threads_cookies.txt"
+    cookie.write_text("session=1\n", encoding="utf-8")
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=custom_dir)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout='"video_versions":[]', stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+
+    from agent.detection import _detect_threads_subtype
+
+    _detect_threads_subtype("https://threads.net/@u/post/1")
+    cmd = captured[0]
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
+    assert "--config" in cmd
+    assert "-b" not in cmd
+    assert str(cookie) not in cmd

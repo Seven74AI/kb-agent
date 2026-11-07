@@ -113,7 +113,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
             "-H", f"User-Agent: {GOOGLEBOT_UA}",
             "-H", "Accept: text/html,application/xhtml+xml",
             "-H", "Accept-Language: en-US,en;q=0.9",
-            "-L",
+            "-L", "--max-redirs", "0",
             url,
         ],
         capture_output=True, text=True, timeout=timeout + 10,
@@ -556,7 +556,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
 
     result = subprocess.run(
         [
-            "curl", "-s", "-L", "--max-time", "300",
+            "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "300",
             "-H", f"Referer: {url}",
             "-H", f"User-Agent: {GOOGLEBOT_UA}",
             "-o", str(output_path),

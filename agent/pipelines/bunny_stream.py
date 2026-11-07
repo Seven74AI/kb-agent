@@ -9,6 +9,7 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
@@ -67,6 +68,36 @@ BUNNY_CDN_BASE_RE = re.compile(
 
 # Vault notes for TDAH talks live at Knowledge base/<slug>.md (not videos/)
 VAULT_NOTE_SUBFOLDER = ""
+
+_BUNNY_CDN_HOST_SUFFIXES = (".b-cdn.net",)
+_BUNNY_FALLBACK_CDN_BASE = "https://vz-46d29c85-edb.b-cdn.net"
+
+
+def _assert_bunny_cdn_url_allowed(url: str) -> None:
+    """Reject CDN URLs whose host is outside Bunny Stream pull zones."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise StepError(
+            "Bunny CDN URL must use http or https",
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise StepError(
+            "Bunny CDN URL must include a host",
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        )
+    if not host.startswith("vz-") or not any(
+        host.endswith(suffix) for suffix in _BUNNY_CDN_HOST_SUFFIXES
+    ):
+        raise StepError(
+            f"Bunny CDN host not allowlisted: {host}",
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        )
+    _assert_fetch_url_allowed(url)
 
 
 def extract_bunny_video_uuid(text: str) -> str | None:
@@ -138,9 +169,14 @@ def _resolve_cdn_base(embed_url: str, video_uuid: str) -> str:
     html = _curl_page(embed_url)
     m = BUNNY_CDN_BASE_RE.search(html)
     if m:
-        return m.group(1)
+        cdn_base = m.group(1)
+        _assert_bunny_cdn_url_allowed(f"{cdn_base}/{video_uuid}/playlist.m3u8")
+        return cdn_base
     # Fallback CDN zone used by terragrandir TDAH summit (tdah_daily_check.py)
-    return "https://vz-46d29c85-edb.b-cdn.net"
+    _assert_bunny_cdn_url_allowed(
+        f"{_BUNNY_FALLBACK_CDN_BASE}/{video_uuid}/playlist.m3u8"
+    )
+    return _BUNNY_FALLBACK_CDN_BASE
 
 
 def step_extract_metadata(task: dict, config: Config) -> str:
@@ -186,9 +222,10 @@ def step_download_video(task: dict, config: Config) -> str:
     cdn_base = _resolve_cdn_base(embed_url, video_uuid)
 
     mp4_url = f"{cdn_base}/{video_uuid}/play_720p.mp4"
+    _assert_bunny_cdn_url_allowed(mp4_url)
     dl = subprocess.run(
         [
-            "curl", "-sL", "--max-time", "600",
+            "curl", "-sL", "--max-redirs", "0", "--max-time", "600",
             "-H", BUNNY_REFERER,
             "-o", str(output_path),
             mp4_url,
@@ -200,6 +237,7 @@ def step_download_video(task: dict, config: Config) -> str:
         if output_path.exists():
             output_path.unlink(missing_ok=True)
         hls_url = f"{cdn_base}/{video_uuid}/720p/video.m3u8"
+        _assert_bunny_cdn_url_allowed(hls_url)
         ff = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-y",

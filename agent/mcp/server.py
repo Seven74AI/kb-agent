@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import logging
-import re
 import secrets
 import subprocess
 import sys
@@ -32,6 +31,7 @@ from agent.core.submit import submit_ingest as core_submit_ingest
 from agent.core.batch_lock import is_locked
 from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
+from agent.notify import sanitize_visible_message
 from agent.mcp.db import open_agent_conn, open_logs_conn
 from agent.webhook import (
     _TOKEN_NOT_CONFIGURED_MSG,
@@ -63,14 +63,11 @@ class KbApiTokenMiddleware(Middleware):
         return await call_next(context)
 
 _MAX_CLIENT_ERROR_LEN = 300
-_HOME_ROOT_PATH_RE = re.compile(r"/(?:root|home)(?:/[^\s\"')]+)?", re.IGNORECASE)
-_MULTI_SEGMENT_ABS_PATH_RE = re.compile(r"/[\w.-]+(?:/[\w.-]+)+")
 
 
 def _sanitize_exception_message(message: str) -> str:
-    """Keep the exception reason for callers; strip obvious absolute paths."""
-    scrubbed = _HOME_ROOT_PATH_RE.sub("[path]", message)
-    scrubbed = _MULTI_SEGMENT_ABS_PATH_RE.sub("[path]", scrubbed)
+    """Scrub paths and credential-shaped text before returning tool errors."""
+    scrubbed = sanitize_visible_message(message)
     if len(scrubbed) > _MAX_CLIENT_ERROR_LEN:
         scrubbed = scrubbed[: _MAX_CLIENT_ERROR_LEN - 3] + "..."
     return scrubbed
@@ -83,8 +80,13 @@ def _safe_tool(fn):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 — uniform error shape for the caller
-            logger.exception("MCP tool %s failed", fn.__name__)
             detail = _sanitize_exception_message(str(exc))
+            logger.error(
+                "MCP tool %s failed: %s: %s",
+                fn.__name__,
+                type(exc).__name__,
+                detail,
+            )
             return {
                 "status": "error",
                 "error": f"{type(exc).__name__}: {detail}",

@@ -14,6 +14,7 @@ Pitfalls handled:
 """
 
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime
@@ -50,6 +51,23 @@ from agent.pipelines.video_common import (
 YTDLP_BIN = shutil.which("yt-dlp") or "/usr/local/lib/hermes-agent/venv/bin/yt-dlp"
 
 # yt-dlp rate limiting for Instagram (per spec)
+# yt-dlp is a delegated fetcher: only the user-supplied input URL is validated via
+# fetch_guard. Segment / CDN URLs yt-dlp opens internally are outside fetch_guard
+# (accepted residual, same class as Flaresolverr).
+
+
+def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
+    """Load IG cookies via XDG yt-dlp config so paths stay off subprocess argv."""
+    cookie_path = config.cookie_dir / "ig_cookies.txt"
+    xdg_root = Path(config.temp_dir) / "ytdlp_xdg"
+    conf_dir = xdg_root / "yt-dlp"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "config").write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(xdg_root)
+    return env
+
+
 IGDL_RATE_FLAGS = [
     "--sleep-requests", "3",
     "--sleep-interval", "5",
@@ -139,13 +157,15 @@ def _fetch_ig_caption(url: str, config: Config) -> str:
         result = subprocess.run(
             [
                 YTDLP_BIN,
-                "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
                 "--js-runtimes", "node",
                 *IGDL_RATE_FLAGS,
                 "--print", "%(description)s",
                 url,
             ],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=_ytdlp_subprocess_env(config),
         )
         if result.returncode == 0:
             caption = result.stdout.strip()
@@ -210,13 +230,15 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--output", ytdlp_out,
             *IGDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=_ytdlp_subprocess_env(config),
     )
 
     if result.returncode != 0:
@@ -470,13 +492,15 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(title)s||%(uploader)s||%(like_count)s||%(playlist_count)s",
             *IGDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=_ytdlp_subprocess_env(config),
     )
 
     metadata = {
@@ -508,13 +532,15 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     caption_result = subprocess.run(
         [
             YTDLP_BIN,
-            "--cookies", str(config.cookie_dir / "ig_cookies.txt"),
             "--js-runtimes", "node",
             "--print", "%(description)s",
             *IGDL_RATE_FLAGS,
             url,
         ],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=_ytdlp_subprocess_env(config),
     )
 
     if caption_result.returncode == 0:
@@ -973,19 +999,31 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
             "Instagram sessionid missing — re-export cookies",
             error_type=ErrorType.PAUSE, step_name="ig_comment_fetch",
         )
-    cookie_path = config.cookie_dir / "ig_cookies.txt"
     media_id = _shortcode_to_media_id(shortcode)
+    api_url = (
+        f"https://www.instagram.com/api/v1/media/{media_id}/comments/"
+        "?can_support_threading=true"
+    )
+    _assert_fetch_url_allowed(api_url)
+    csrftoken = cookies.get("csrftoken", "")
+    curl_cfg = "\n".join(
+        [
+            "silent",
+            "max-time = 25",
+            f'user-agent = "{IG_APP_UA}"',
+            f'header = "x-ig-app-id: {IG_WEB_APP_ID}"',
+            f'header = "x-csrftoken: {csrftoken}"',
+            f'header = "Cookie: sessionid={cookies["sessionid"]}"',
+            f'url = "{api_url}"',
+        ]
+    ) + "\n"
 
     result = subprocess.run(
-        [
-            "curl", "-s", "--max-time", "25",
-            "-b", str(cookie_path),
-            "-H", f"x-ig-app-id: {IG_WEB_APP_ID}",
-            "-H", f"x-csrftoken: {cookies.get('csrftoken', '')}",
-            "-H", f"User-Agent: {IG_APP_UA}",
-            f"https://www.instagram.com/api/v1/media/{media_id}/comments/?can_support_threading=true",
-        ],
-        capture_output=True, text=True, timeout=30,
+        ["curl", "-s", "-K", "-"],
+        input=curl_cfg,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
     try:
