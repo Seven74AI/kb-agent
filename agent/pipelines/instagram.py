@@ -15,6 +15,7 @@ Pitfalls handled:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -959,6 +960,29 @@ IG_APP_UA = (
     "SM-G991B; o1s; exynos2100; en_US; 458229258)"
 )
 _IG_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_COMMENT_ID_PATH_TOKEN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_comment_id_path_token(comment_id: str) -> str:
+    """Reject comment_id values unsafe for use in a cookie_dir filename (path traversal)."""
+    if (
+        not comment_id
+        or ".." in comment_id
+        or "/" in comment_id
+        or "\\" in comment_id
+    ):
+        raise StepError(
+            "Invalid comment_id in URL",
+            error_type=ErrorType.FAIL,
+            step_name="ig_comment_fetch",
+        )
+    if not _COMMENT_ID_PATH_TOKEN.fullmatch(comment_id):
+        raise StepError(
+            "Invalid comment_id in URL",
+            error_type=ErrorType.FAIL,
+            step_name="ig_comment_fetch",
+        )
+    return comment_id
 
 
 def _shortcode_to_media_id(shortcode: str) -> int:
@@ -996,6 +1020,7 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
         raise StepError(
             "No comment_id in URL", error_type=ErrorType.FAIL, step_name="ig_comment_fetch"
         )
+    path_token = _safe_comment_id_path_token(comment_id)
 
     cookies = _read_ig_cookies(config.cookie_dir)
     if "sessionid" not in cookies:
@@ -1021,7 +1046,15 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
             f'url = "{api_url}"',
         ]
     ) + "\n"
-    conf_path = config.cookie_dir / f".curl-ig-comment-{comment_id}.conf"
+    conf_path = config.cookie_dir / f".curl-ig-comment-{path_token}.conf"
+    resolved_conf = conf_path.resolve()
+    cookie_dir_resolved = config.cookie_dir.resolve()
+    if not resolved_conf.is_relative_to(cookie_dir_resolved):
+        raise StepError(
+            "Invalid comment_id in URL",
+            error_type=ErrorType.FAIL,
+            step_name="ig_comment_fetch",
+        )
     conf_path.write_text(curl_cfg, encoding="utf-8")
     os.chmod(conf_path, 0o600)
 

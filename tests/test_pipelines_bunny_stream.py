@@ -32,6 +32,15 @@ class TestBunnyStreamSsrf:
             _curl_page(METADATA_URL)
         mock_run.assert_not_called()
 
+    @patch("agent.pipelines.bunny_stream.subprocess.run")
+    def test_curl_page_uses_max_redirs_zero(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="<html></html>", stderr="")
+        _curl_page("https://www.terragrandir.com/tdah-adulte-j1-intro/")
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+
 
 class TestBunnyStreamDetection:
 
