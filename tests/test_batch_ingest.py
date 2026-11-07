@@ -82,6 +82,38 @@ class TestAppendToParent:
         assert body.count("## Image") == 1
         assert body.count("OCR text") == 1
 
+    def test_append_marker_prevents_double_write_after_crash(self, config, conn):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import media_append_marker, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        marker = media_append_marker(ingest_id)
+        raw.write_text(
+            f"# Article\n\nBody.\n\n## Image\n\nOCR text\n\n{marker}\n",
+            encoding="utf-8",
+        )
+        batch_ingest._append_to_parent(
+            config, parent, "Image", "OCR text again", conn=conn, ingest_id=ingest_id,
+        )
+        body = raw.read_text(encoding="utf-8")
+        assert body.count("## Image") == 1
+        assert "OCR text again" not in body
+        row = conn.execute(
+            "SELECT media_appended FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["media_appended"] == 1
+
 
 class TestDeferredSynthesizeTags:
     def test_dispatch_includes_parent_tags_from_task(self, tmp_path, monkeypatch, config, conn):
@@ -295,13 +327,18 @@ class TestKbOcrSizeCap:
         assert "MAX_IMAGE_BYTES = 25 * 1024 * 1024" in text
         assert "size > MAX_IMAGE_BYTES" in text
 
-    def test_read_images_skips_bad_images_per_item(self):
+    def test_read_images_returns_structured_errors_per_item(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
         start = text.index("def read_images")
         body = text[start : text.index("@app.local_entrypoint", start)]
         assert "for item in images:" in body
         assert "except Exception" in body
-        assert "skipped:" in body
+        assert '{"name":name,"error":str(exc)}' in body.replace(" ", "")
+
+    def test_main_writes_error_ocr_json(self):
+        text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
+        assert 'r.get("error")' in text
+        assert '"error": r["error"]' in text
 
 
 class TestBatchOcrPartialFailure:
@@ -348,6 +385,7 @@ class TestBatchOcrPartialFailure:
                 return MagicMock(returncode=1, stdout="", stderr="partial modal failure")
             return MagicMock(returncode=0)
 
+        monkeypatch.setattr(batch_ingest, "OCR_BATCH_MAX_FAILURE_RATE", 0.5)
         monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
         batch_ingest._process_embedded_images([q_ok, q_bad], config, conn, 42)
 
@@ -362,6 +400,112 @@ class TestBatchOcrPartialFailure:
         assert ok_row["status"] == "dispatched"
         assert bad_row["status"] == "failed"
         assert bad_row["error"] == "no OCR output"
+
+    def test_ocr_error_json_marks_failed_with_message(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_ocr_err"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://example.com/bad.png",
+            "substack_image",
+            "img_err",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+
+        def fake_run(cmd, **kw):
+            if "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x89PNG" + b"\x00" * 200)
+                return MagicMock(returncode=0)
+            if "batch_ocr.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                stage_dir = Path(cmd[2])
+                for staged in stage_dir.iterdir():
+                    (out_dir / f"{staged.name}.ocr.json").write_text(
+                        json.dumps({"error": "CUDA OOM"}),
+                        encoding="utf-8",
+                    )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q], config, conn, 43)
+        row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert "CUDA OOM" in row["error"]
+        assert row["error"] != "no OCR output"
+
+    def test_high_ocr_failure_rate_fails_entire_batch(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_batch_fail"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        id_ok = queue_ingest(
+            conn,
+            "https://example.com/ok.png",
+            "substack_image",
+            "img_ok2",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        id_bad = queue_ingest(
+            conn,
+            "https://example.com/bad.png",
+            "substack_image",
+            "img_bad2",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q_ok = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_ok,)).fetchone())
+        q_bad = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_bad,)).fetchone())
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "curl":
+                dest = Path(cmd[cmd.index("-o") + 1])
+                dest.write_bytes(b"\x89PNG" + b"\x00" * 200)
+                return MagicMock(returncode=0)
+            if "batch_ocr.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                stage_dir = Path(cmd[2])
+                for staged in stage_dir.iterdir():
+                    if staged.name.startswith(id_ok):
+                        (out_dir / f"{staged.name}.ocr.json").write_text(
+                            json.dumps({"reading": "good chart"}),
+                            encoding="utf-8",
+                        )
+                    else:
+                        (out_dir / f"{staged.name}.ocr.json").write_text(
+                            json.dumps({"error": "decode failed"}),
+                            encoding="utf-8",
+                        )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q_ok, q_bad], config, conn, 44)
+
+        ok_row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (id_ok,),
+        ).fetchone()
+        bad_row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (id_bad,),
+        ).fetchone()
+        assert ok_row["status"] == "failed"
+        assert "failure rate exceeded" in ok_row["error"]
+        assert bad_row["status"] == "failed"
+        assert "decode failed" in bad_row["error"]
 
 
 class TestAppendFailureMarksIngest:
@@ -686,6 +830,98 @@ class TestDownloadVideoUnsupportedContentType:
         path, err = batch_ingest._download_video(q, config)
         assert path is None
         assert err == "unsupported embedded content_type: not_a_video_pipeline"
+
+
+class TestBatchPipelineIdKeyedDownloadArtifacts:
+    """Embedded YouTube/Rumble downloads must write temp artifacts keyed by ingest id."""
+
+    def test_embedded_youtube_produces_id_keyed_video_and_metadata_pairing(
+        self, config, monkeypatch,
+    ):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = "ingest-yt-embedded-001"
+        shared_slug = "youtube.com_watch_v_dQw4w9WgXcQ"
+        q = {
+            "id": ingest_id,
+            "slug": shared_slug,
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "content_type": "youtube",
+        }
+
+        def fake_run(cmd, **_kw):
+            joined = " ".join(str(c) for c in cmd)
+            if "%(title)s" in joined:
+                return MagicMock(returncode=0, stdout="T||U||60||1||20240101")
+            if "%(chapters)s" in joined:
+                return MagicMock(returncode=0, stdout="[]")
+            if "%(description)s" in joined:
+                return MagicMock(returncode=0, stdout="desc")
+            if "-o" in cmd:
+                out = Path(cmd[cmd.index("-o") + 1])
+                out.write_bytes(b"\x00" * 2000)
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("agent.pipelines.youtube._validate_cookies", lambda: None)
+        monkeypatch.setattr("agent.pipelines.youtube.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.pipelines.youtube.ensure_h264", lambda p: p)
+
+        path, err = batch_ingest._download_video(q, config)
+        assert err is None
+        assert path == config.temp_dir / f"{ingest_id}.mp4"
+        meta = config.temp_dir / f"{ingest_id}_metadata.json"
+        assert meta.is_file()
+        assert json.loads(meta.read_text(encoding="utf-8"))["title"] == "T"
+        assert not (config.temp_dir / f"{shared_slug}.mp4").exists()
+        assert not (config.temp_dir / f"{shared_slug}_metadata.json").exists()
+
+    def test_embedded_rumble_same_url_different_parents_no_collision(
+        self, config, monkeypatch,
+    ):
+        import scripts.batch_ingest as batch_ingest
+        from agent.core.slugify import slugify
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        rumble_url = "https://rumble.com/v2vk68c-example"
+        shared_slug = slugify(rumble_url, content_type="rumble")
+        cdn_url = "https://hugh.cdn.rumble.cloud/video/same-asset.mp4"
+
+        monkeypatch.setattr(
+            "agent.pipelines.rumble.resolve_rumble",
+            lambda _url: ("Title", [{"url": cdn_url, "height": 480}]),
+        )
+
+        def fake_run(cmd, **_kw):
+            if cmd[0] == "curl" and "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr("agent.pipelines.rumble.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.pipelines.rumble.ensure_h264", lambda p: p)
+
+        id_a = "ingest-rumble-parent-a"
+        id_b = "ingest-rumble-parent-b"
+        results: list[Path] = []
+        for ingest_id, parent in ((id_a, "parent_a"), (id_b, "parent_b")):
+            q = {
+                "id": ingest_id,
+                "slug": shared_slug,
+                "url": rumble_url,
+                "content_type": "rumble",
+            }
+            path, err = batch_ingest._download_video(q, config)
+            assert err is None
+            assert path == config.temp_dir / f"{ingest_id}.mp4"
+            results.append(path)
+
+        assert results[0] != results[1]
+        meta_a = json.loads((config.temp_dir / f"{id_a}_metadata.json").read_text())
+        meta_b = json.loads((config.temp_dir / f"{id_b}_metadata.json").read_text())
+        assert meta_a["source_url"] == rumble_url
+        assert meta_b["source_url"] == rumble_url
+        assert not (config.temp_dir / f"{shared_slug}.mp4").exists()
 
 
 class TestCorruptJsonHandling:

@@ -18,6 +18,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.pipelines.web import (
     step_substack_cleanup,
     step_substack_embedded_media,
+    step_synthesize_web,
     step_substack_video_extract_metadata,
     _extract_body_images,
     _extract_native_video_ids,
@@ -847,6 +848,39 @@ class TestSubstackVideoMetadata:
         )
         result = step_substack_embedded_media(task_dict, config)
         assert result == "media ready — deferred to batch"
+
+    @patch("agent.pipelines.web.get_llm_client")
+    @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
+    def test_synthesize_pipeline_not_blocked_by_deferred_manifest(
+        self, _mock_syn, _mock_llm, config, task_dict, tmp_path,
+    ):
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "content_type": "substack_text", "total": 1}),
+            encoding="utf-8",
+        )
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+        synth_task = {**task_dict, "content_type": "substack_text_synthesize"}
+        step_synthesize_web(synth_task, config)
+        assert (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").is_file()
+
+    def test_deferred_manifest_parent_does_not_inline_synthesize(self, config, task_dict, tmp_path):
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "content_type": "substack_text", "total": 1}),
+            encoding="utf-8",
+        )
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+
+        with pytest.raises(StepError) as exc:
+            step_synthesize_web(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "deferred to batch synthesis" in str(exc.value).lower()
+        assert not (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").exists()
 
     def test_deferred_media_batch_finished_requires_synthesize_signal(self, config, tmp_path):
         from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest, update_ingest_status

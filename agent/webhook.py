@@ -23,6 +23,7 @@ from agent.core import (
 )
 from agent.core.resume import ResumeReasonError, normalize_reason_pattern
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
+from scripts.batch_ingest import refresh_parent_media_manifest
 from agent.notify import sanitize_visible_message
 
 app = Flask(__name__)
@@ -454,10 +455,14 @@ def remove_ingest_item():
     if not ingest_id:
         return jsonify({"error": "ingest_id required"}), 400
     conn = _get_agent_conn()
-    removed = remove_ingest(conn, ingest_id)
+    parent_slug = remove_ingest(conn, ingest_id, temp_dir=config.temp_dir)
+    if parent_slug is None:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    if parent_slug:
+        refresh_parent_media_manifest(conn, config, parent_slug)
     conn.close()
-    if removed:
-        return redirect(url_for("dashboard"))
+    return redirect(url_for("dashboard"))
     return jsonify({"error": "not found"}), 404
 
 
@@ -489,6 +494,9 @@ def dashboard():
             q["error"] = sanitize_visible_message(q["error"])
     if last_run and last_run.get("summary"):
         last_run = {**last_run, "summary": sanitize_visible_message(last_run["summary"])}
+    for task in tasks:
+        if task.get("error"):
+            task["error"] = sanitize_visible_message(task["error"])
 
     # Failure-first ordering + a single failure count for the banner/tab title.
     bad = {"failed", "paused"}

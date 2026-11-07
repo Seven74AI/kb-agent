@@ -47,6 +47,13 @@ RUMBLE_METADATA_MAX_AGE_SEC = 6 * 3600
 _RUMBLE_CDN_HOST_SUFFIXES = (".cdn.rumble.cloud", ".rumble.com")
 
 
+def _download_artifact_stem(task: dict) -> str:
+    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
+    if task.get("_batch_ingest"):
+        return task["id"]
+    return task.get("slug", task["id"][:8])
+
+
 def _assert_rumble_cdn_url_allowed(url: str) -> None:
     """Reject CDN URLs whose host is outside Rumble's CDN / origin domains."""
     parsed = urlparse(url)
@@ -160,10 +167,10 @@ def resolve_rumble(url: str) -> tuple[str, list[dict]]:
 
 
 def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
-    """Use cached ``{slug}_metadata.json`` from extract_metadata when still fresh."""
-    slug = task.get("slug", task["id"][:8])
+    """Use cached ``{stem}_metadata.json`` from extract_metadata when still fresh."""
+    stem = _download_artifact_stem(task)
     source_url = task["source_url"]
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if meta_path.exists():
         age_sec = time.time() - meta_path.stat().st_mtime
         if age_sec <= RUMBLE_METADATA_MAX_AGE_SEC:
@@ -181,10 +188,10 @@ def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
 
 
 def step_rumble_extract_metadata(task: dict, config: Config) -> str:
-    """Resolve title + formats and write ``{slug}_metadata.json``."""
-    slug = task.get("slug", task["id"][:8])
+    """Resolve title + formats and write ``{stem}_metadata.json``."""
+    stem = _download_artifact_stem(task)
     title, formats = resolve_rumble(task["source_url"])
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(
         json.dumps(
             {"title": title, "formats": formats, "source_url": task["source_url"]},
@@ -197,8 +204,8 @@ def step_rumble_extract_metadata(task: dict, config: Config) -> str:
 
 def step_rumble_download_video(task: dict, config: Config) -> str:
     """Resolve + download the ≤720p mp4 from the un-gated CDN, normalize to H.264."""
-    slug = task.get("slug", task["id"][:8])
-    output_path = Path(config.temp_dir) / f"{slug}.mp4"
+    stem = _download_artifact_stem(task)
+    output_path = Path(config.temp_dir) / f"{stem}.mp4"
 
     formats = _load_rumble_formats(task, config)
     pick = None

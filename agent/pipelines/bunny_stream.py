@@ -41,6 +41,14 @@ BROWSER_UA = (
 )
 BUNNY_REFERER = "Referer: https://player.mediadelivery.net/"
 
+
+def _download_artifact_stem(task: dict) -> str:
+    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
+    if task.get("_batch_ingest"):
+        return task["id"]
+    return task.get("slug", task["id"][:8])
+
+
 BUNNY_UUID_RE = re.compile(
     r"player\.mediadelivery\.net/embed/\d+/([a-f0-9]{8}-[a-f0-9]{4}-"
     r"[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
@@ -138,6 +146,7 @@ def _resolve_cdn_base(embed_url: str, video_uuid: str) -> str:
 def step_extract_metadata(task: dict, config: Config) -> str:
     """Extract basic metadata from the terragrandir detail page."""
     slug = task.get("slug", task["id"][:8])
+    stem = _download_artifact_stem(task)
     source_url = task["source_url"]
 
     title = slug.replace("-", " ").title()
@@ -162,16 +171,16 @@ def step_extract_metadata(task: dict, config: Config) -> str:
         "chapters": [],
         "source_url": source_url,
     }
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
     return json.dumps(metadata)
 
 
 def step_download_video(task: dict, config: Config) -> str:
     """Download Bunny Stream video (MP4 preferred, HLS fallback)."""
-    slug = task.get("slug", task["id"][:8])
+    stem = _download_artifact_stem(task)
     source_url = task["source_url"]
-    output_path = Path(config.temp_dir) / f"{slug}.mp4"
+    output_path = Path(config.temp_dir) / f"{stem}.mp4"
 
     embed_url, video_uuid = _resolve_embed_url(source_url)
     cdn_base = _resolve_cdn_base(embed_url, video_uuid)
@@ -224,10 +233,11 @@ def step_download_video(task: dict, config: Config) -> str:
         except ValueError:
             pass
 
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
     else:
+        slug = task.get("slug", task["id"][:8])
         meta = {"title": slug, "duration": duration}
     meta["duration"] = duration
     meta["bunny_video_uuid"] = video_uuid

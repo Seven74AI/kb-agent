@@ -36,16 +36,19 @@ from agent.config import load_config  # noqa: E402
 sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
+    bootstrap_parent_media_deferral_from_manifest,
     claim_ingest_items,
     count_pending_media,
+    ensure_parent_media_deferral,
     finish_batch_run,
+    get_parent_media_deferral,
+    has_completed_parent_synthesis,
     init_db,
-    ingest_media_appended,
+    append_parent_media_atomic,
     normalize_tags,
     record_batch_run,
     recover_failed_media,
     recover_stale_ingest,
-    set_ingest_media_appended,
     update_ingest_status,
 )
 from agent.notify import sanitize_visible_message  # noqa: E402
@@ -55,6 +58,7 @@ from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
 
 # Reject staging huge images to Modal (GPU OOM / pixel bombs).
 MAX_STAGED_IMAGE_BYTES = 25 * 1024 * 1024
+OCR_BATCH_MAX_FAILURE_RATE = 0.20
 
 # Parent slugs whose deferred synthesize task was already dispatched this run.
 _deferred_synthesize_dispatched: set[str] = set()
@@ -125,6 +129,11 @@ def _read_json_file(path: Path, label: str) -> tuple[object | None, str | None]:
         return None, f"invalid {label} JSON: {exc}"
 
 
+def _ingest_download_stem(task: dict) -> str:
+    """Filesystem stem for per-ingest download artifacts (queue/task id, not slug)."""
+    return task["id"]
+
+
 def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
     """Run one link's download-phase steps. Returns (video_path, error)."""
     from agent.pipelines import get_pipeline
@@ -139,6 +148,7 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
         "slug": q["slug"],
         "source_url": q["url"],
         "content_type": q["content_type"],
+        "_batch_ingest": True,
     }
     for name in steps:
         fn = step_fns.get(name)
@@ -150,8 +160,9 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
             return None, f"{name} failed: {exc}"
 
     tmp = Path(config.temp_dir)
+    stem = _ingest_download_stem(task)
     for ext in VIDEO_EXTS:
-        candidate = tmp / f"{q['id']}{ext}"
+        candidate = tmp / f"{stem}{ext}"
         if candidate.is_file():
             return candidate, None
     return None, "no video file found after download"
@@ -255,17 +266,15 @@ def _append_to_parent(
     ingest_id: str | None = None,
 ) -> bool:
     """Append a media reading/transcript to the parent article's raw markdown."""
-    if conn is not None and ingest_id and ingest_media_appended(conn, ingest_id):
-        return True
     raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
+    if conn is not None and ingest_id:
+        return append_parent_media_atomic(conn, ingest_id, raw_path, section, body)
     if not raw_path.exists():
         return False
     raw_path.write_text(
         raw_path.read_text(encoding="utf-8") + f"\n\n## {section}\n\n{body.strip()}\n",
         encoding="utf-8",
     )
-    if conn is not None and ingest_id:
-        set_ingest_media_appended(conn, ingest_id)
     return True
 
 
@@ -303,39 +312,36 @@ def _supersede_deferred_parent_task(conn, parent_slug: str, *, synthesize_task_i
         )
 
 
-def _manifest_from_db(conn, parent_slug: str) -> dict | None:
-    """Rebuild deferral manifest from the parent task and ingest_queue siblings."""
-    parent_row = conn.execute(
-        "SELECT source_url, content_type FROM tasks "
-        "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        "ORDER BY created_at LIMIT 1",
-        (parent_slug,),
-    ).fetchone()
-    if not parent_row:
-        return None
-    count_row = conn.execute(
-        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-        (parent_slug,),
-    ).fetchone()
-    total = count_row["n"] if hasattr(count_row, "keys") else count_row[0]
-    if total <= 0:
-        return None
-    if hasattr(parent_row, "keys"):
-        return {
-            "url": parent_row["source_url"],
-            "content_type": parent_row["content_type"],
-            "total": total,
-        }
-    return {
-        "url": parent_row[0],
-        "content_type": parent_row[1],
-        "total": total,
+def refresh_parent_media_manifest(conn, config, parent_slug: str) -> None:
+    """Rewrite on-disk manifest from the DB gate (keeps authoritative expected_total)."""
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None:
+        bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, config.temp_dir)
+        deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None:
+        return
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
+    payload = {
+        "url": deferral["source_url"],
+        "content_type": deferral["content_type"],
+        "total": deferral["expected_total"],
+        "media_changed": True,
     }
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     """Fire the parent's deferred synthesis once every sibling media item is done."""
     if parent_slug in _deferred_synthesize_dispatched:
+        return False
+    if has_completed_parent_synthesis(
+        conn, parent_slug, vault_path=config.vault_path,
+    ):
+        print(f"  [skip] {parent_slug}: parent synthesis already completed")
         return False
     if count_pending_media(conn, parent_slug) > 0:
         return False
@@ -345,15 +351,21 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
         if manifest_err:
             print(f"  [skip] {parent_slug}: {manifest_err}")
             return False
-    else:
-        manifest = _manifest_from_db(conn, parent_slug)
-        if manifest is None:
-            print(f"  [skip] {parent_slug}: manifest missing; cannot reconcile from DB")
-            return False
-    expected = manifest.get("total")
-    if expected is None:
-        print(f"  [skip] {parent_slug}: manifest total missing")
+        total = manifest.get("total")
+        url = manifest.get("url")
+        content_type = manifest.get("content_type")
+        if total is not None and url and content_type:
+            ensure_parent_media_deferral(
+                conn, parent_slug, url, content_type, int(total),
+            )
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None:
+        bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, config.temp_dir)
+        deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None:
+        print(f"  [skip] {parent_slug}: deferral record missing; fail closed")
         return False
+    expected = deferral["expected_total"]
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
         (parent_slug,),
@@ -361,12 +373,12 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     actual = row["n"] if hasattr(row, "keys") else row[0]
     if actual != expected:
         print(
-            f"  [skip] {parent_slug}: ingest rows {actual} != manifest total {expected}"
+            f"  [skip] {parent_slug}: ingest rows {actual} != expected total {expected}"
         )
         return False
     rr = dispatch_synthesize(
-        manifest["url"], config, conn,
-        content_type=f"{manifest['content_type']}_synthesize", slug=parent_slug,
+        deferral["source_url"], config, conn,
+        content_type=f"{deferral['content_type']}_synthesize", slug=parent_slug,
         tags=_parent_tags(conn, parent_slug),
     )
     if rr.get("duplicate"):
@@ -440,18 +452,40 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
     if r.returncode != 0:
         print(f"  [warn] batch_ocr exit {r.returncode}; processing available outputs")
 
+    ocr_results: list[tuple[dict, str | None, str | None]] = []
     for q, dest in staged:
         ocr_json = out_dir / f"{dest.name}.ocr.json"
         if not ocr_json.exists():
-            update_ingest_status(conn, q["id"], "failed", error="no OCR output")
+            ocr_results.append((q, None, "no OCR output"))
             continue
         ocr_data, ocr_err = _read_json_file(ocr_json, "OCR")
         if ocr_err:
-            update_ingest_status(conn, q["id"], "failed", error=ocr_err)
+            ocr_results.append((q, None, ocr_err))
+            continue
+        if ocr_data.get("error"):
+            ocr_results.append((q, None, f"OCR failed: {ocr_data['error']}"))
             continue
         reading = ocr_data.get("reading", "")
         if not reading.strip():
-            update_ingest_status(conn, q["id"], "failed", error="empty OCR reading")
+            ocr_results.append((q, None, "empty OCR reading"))
+            continue
+        ocr_results.append((q, reading, None))
+
+    failure_count = sum(1 for _q, _reading, err in ocr_results if err)
+    batch_failed = bool(staged) and failure_count / len(staged) > OCR_BATCH_MAX_FAILURE_RATE
+    if batch_failed:
+        print(
+            f"  [warn] OCR batch failure rate {failure_count}/{len(staged)} "
+            f"exceeds {OCR_BATCH_MAX_FAILURE_RATE:.0%}; failing batch"
+        )
+
+    for q, reading, err in ocr_results:
+        if batch_failed:
+            msg = err if err else "ocr batch failure rate exceeded"
+            update_ingest_status(conn, q["id"], "failed", error=msg)
+            continue
+        if err:
+            update_ingest_status(conn, q["id"], "failed", error=err)
             continue
         if not _append_to_parent(
             config, q["parent_slug"], "Image", reading, conn=conn, ingest_id=q["id"],

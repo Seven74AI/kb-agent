@@ -681,6 +681,46 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
 
 # ── LLM Synthesis ────────────────────────────────────────────────────────────
 
+_SUBSTACK_PARENT_CONTENT_TYPES = frozenset({"substack_text", "substack_image"})
+
+
+def _parent_article_deferred_to_batch(task: dict, config: Config, conn) -> bool:
+    """True when this parent slug has a durable deferral manifest or marker."""
+    slug = task.get("slug", task["id"][:8])
+    if (Path(config.temp_dir) / f"{slug}_media.json").is_file():
+        return True
+    if _parent_media_was_deferred(conn, task.get("id", ""), slug):
+        return True
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+        (slug,),
+    ).fetchone()
+    sibling_count = row["n"] if hasattr(row, "keys") else row[0]
+    return int(sibling_count) > 0
+
+
+def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> None:
+    """Parent Substack tasks must not inline-synthesize when batch owns the slug."""
+    content_type = task.get("content_type", "")
+    if content_type not in _SUBSTACK_PARENT_CONTENT_TYPES:
+        return
+    from agent.db import AGENT_SCHEMA, has_completed_parent_synthesis, init_db
+
+    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    try:
+        if not _parent_article_deferred_to_batch(task, config, conn):
+            return
+        if has_completed_parent_synthesis(conn, task.get("slug", task["id"][:8]), vault_path=config.vault_path):
+            return
+        raise StepError(
+            "deferred to batch synthesis — parent must not inline synthesize",
+            error_type=ErrorType.PAUSE,
+            step_name="synthesize_note",
+        )
+    finally:
+        conn.close()
+
+
 def step_synthesize_web(task: dict, config: Config) -> str:
     """LLM synthesis for web articles — reads source, builds prompt, calls LLM,
     writes note to vault.
@@ -696,6 +736,7 @@ def step_synthesize_web(task: dict, config: Config) -> str:
         Path to the generated note file.
     """
     slug = task.get("slug", task["id"][:8])
+    _guard_parent_deferred_batch_synthesis(task, config)
     source_url = task.get("source_url", "")
     source_path = Path(config.temp_dir) / f"{slug}_raw.md"
 
