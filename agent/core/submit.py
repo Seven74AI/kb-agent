@@ -109,13 +109,17 @@ def submit_url(
 
 
 def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
-                  content_type: str | None = None, tags=None) -> dict:
+                  content_type: str | None = None, tags=None,
+                  parent_slug: str | None = None, media_kind: str | None = None) -> dict:
     """Queue a URL for deferred batch processing (durable ingest inbox).
 
     Detects the content type, stores the link durably, and returns. Nothing is
     processed yet — a nightly batch collector dispatches it to ``tasks`` with the
     content-type-appropriate pipeline (including the synthesize-only variant for
     batch-transcribed video).
+
+    ``parent_slug`` + ``media_kind`` link an embedded media item (image/video)
+    back to the Substack article that spawned it, for deferred synthesis.
     """
     url = normalize_url((url or "").strip())
     if not url:
@@ -125,7 +129,10 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
     subtype = content_type or detect_content_subtype(url, platform)
     slug = slugify(url)
 
-    ingest_id, created = queue_ingest(agent_conn, url, subtype, slug, tags=tags)
+    ingest_id, created = queue_ingest(
+        agent_conn, url, subtype, slug, tags=tags,
+        parent_slug=parent_slug, media_kind=media_kind,
+    )
 
     return {
         "status": "queued",
