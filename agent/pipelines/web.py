@@ -108,94 +108,176 @@ def step_substack_video_pause(task: dict, config: Config) -> str:
     )
 
 
-def step_substack_image_extract(task: dict, config: Config) -> str:
-    """Download the lead image from a Substack image post and run Tesseract OCR.
+# Body-image dimension below this (both sides) is an avatar/icon, not content.
+AVATAR_MAX_SIDE = 400
 
-    Uses curl to fetch the page, extracts the image URL from preloads JSON
-    or og:image meta, downloads the image, and runs tesseract with
-    multi-language support (eng+fra+spa+deu+ara).
+# Embedded YouTube: iframe src OR data-attrs videoId (HTML-escaped in SSR).
+_YOUTUBE_IFRAME_RE = re.compile(r'youtube(?:-nocookie)?\.com/embed/([A-Za-z0-9_-]{6,})')
+_YOUTUBE_VIDEOID_RE = re.compile(r'"videoId":"([A-Za-z0-9_-]{6,})"')
+_IMAGE_KEY_RE = re.compile(
+    r'substack-post-media\.s3\.amazonaws\.com(?:%2F|/)public(?:%2F|/)images(?:%2F|/)'
+    r'([a-z0-9-]+_\d+x\d+\.\w+)'
+)
 
-    The OCR output is appended to the raw markdown file under an ## Image section.
 
-    Args:
-        task: Task dict with source_url, slug.
-        config: Config dataclass.
+def _html_unescape(s: str) -> str:
+    return (
+        s.replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
 
-    Returns:
-        'image_extracted: <ocr_chars> chars' if successful.
+
+def _fetch_substack_html(url: str) -> str:
+    result = subprocess.run(
+        ["curl", "-s", "-L", "--max-time", "20", url],
+        capture_output=True, text=True, timeout=30,
+    )
+    return result.stdout or ""
+
+
+def _is_content_image(key: str) -> bool:
+    """True if the image is article content, not author/channel chrome.
+
+    Substack pages carry three kinds of non-content image that must be skipped:
+    small avatars (``_144x144``/``_372x372``), square headshots/logos (author
+    photo, channel logo), and extreme banners (channel header). Content images
+    (charts, screenshots, documents) are typically rectangular with an aspect
+    ratio in the ~0.8–3.0 band.
     """
-    import json as _json
+    dim = re.search(r'_(\d+)x(\d+)\.\w+$', key)
+    if not dim:
+        return True  # no dimensions → assume content
+    w, h = int(dim.group(1)), int(dim.group(2))
+    if w < AVATAR_MAX_SIDE and h < AVATAR_MAX_SIDE:
+        return False  # small avatar/icon
+    aspect = w / h
+    if 0.8 <= aspect <= 1.25:
+        return False  # square → author headshot / channel logo
+    if aspect > 3.0 or aspect < 1 / 3.0:
+        return False  # extreme banner
+    return True
 
+
+def _extract_body_images(html: str) -> list[str]:
+    """All article body images, chrome filtered, order-preserved, both encodings.
+
+    Substack emits images in two forms — the plain `data-attrs` ``src`` URL
+    (``https://substack-post-media.s3.amazonaws.com/public/images/<uuid>_WxH.ext``)
+    and the URL-encoded CDN form (``substackcdn.com/image/fetch/…https%3A%2F%2F
+    substack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F<uuid>_WxH.ext``).
+    Both carry the same ``<uuid>_WxH.ext`` key; we match that key regardless of
+    plain vs ``%2F`` slashes and reconstruct the canonical high-res URL, then
+    drop author/channel chrome (avatars, square headshots/logos, banners) via
+    :func:`_is_content_image`.
+    """
+    decoded = _html_unescape(html)
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _IMAGE_KEY_RE.finditer(decoded):
+        key = m.group(1)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _is_content_image(key):
+            continue
+        out.append(f"https://substack-post-media.s3.amazonaws.com/public/images/{key}")
+    return out
+
+
+def _extract_youtube_ids(html: str) -> list[str]:
+    """Embedded YouTube video IDs, deduped, from iframe src + data-attrs videoId."""
+    decoded = _html_unescape(html)
+    ids: list[str] = []
+    for m in _YOUTUBE_IFRAME_RE.finditer(decoded):
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+    for m in _YOUTUBE_VIDEOID_RE.finditer(decoded):
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+    return ids
+
+
+def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
+    """Download an image and run Tesseract OCR; return the text (or '' on failure)."""
+    img_path = Path(config.temp_dir) / f"{slug}_img{idx}"
+    dl = subprocess.run(
+        ["curl", "-s", "-L", "--max-time", "30", "-o", str(img_path), img_url],
+        capture_output=True, text=True, timeout=35,
+    )
+    if dl.returncode != 0 or not img_path.exists() or img_path.stat().st_size < 100:
+        return ""
+    ocr = subprocess.run(
+        ["tesseract", str(img_path), "stdout", "-l", "eng+fra+spa+deu+ara"],
+        capture_output=True, text=True, timeout=60,
+    )
+    return ocr.stdout.strip()
+
+
+def _enqueue_embedded_videos(video_ids: list[str], config: Config, tags) -> int:
+    """Enqueue embedded YouTube URLs into the durable ingest inbox for the nightly batch.
+
+    Deliberately does NOT download here — videos are batch-processed at night
+    (scripts/batch_ingest.py). Lazy-imports to avoid a circular import with
+    agent.pipelines (agent.core.submit imports this module).
+    """
+    if not video_ids:
+        return 0
+    from agent.core.submit import submit_ingest
+    from agent.db import AGENT_SCHEMA, init_db
+
+    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    try:
+        for vid in video_ids:
+            submit_ingest(
+                f"https://www.youtube.com/watch?v={vid}", config, conn, tags=tags,
+            )
+    finally:
+        conn.close()
+    return len(video_ids)
+
+
+def step_substack_embedded_media(task: dict, config: Config) -> str:
+    """OCR every body image inline; enqueue embedded YouTube videos for nightly batch.
+
+    Images are read synchronously (cheap, one article at a time) so their OCR
+    text reaches the synthesizer. Embedded videos are NOT downloaded here — each
+    YouTube ID is enqueued into ingest_queue and handled by the nightly batch,
+    same as any other YouTube submission.
+
+    Appends each image's OCR to the raw markdown as a `## Image N` section so
+    `step_synthesize_web` sees it. Degrades gracefully: a failed image download
+    or empty OCR is skipped, and a page with no images/videos is a no-op.
+
+    Returns a summary string like 'images_ocr=7 videos_enqueued=1'.
+    """
     slug = task.get("slug", task["id"][:8])
     url = task["source_url"]
 
-    # Fetch the page HTML
-    result = subprocess.run(
-        ["curl", "-s", "--max-time", "15", url],
-        capture_output=True, text=True, timeout=20,
-    )
-    html = result.stdout
+    html = _fetch_substack_html(url)
+    if not html:
+        return "no html fetched"
 
-    image_url = None
-
-    # Try preloads JSON first
-    preloads_match = re.search(
-        r'window\.__preloads\s*=\s*(\{.+?\});\s*</script>',
-        html, re.DOTALL,
-    )
-    if preloads_match:
-        try:
-            preloads = _json.loads(preloads_match.group(1))
-            attachments = preloads.get("attachments", [])
-            for att in attachments:
-                if att.get("type") == "image":
-                    image_url = att.get("url") or att.get("src")
-                    if image_url:
-                        break
-        except (_json.JSONDecodeError, KeyError, TypeError):
-            pass
-
-    # Fallback: og:image meta tag
-    if not image_url:
-        og_match = re.search(
-            r'<meta\s+property="og:image"\s+content="([^"]+)"',
-            html, re.IGNORECASE,
-        )
-        if og_match:
-            image_url = og_match.group(1)
-
-    if not image_url:
-        return "no image found"
-
-    # Download the image
-    img_path = Path(config.temp_dir) / f"{slug}_image"
-    dl_result = subprocess.run(
-        ["curl", "-s", "-L", "--max-time", "30", "-o", str(img_path), image_url],
-        capture_output=True, text=True, timeout=35,
-    )
-
-    if dl_result.returncode != 0 or not img_path.exists() or img_path.stat().st_size < 100:
-        return f"image download failed: {dl_result.stderr[:100] if dl_result.stderr else 'empty file'}"
-
-    # Run Tesseract OCR
-    ocr_result = subprocess.run(
-        ["tesseract", str(img_path), "stdout",
-         "-l", "eng+fra+spa+deu+ara"],
-        capture_output=True, text=True, timeout=60,
-    )
-
-    ocr_text = ocr_result.stdout.strip()
-    if not ocr_text:
-        return "image extracted but OCR produced no text"
-
-    # Append OCR output to raw markdown
     raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
-    if raw_path.exists():
-        existing = raw_path.read_text(encoding="utf-8")
-        new_content = existing + f"\n\n## Image\n\nOCR from lead image:\n\n{ocr_text}\n"
-        raw_path.write_text(new_content, encoding="utf-8")
+    ocr_count = 0
+    for i, img_url in enumerate(_extract_body_images(html)):
+        ocr_text = _download_and_ocr(img_url, slug, i, config)
+        if not ocr_text:
+            continue
+        ocr_count += 1
+        if raw_path.exists():
+            raw_path.write_text(
+                raw_path.read_text(encoding="utf-8")
+                + f"\n\n## Image {i + 1}\n\n{ocr_text}\n",
+                encoding="utf-8",
+            )
 
-    return f"image_extracted: {len(ocr_text)} chars OCR"
+    video_ids = _extract_youtube_ids(html)
+    enqueued = _enqueue_embedded_videos(video_ids, config, task.get("tags"))
+
+    return f"images_ocr={ocr_count} videos_enqueued={enqueued}"
 
 
 # ── Firecrawl Extraction ─────────────────────────────────────────────────────
@@ -735,6 +817,7 @@ register_pipeline("substack", [
 register_pipeline("substack_text", [
     Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
     Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
+    Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
@@ -749,7 +832,7 @@ register_pipeline("substack_video", [
 register_pipeline("substack_image", [
     Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
     Step(name="substack_cleanup", fn=step_substack_cleanup, on_error="retry"),
-    Step(name="substack_image_extract", fn=step_substack_image_extract, on_error="retry"),
+    Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
