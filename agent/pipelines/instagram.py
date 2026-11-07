@@ -1059,7 +1059,7 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
     os.chmod(conf_path, 0o600)
 
     result = subprocess.run(
-        ["curl", "-s", "--config", str(conf_path)],
+        ["curl", "-s", "--max-redirs", "0", "--config", str(conf_path)],
         capture_output=True,
         text=True,
         timeout=30,

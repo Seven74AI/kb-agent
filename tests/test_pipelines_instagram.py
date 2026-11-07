@@ -690,6 +690,8 @@ class TestIgCommentFetchSecurity:
 
         cmd = mock_run.call_args[0][0]
         argv_str = " ".join(cmd)
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
         assert secret_session not in argv_str
         assert "csrf_test_token" not in argv_str
         assert "csrftoken" not in argv_str

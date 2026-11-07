@@ -65,6 +65,16 @@ class KbApiTokenMiddleware(Middleware):
 _MAX_CLIENT_ERROR_LEN = 300
 
 
+def agent_relative_path(path: Path, agent_dir: Path) -> str:
+    """Return a client-visible path under ``agent_dir`` (never an absolute host path)."""
+    resolved = path.resolve()
+    root = agent_dir.resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return path.name
+
+
 def _sanitize_exception_message(message: str) -> str:
     """Scrub paths and credential-shaped text before returning tool errors."""
     scrubbed = sanitize_visible_message(message)
@@ -282,7 +292,7 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         return {
             "status": "started",
             "queued": len(queued),
-            "log": str(log_path),
+            "log": agent_relative_path(log_path, cfg.kb_agent_dir),
             "message": "Batch running in background; results appended to the log.",
         }
 

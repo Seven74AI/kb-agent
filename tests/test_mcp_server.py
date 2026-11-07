@@ -11,7 +11,7 @@ import pytest
 
 from agent.config import Config
 from agent.core import get_note
-from agent.db import AGENT_SCHEMA, create_task, init_db
+from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest
 from agent.llm import LLMResponse
 from agent.mcp.server import _safe_tool, build_mcp_server
 from agent.pipelines.web import step_synthesize_web
@@ -415,6 +415,50 @@ async def test_mcp_ingest_playlist_expands_to_submit(mcp_server, mcp_config, mon
             assert body["status"] == "ok"
             assert body["count"] == 2
     assert len(calls) == 2
+
+
+def test_agent_relative_path_never_returns_absolute_host_path(tmp_path):
+    from agent.mcp.server import agent_relative_path
+
+    agent_dir = tmp_path / "kb-home"
+    agent_dir.mkdir()
+    log_path = agent_dir / "data" / "batch_manual.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    visible = agent_relative_path(log_path, agent_dir)
+    assert not visible.startswith("/")
+    assert visible == "data/batch_manual.log"
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_batch_returns_relative_log_path(mcp_server, mcp_config, monkeypatch):
+    db_path = mcp_config.kb_agent_dir / "data" / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    queue_ingest(conn, "https://example.com/v.mp4", "youtube", "vid_batch_log")
+    conn.close()
+
+    monkeypatch.setattr("agent.mcp.server.is_locked", lambda _cfg: False)
+    popen_calls: list = []
+    monkeypatch.setattr(
+        "agent.mcp.server.subprocess.Popen",
+        lambda *a, **kw: popen_calls.append((a, kw)) or MagicMock(),
+    )
+
+    async with asgi_server(
+        mcp_server,
+        transport="streamable-http",
+        path="/mcp",
+        stateless_http=True,
+    ) as running:
+        async with running.client(headers=_mcp_client_headers()) as client:
+            result = await client.call_tool("run_batch", {})
+            body = result.data
+
+    assert body["status"] == "started"
+    log_field = body["log"]
+    assert not Path(log_field).is_absolute()
+    assert log_field == "data/batch_manual.log"
+    assert str(mcp_config.kb_agent_dir) not in log_field
 
 
 @pytest.mark.asyncio
