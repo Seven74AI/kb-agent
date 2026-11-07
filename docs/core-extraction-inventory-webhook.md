@@ -12,9 +12,9 @@ Inventory of **submit**, **detect**, **status**, **resume**, **search**, and **n
 
 | Feature | File | Symbol | Purity | Dependencies | Call Sites (webhook layer) |
 |--------|------|--------|--------|--------------|----------------------------|
-| submit | `agent/webhook.py` | `submit` | Impure | Flask `request.form`, `jsonify`; `config` (vault path); SQLite via `_get_agent_conn`; `agent.detection.*`; `agent.db.create_task`; `PIPELINE_STEPS`; `slugify` | `@app.route("/submit")` — route entry |
-| submit | `agent/webhook.py` | `slugify` | Pure | stdlib `re` only | `submit()` (lines 175–176, 200) |
-| submit | `agent/webhook.py` | `PIPELINE_STEPS` | Pure (data) | None (static dict) | `submit()` — step list lookup after subtype detection |
+| submit | `agent/webhook.py` | `submit` | Impure | Flask `request.form`, `jsonify`; `config` (vault path); SQLite via `_get_agent_conn`; `core.submit.plan_submission`; `agent.db.create_task` via `submit_plan` | `@app.route("/submit")` — route entry |
+| submit | `agent/core/submit.py` | `plan_submission` | Mixed | `agent.detection.*`; `agent.pipelines.get_pipeline_names`; `slugify` in core | `submit()` — detect + step list after subtype detection |
+| submit | `agent/core/submit.py` | `submit_plan` | Impure | SQLite `create_task` | `submit()` — persists planned steps |
 | submit | `agent/webhook.py` | `_get_agent_conn` | Impure | `config.kb_agent_dir`; SQLite; `AGENT_SCHEMA` | `submit()` (paused + pending paths), `resume()`, `dashboard()` |
 | submit | `agent/webhook.py` | `_agent_db_path` | Impure | `config.kb_agent_dir` | `_get_agent_conn()` |
 | submit | `agent/db.py` | `create_task` | Impure | SQLite connection; UUID | `submit()` — creates task + `task_steps` rows |
@@ -39,7 +39,7 @@ Inventory of **submit**, **detect**, **status**, **resume**, **search**, and **n
 | resume | `agent/webhook.py` | `resume` | Impure | Flask `request.args`, `jsonify`; SQLite via `_get_agent_conn` | `@app.route("/resume")`; also targeted by dashboard HTML forms |
 | resume | `agent/db.py` | `resume_tasks_by_reason` | Impure | SQLite (`UPDATE tasks … LIKE ?`) | `resume()` |
 | search | — | *(no webhook implementation)* | — | Planned core: vault / `tasks_fts` / `logs_fts` (FTS5 defined in `agent/db.py` schemas, unused by webhook) | No routes, helpers, or DB queries for vault search in `agent/webhook.py` |
-| note | — | *(no webhook implementation)* | — | Note read/write lives in async consumer + `agent/pipelines/*` (e.g. `synthesize_note` steps); webhook only names steps in `PIPELINE_STEPS` | No `get_note` / vault markdown read in webhook; dashboard shows `last_log` text, not note body |
+| note | — | *(no webhook implementation)* | — | Note read/write lives in async consumer + `agent/pipelines/*` (e.g. `synthesize_note` steps); webhook enqueues step names from `get_pipeline_names` | No `get_note` / vault markdown read in webhook; dashboard shows `last_log` text, not note body |
 
 ---
 

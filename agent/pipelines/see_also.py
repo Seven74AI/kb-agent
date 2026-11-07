@@ -13,20 +13,12 @@ from pathlib import Path
 from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.config import Config
 from agent.llm import get_llm_client
+from agent.pipelines.video_common import _slug_path
 
 
 def _get_folder(content_type: str) -> str:
     """Map content_type to its vault Knowledge base subfolder."""
     return CONTENT_TYPE_FOLDERS.get(content_type, "articles")
-
-
-def _slug_path(slug: str) -> str:
-    """Convert slug to a filesystem-safe path segment.
-
-    Used by threads.py and instagram.py to sanitize slugs that may contain
-    special characters from URLs.
-    """
-    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)
 
 
 # ── Main step ─────────────────────────────────────────────────────────────────

@@ -16,7 +16,6 @@ Pitfalls handled:
 import json
 import shutil
 import subprocess
-import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -25,7 +24,7 @@ from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.llm import LLMClient, get_llm_client
+from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
@@ -34,7 +33,6 @@ from agent.pipelines.video_common import (
     format_transcript_for_llm,
     merge_speaker_labels,
     run_threads_video_quality_gate,
-    run_video_quality_gate,
     step_diarize,
     step_extract_audio,
     step_fetch_transcript,
@@ -325,7 +323,6 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
 
     # Build compact transcript
     transcript_text = _format_transcript_for_llm(merged)
-    source_domain = urlparse(source_url).netloc or "instagram.com"
     date_str = datetime.now().strftime("%Y-%m-%d")
     if music_only:
         # Music-only reel: use caption as primary content
@@ -647,7 +644,6 @@ def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
     llm = get_llm_client(config)
     llm.set_task_context(task["id"], logs_conn)
 
-    source_domain = urlparse(source_url).netloc or "instagram.com"
     date_str = datetime.now().strftime("%Y-%m-%d")
 
     system_prompt = f"""You are a knowledge base curator specialized in Instagram carousel posts.

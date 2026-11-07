@@ -12,7 +12,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from agent.config import Config
-from agent.core.submit import submit_url
 
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
 FetchHtml = Callable[[str], str]

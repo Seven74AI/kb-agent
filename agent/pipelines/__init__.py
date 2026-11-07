@@ -4,7 +4,7 @@ Each pipeline is a list of Step objects defined in submodules.
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 
 @dataclass
@@ -58,11 +58,6 @@ def get_pipeline(content_type: str) -> list[Step] | None:
     if not _all_imported:
         import_all_pipelines()
     return PIPELINES.get(content_type)
-
-
-def list_pipelines() -> list[str]:
-    """List all registered content types."""
-    return list(PIPELINES.keys())
 
 
 def get_pipeline_names(content_type: str, platform: str = "") -> list[str]:

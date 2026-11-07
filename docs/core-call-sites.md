@@ -7,7 +7,7 @@ Every location that implements (or partially implements) submit/detect/status/re
 | Location | What it does | Target core API |
 |----------|--------------|-----------------|
 | `agent/webhook.py` — `submit()` | Full enqueue flow | `core.submit.submit_url` + `SubmitDependencies` wired to `agent.detection` / `agent.db` |
-| `agent/webhook.py` — `PIPELINE_STEPS` | Step list dict | `core.pipelines.PIPELINE_STEPS` (duplicate) |
+| `agent/webhook.py` — via `plan_submission` | Step names from pipeline registry | `agent.pipelines.get_pipeline_names` (single registry) |
 | `agent/webhook.py` — `slugify()` | URL → slug | `core.util.slugify` (duplicate) |
 | `run.py` | Does not submit URLs | — |
 | `scripts/tdah_daily_check.py` | Hermes kanban tickets, not kb-agent queue | Out of scope (separate automation) |
@@ -15,7 +15,7 @@ Every location that implements (or partially implements) submit/detect/status/re
 **Pure helpers to relocate from webhook:**
 
 - `slugify` → `core.util.slugify` ✓ (skeleton)
-- `PIPELINE_STEPS` / step resolution → `core.pipelines` ✓ (skeleton)
+- Step resolution → `agent.pipelines.get_pipeline_names` via `core.submit.plan_submission` ✓
 
 **Injected deps (stay in `agent` until moved):**
 
@@ -88,5 +88,5 @@ Every location that implements (or partially implements) submit/detect/status/re
 2. Wire `dashboard` → `core.status.list_tasks`.
 3. Wire `resume` → `core.resume.resume_task`.
 4. Point `agent.detection.detect_platform` at `core.detect.detect_platform` (delete duplicate regex).
-5. Remove duplicate `PIPELINE_STEPS` / `slugify` from webhook.
+5. Keep `slugify` in core only (webhook uses `plan_submission` for step names).
 6. Add MCP adapter calling the same core functions.
