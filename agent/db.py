@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS ingest_queue (
     media_kind TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     dispatched_at TEXT,
     updated_at TEXT
@@ -280,14 +281,36 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
 
 
 def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
-    """Count media items still in-flight (not dispatched/failed) for a parent."""
+    """Count media items not yet successfully processed (dispatched) for a parent.
+
+    ``queued``, in-flight, AND ``failed`` items all count — a parent synthesizes
+    ONLY once every sibling media item is ``dispatched``. A failed item therefore
+    blocks synthesis until it is retried to success or removed.
+    """
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ? "
-        "AND status NOT IN ('dispatched', 'failed')",
+        "AND status != 'dispatched'",
         (parent_slug,),
     ).fetchone()
     return row["n"]
+
+
+def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = 3) -> int:
+    """Requeue failed media items for retry, up to ``max_attempts`` each.
+
+    Returns the number requeued. After ``max_attempts`` retries an item stays
+    ``failed`` and keeps blocking its parent's synthesis — the operator must
+    remove it or fix the underlying failure.
+    """
+    with conn:
+        cur = conn.execute(
+            "UPDATE ingest_queue SET status='queued', error=NULL, "
+            "attempts = attempts + 1, updated_at = datetime('now') "
+            "WHERE status='failed' AND attempts < ?",
+            (max_attempts,),
+        )
+        return cur.rowcount
 
 
 def list_ingest_by_status(conn: sqlite3.Connection, status: str) -> list[dict]:
