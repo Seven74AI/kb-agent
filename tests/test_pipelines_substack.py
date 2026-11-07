@@ -378,9 +378,11 @@ class TestSubstackVideoMetadata:
             '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
             '<iframe src="https://www.youtube-nocookie.com/embed/xyzXYZ12345"></iframe>'
         )
-        with pytest.raises(Exception) as exc:
+        with pytest.raises(StepError) as exc:
             step_substack_embedded_media(task_dict, config)
-        assert "awaiting media" in str(exc.value)
+        assert exc.value.error_type == ErrorType.PAUSE
+        msg = str(exc.value).lower()
+        assert "awaiting media" in msg or "media gate" in msg
         manifest = json.loads(
             (config.temp_dir / f"{task_dict['slug']}_media.json").read_text(encoding="utf-8")
         )
@@ -820,6 +822,37 @@ class TestSubstackVideoMetadata:
         conn.close()
         updated = json.loads(manifest.read_text(encoding="utf-8"))
         assert updated["total"] == row[0] == 2
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_media_ready_when_deferral_row_exists_without_on_disk_manifest(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+        assert not (config.temp_dir / f"{slug}_media.json").is_file()
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ensure_parent_media_deferral(conn, slug, post, "substack_text", 1)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#{vid}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.commit()
+        conn.close()
+
+        mock_fetch.return_value = (
+            f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+        )
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "media ready — deferred to batch"
+        assert (config.temp_dir / f"{slug}_media.json").is_file()
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_media_ready_with_prior_manifest_never_inline_even_without_synthesize_task(

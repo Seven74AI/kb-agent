@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
+from agent.notify import sanitize_visible_message
 
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
 FetchHtml = Callable[[str], str]
@@ -244,7 +245,10 @@ def poll_watch_source(
         try:
             result = submit(url, config, conn)
         except Exception as exc:  # isolate per-item failures so one bad item doesn't abort the poll
-            result = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+            result = {
+                "status": "error",
+                "error": sanitize_visible_message(f"{type(exc).__name__}: {exc}"),
+            }
         submissions.append(result)
         # Only mark an item as seen when it was actually enqueued, paused, or
         # already in the vault. Failed submissions stay unseen so the next poll
@@ -308,7 +312,10 @@ def poll_all_due_sources(
             )
         except Exception as exc:  # isolate per-source failures
             results.append(
-                {"page_url": source["page_url"], "error": f"{type(exc).__name__}: {exc}"}
+                {
+                    "page_url": source["page_url"],
+                    "error": sanitize_visible_message(f"{type(exc).__name__}: {exc}"),
+                }
             )
             continue
         if not outcome.get("skipped"):
