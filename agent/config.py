@@ -76,12 +76,12 @@ class Config:
     firecrawl_url: str = "http://localhost:3002/v2/scrape"
 
     # ── Webhook ──
-    webhook_host: str = "0.0.0.0"
+    webhook_host: str = "127.0.0.1"
     webhook_port: int = 5000
 
     # ── MCP (stateless streamable HTTP) ──
-    mcp_host: str = "0.0.0.0"
-    mcp_port: int = 8000
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8002
     mcp_path: str = "/mcp"
 
     # ── Transcription ──
@@ -215,10 +215,10 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         # Firecrawl
         firecrawl_url=str(_env_or_default(raw.get("firecrawl_url"), "FIRECRAWL_URL", "http://localhost:3002/v2/scrape")),
         # Webhook
-        webhook_host=str(raw.get("webhook_host", "0.0.0.0")),
+        webhook_host=str(raw.get("webhook_host", "127.0.0.1")),
         webhook_port=int(_env_or_default(raw.get("webhook_port"), "KB_WEBHOOK_PORT", 5000)),
-        mcp_host=str(raw.get("mcp_host", "0.0.0.0")),
-        mcp_port=int(_env_or_default(raw.get("mcp_port"), "KB_MCP_PORT", 8000)),
+        mcp_host=str(raw.get("mcp_host", "127.0.0.1")),
+        mcp_port=int(_env_or_default(raw.get("mcp_port"), "KB_MCP_PORT", 8002)),
         mcp_path=str(raw.get("mcp_path", "/mcp")),
         # Transcription
         transcription_backend=str(

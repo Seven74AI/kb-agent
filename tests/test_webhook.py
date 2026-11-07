@@ -560,6 +560,19 @@ def test_post_submit_ok_with_bearer_token(client, monkeypatch, tmp_path):
     assert resp.status_code == 201
 
 
+def test_post_submit_ok_with_x_api_key_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("KB_API_TOKEN", "test-api-token")
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    monkeypatch.setattr("agent.webhook.config.vault_path", tmp_path / "vault")
+    (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        c.environ_base["HTTP_X_API_KEY"] = "test-api-token"
+        resp = c.post("/submit", data={"url": "https://example.com/x-api-key"})
+    assert resp.status_code == 201
+
+
 def test_dashboard_requires_auth(client, monkeypatch, tmp_path):
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
     monkeypatch.delenv("KB_API_TOKEN", raising=False)
