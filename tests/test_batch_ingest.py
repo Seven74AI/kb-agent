@@ -235,3 +235,203 @@ class TestAppendFailureMarksIngest:
                 batch_ingest.update_ingest_status(conn, q_item["id"], "dispatched")
 
         assert ("ingest-1", "failed", "parent raw markdown missing") in statuses
+
+
+class TestResolveMediaKind:
+    def test_infers_image_from_content_type_when_media_kind_null(self):
+        import scripts.batch_ingest as batch_ingest
+
+        q = {
+            "content_type": "substack_image",
+            "media_kind": None,
+            "parent_slug": "p",
+            "slug": "img",
+        }
+        kind, err = batch_ingest._resolve_media_kind(q)
+        assert kind == "image"
+        assert err is None
+
+    def test_typo_media_kind_inferred_from_content_type(self):
+        import scripts.batch_ingest as batch_ingest
+
+        kind, err = batch_ingest._resolve_media_kind({
+            "content_type": "youtube",
+            "media_kind": "Video",
+            "slug": "v",
+        })
+        assert kind == "video"
+        assert err is None
+
+    def test_unresolvable_media_kind_returns_error(self):
+        import scripts.batch_ingest as batch_ingest
+
+        kind, err = batch_ingest._resolve_media_kind({
+            "content_type": "web",
+            "media_kind": "audio",
+            "slug": "x",
+        })
+        assert kind is None
+        assert "unsupported media_kind" in err
+
+
+class TestMediaKindRoutingInMain:
+    def test_orphan_embedded_row_marked_failed_not_stuck_downloading(
+        self, config, conn, monkeypatch, tmp_path,
+    ):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.kb_agent_dir.mkdir(parents=True, exist_ok=True)
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+
+        ingest_id = queue_ingest(
+            conn,
+            "https://example.com/file.bin",
+            "web",
+            "orphan_media",
+            parent_slug="parent_x",
+            media_kind="audio",
+        )[0]
+        conn.execute(
+            "UPDATE ingest_queue SET status='downloading' WHERE id=?",
+            (ingest_id,),
+        )
+        conn.commit()
+        claimed = [dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())]
+
+        monkeypatch.setattr(batch_ingest, "load_config", lambda: config)
+        monkeypatch.setattr(batch_ingest, "acquire", lambda _c: True)
+        monkeypatch.setattr(batch_ingest, "release", lambda _c: None)
+        monkeypatch.setattr(
+            batch_ingest,
+            "init_db",
+            lambda *a, **k: conn,
+        )
+        monkeypatch.setattr(batch_ingest, "recover_stale_ingest", lambda c: None)
+        monkeypatch.setattr(batch_ingest, "recover_failed_media", lambda c: 0)
+        monkeypatch.setattr(batch_ingest, "record_batch_run", lambda c: 1)
+        monkeypatch.setattr(batch_ingest, "claim_ingest_items", lambda c: claimed)
+        monkeypatch.setattr(batch_ingest, "_reconcile_deferred_parent_syntheses", lambda *a: None)
+        monkeypatch.setattr(batch_ingest, "finish_batch_run", lambda *a: None)
+        from agent.db import update_ingest_status as real_update
+
+        updates: list[tuple] = []
+
+        def track_update(connection, item_id, status, error=None):
+            updates.append((item_id, status, error))
+            real_update(connection, item_id, status, error=error)
+
+        monkeypatch.setattr(batch_ingest, "update_ingest_status", track_update)
+
+        batch_ingest.main()
+        failed = [u for u in updates if u[0] == ingest_id and u[1] == "failed"]
+        assert failed
+        assert "unsupported media_kind" in (failed[0][2] or "")
+        assert all(u[1] != "downloading" for u in updates if u[0] == ingest_id)
+
+
+class TestDownloadVideoUnsupportedContentType:
+    def test_unknown_content_type_returns_error_not_keyerror(self, config, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        q = {
+            "id": "i1",
+            "slug": "s1",
+            "url": "https://example.com/v",
+            "content_type": "not_a_video_pipeline",
+        }
+        path, err = batch_ingest._download_video(q, config)
+        assert path is None
+        assert err == "unsupported embedded content_type: not_a_video_pipeline"
+
+
+class TestCorruptJsonHandling:
+    def test_corrupt_ocr_json_marks_failed(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_ocr"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://cdn.example/chart.png",
+            "substack_image",
+            "img_bad_ocr",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+
+        def fake_run(cmd, **kw):
+            if "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 200)
+                return MagicMock(returncode=0)
+            if "batch_ocr.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                stage_dir = Path(cmd[2])
+                for staged in stage_dir.iterdir():
+                    (out_dir / f"{staged.name}.ocr.json").write_text("{not-json", encoding="utf-8")
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q], config, conn, 9)
+        row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert "invalid OCR JSON" in row["error"]
+
+    def test_corrupt_transcript_json_marks_failed(self, config, conn, monkeypatch):
+        import subprocess
+
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_tx"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://www.youtube.com/watch?v=badjson",
+            "youtube",
+            "vid_bad_json",
+            parent_slug=parent,
+            media_kind="video",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        fake_video = config.temp_dir / "vid_bad_json.mp4"
+        fake_video.write_bytes(b"x" * 200)
+        monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+        def fake_run(cmd, **kwargs):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "vid_bad_json.json").write_text("<<bad>>", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.run(cmd, **kwargs)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_videos([q], config, conn, 10)
+        row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert "invalid transcript JSON" in row["error"]
+
+    def test_corrupt_manifest_skips_dispatch_without_crash(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        parent = "parent_manifest"
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        (config.temp_dir / f"{parent}_media.json").write_text("{broken", encoding="utf-8")
+        dispatch = MagicMock()
+        monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+        batch_ingest._deferred_synthesize_dispatched.clear()
+        assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+        dispatch.assert_not_called()
