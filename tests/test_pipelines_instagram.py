@@ -702,3 +702,58 @@ class TestIgCommentFetchSecurity:
         assert conf_path.is_file()
         assert secret_session in conf_path.read_text(encoding="utf-8")
         assert oct(conf_path.stat().st_mode)[-3:] == "600"
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_rejects_path_traversal_comment_id(
+        self, mock_run, config, tmp_path,
+    ):
+        """comment_id must not embed path separators (curl sidecar stays under cookie_dir)."""
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", "sess",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        escape_target = tmp_path / "tmp" / "x.conf"
+        escape_target.parent.mkdir(parents=True, exist_ok=True)
+
+        url = "https://www.instagram.com/reel/ShortCode1/?comment_id=../../../tmp/x"
+        with pytest.raises(StepError, match="Invalid comment_id"):
+            _fetch_ig_comment(url, config)
+
+        mock_run.assert_not_called()
+        assert not escape_target.exists()
+        assert list(cookie_dir.glob(".curl-ig-comment-*.conf")) == []
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_curl_conf_stays_under_cookie_dir(
+        self, mock_run, config,
+    ):
+        """A normal numeric comment_id writes the sidecar only inside cookie_dir."""
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", "sess",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "comments": [{"pk": 42, "text": "hi", "user": {"username": "u"}}],
+                "caption": {"text": "cap", "user": {"username": "p"}},
+            }),
+        )
+        _fetch_ig_comment(
+            "https://www.instagram.com/reel/ShortCode1/?comment_id=42",
+            config,
+        )
+        conf_path = cookie_dir / ".curl-ig-comment-42.conf"
+        assert conf_path.is_file()
+        assert conf_path.resolve().is_relative_to(cookie_dir.resolve())

@@ -17,6 +17,7 @@ DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
     "awaiting media",
     "deferred to batch synthesis",
     "batch synthesis dispatched or completed",
+    "deferred synthesis paused",
     "media_deferred:",
 )
 

@@ -117,7 +117,7 @@ def _curl_page(url: str, timeout: int = 40) -> str:
         ) from exc
     result = subprocess.run(
         [
-            "curl", "-s", "--max-time", str(timeout),
+            "curl", "-s", "-L", "--max-redirs", "0", "--max-time", str(timeout),
             "-A", BROWSER_UA,
             url,
         ],

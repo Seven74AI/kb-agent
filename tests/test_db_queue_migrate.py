@@ -311,6 +311,71 @@ def test_get_next_step_does_not_skip_paused_synthesize_deferral(tmp_path, pause_
     assert nxt["status"] == "paused"
 
 
+@pytest.mark.parametrize(
+    "pause_reason",
+    [
+        "deferred synthesis paused — sibling media still pending",
+        "deferred synthesis paused — parent media not complete at execute time",
+    ],
+)
+def test_is_deferred_media_pause_execute_gate_synthesis(pause_reason):
+    assert is_deferred_media_pause(pause_reason)
+
+
+@pytest.mark.parametrize(
+    "content_type,pause_reason",
+    [
+        (
+            "substack_text_synthesize",
+            "deferred synthesis paused — sibling media still pending",
+        ),
+        (
+            "substack_text_synthesize",
+            "deferred synthesis paused — parent media not complete at execute time",
+        ),
+        (
+            "substack_image_synthesize",
+            "deferred synthesis paused — sibling media still pending",
+        ),
+        (
+            "substack_image_synthesize",
+            "deferred synthesis paused — parent media not complete at execute time",
+        ),
+    ],
+)
+def test_get_next_step_does_not_skip_paused_synthesize_execute_gate(
+    tmp_path, content_type, pause_reason,
+):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        content_type,
+        "parent_slug",
+        ["synthesize_note", "quality_gate", "minio_upload"],
+        status="pending",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    synth_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (pause_reason, synth_id),
+    )
+    conn.commit()
+
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "synthesize_note"
+    assert nxt["status"] == "paused"
+
+
 def test_resume_awaiting_media_does_not_skip_embedded_step(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)

@@ -1,6 +1,6 @@
 ## Problem Statement
 
-The knowledge base stores all media — videos, transcripts, reels, audio, books — in a local MinIO instance on the VPS, exposed to the browser through a hardcoded Tailscale URL (`http://vmi3304846.tail5c02a1.ts.net:9000`) baked into every note's `source_files` block. This couples the KB to the VPS and Tailscale, routes all video bandwidth through the VPS, and lets ~40GB of media consume the same disk that runs the pipeline and reader — which directly caused the disk-full outage during the VP9→H.264 re-encode.
+The knowledge base stores all media — videos, transcripts, reels, audio, books — in a local MinIO instance on the VPS, exposed to the browser through a hardcoded Tailscale URL (e.g. `http://<TAILSCALE_HOST>:9000`, historically set via `MINIO_TAILSCALE_BASE`) baked into every note's `source_files` block. This couples the KB to the VPS and Tailscale, routes all video bandwidth through the VPS, and lets ~40GB of media consume the same disk that runs the pipeline and reader — which directly caused the disk-full outage during the VP9→H.264 re-encode.
 
 ## Solution
 
