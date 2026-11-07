@@ -11,6 +11,7 @@ from agent.config import Config
 from agent.db import (
     AGENT_SCHEMA,
     _migrate,
+    claim_task,
     count_pending_media,
     create_task,
     get_task_steps,
@@ -19,6 +20,7 @@ from agent.db import (
     recover_failed_media,
     resume_tasks_by_reason,
     serialize_tags,
+    update_step,
 )
 
 
@@ -424,6 +426,97 @@ def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path
     assert calls == [parent]
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
     assert len(calls) == 1
+
+
+def test_claim_task_fifo_by_created_at(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    id_old = create_task(conn, "https://example.com/old", "web", "old", ["step"])
+    id_new = create_task(conn, "https://example.com/new", "web", "new", ["step"])
+    conn.execute(
+        "UPDATE tasks SET created_at = ? WHERE id = ?",
+        ("2000-01-01 00:00:00", id_old),
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = ? WHERE id = ?",
+        ("2000-01-02 00:00:00", id_new),
+    )
+    conn.commit()
+
+    claimed = claim_task(conn)
+    assert claimed is not None
+    assert claimed["id"] == id_old
+
+
+def test_update_step_running_sets_started_at_not_finished_at(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    step = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    step_id = step["id"]
+
+    update_step(conn, step_id, "running")
+    row = conn.execute(
+        "SELECT status, started_at, finished_at FROM task_steps WHERE id = ?",
+        (step_id,),
+    ).fetchone()
+    assert row["status"] == "running"
+    assert row["started_at"] is not None
+    assert row["finished_at"] is None
+
+    update_step(conn, step_id, "done", "ok")
+    row = conn.execute(
+        "SELECT status, finished_at FROM task_steps WHERE id = ?",
+        (step_id,),
+    ).fetchone()
+    assert row["status"] == "done"
+    assert row["finished_at"] is not None
+
+
+def test_update_step_failed_sets_finished_at(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ?", (task_id,)
+    ).fetchone()["id"]
+
+    update_step(conn, step_id, "running")
+    update_step(conn, step_id, "failed", "boom")
+    row = conn.execute(
+        "SELECT status, finished_at FROM task_steps WHERE id = ?",
+        (step_id,),
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["finished_at"] is not None
+
+
+def test_update_step_paused_sets_finished_at(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ?", (task_id,)
+    ).fetchone()["id"]
+
+    update_step(conn, step_id, "running")
+    update_step(conn, step_id, "paused", "waiting")
+    row = conn.execute(
+        "SELECT status, finished_at FROM task_steps WHERE id = ?",
+        (step_id,),
+    ).fetchone()
+    assert row["status"] == "paused"
+    assert row["finished_at"] is not None
 
 
 def _batch_test_config(tmp_path) -> Config:
