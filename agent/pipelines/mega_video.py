@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from agent.config import Config
+from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -34,6 +35,14 @@ def step_mega_extract_metadata(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
 
     title = slug
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="extract_metadata",
+        ) from exc
     try:
         result = subprocess.run(
             ["megadl", "--print-names", url],
@@ -110,6 +119,15 @@ def step_mega_download_video(task: dict, config: Config) -> str:
     if dl_dir.exists():
         shutil.rmtree(dl_dir)
     dl_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="download_video",
+        ) from exc
 
     result = subprocess.run(
         ["megadl", "--path", str(dl_dir), url],

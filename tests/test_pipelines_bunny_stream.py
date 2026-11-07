@@ -11,10 +11,24 @@ WORKSPACE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(WORKSPACE))
 
 from agent.detection import detect_platform
+from agent.exceptions import StepError
 from agent.pipelines.bunny_stream import (
     BUNNY_UUID_RE,
+    _curl_page,
     extract_bunny_video_uuid,
 )
+
+
+METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+
+
+class TestBunnyStreamSsrf:
+
+    @patch("agent.pipelines.bunny_stream.subprocess.run")
+    def test_curl_page_rejects_metadata_ip(self, mock_run):
+        with pytest.raises(StepError, match="not allowed"):
+            _curl_page(METADATA_URL)
+        mock_run.assert_not_called()
 
 
 class TestBunnyStreamDetection:
