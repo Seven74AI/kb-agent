@@ -90,6 +90,48 @@ class TestDeferredSynthesizeTags:
         assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
         assert captured[0].get("tags") == ["tdah", "research"]
 
+    def test_dispatch_supersedes_paused_parent_task(self, tmp_path, monkeypatch, config, conn):
+        import scripts.batch_ingest as batch_ingest
+
+        parent = "parent_slug"
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        (config.temp_dir / f"{parent}_media.json").write_text(
+            json.dumps({
+                "url": "https://blog.substack.com/p/x",
+                "content_type": "substack_text",
+                "total": 0,
+            }),
+            encoding="utf-8",
+        )
+        parent_id = create_task(
+            conn,
+            "https://blog.substack.com/p/x",
+            "substack_text",
+            parent,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+            status="paused",
+        )
+        conn.execute(
+            "UPDATE tasks SET error = ? WHERE id = ?",
+            ("awaiting media: 1 images enqueued", parent_id),
+        )
+        conn.commit()
+
+        def fake_dispatch(url, cfg, agent_conn, **kwargs):
+            return {"status": "pending", "task_id": "synth-task-1", "duplicate": False}
+
+        monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+        batch_ingest._deferred_synthesize_dispatched.clear()
+        assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+
+        row = conn.execute(
+            "SELECT status, error FROM tasks WHERE id = ?",
+            (parent_id,),
+        ).fetchone()
+        assert row["status"] == "completed"
+        assert "parent ingestion superseded" in row["error"]
+        assert "synth-task-1" in row["error"]
+
 
 class TestBatchLockInMain:
     def test_main_acquires_and_releases_lock(self, config, monkeypatch):

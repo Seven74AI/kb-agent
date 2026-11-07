@@ -55,22 +55,33 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
 
     with agent_conn:
         if row[0] == "paused" and _is_awaiting_media_pause(row[1]):
+            embed = agent_conn.execute(
+                """
+                SELECT step_order FROM task_steps
+                WHERE task_id = ? AND name = 'substack_embedded_media'
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            if embed is not None:
+                agent_conn.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+                    WHERE task_id = ? AND step_order >= ?
+                    AND status IN ('failed', 'paused', 'running')
+                    """,
+                    (task_id, embed[0]),
+                )
+        else:
             agent_conn.execute(
                 """
                 UPDATE task_steps
                 SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-                WHERE task_id = ? AND name = 'substack_embedded_media' AND status = 'paused'
+                WHERE task_id = ? AND status IN ('failed', 'paused', 'running')
                 """,
                 (task_id,),
             )
-        agent_conn.execute(
-            """
-            UPDATE task_steps
-            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-            WHERE task_id = ? AND status IN ('failed', 'paused', 'running')
-            """,
-            (task_id,),
-        )
         agent_conn.execute(
             """
             UPDATE tasks
