@@ -91,7 +91,9 @@ def test_safe_tool_returns_sanitized_error_without_traceback():
 
     assert result["status"] == "error"
     assert "traceback" not in result
-    assert result["error"] == "ValueError: Tool execution failed."
+    assert result["error"].startswith("ValueError:")
+    assert "detail" in result["error"]
+    assert "Traceback" not in result["error"]
     assert "/agent/secret" not in result["error"]
     mock_logger.exception.assert_called_once()
 
