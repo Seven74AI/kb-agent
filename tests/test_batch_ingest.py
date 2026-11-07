@@ -269,6 +269,74 @@ class TestKbOcrSizeCap:
         assert "MAX_IMAGE_BYTES = 25 * 1024 * 1024" in text
         assert "size > MAX_IMAGE_BYTES" in text
 
+    def test_read_images_skips_bad_images_per_item(self):
+        text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
+        start = text.index("def read_images")
+        body = text[start : text.index("@app.local_entrypoint", start)]
+        assert "for item in images:" in body
+        assert "except Exception" in body
+        assert "skipped:" in body
+
+
+class TestBatchOcrPartialFailure:
+    def test_nonzero_exit_still_dispatches_images_with_output(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_partial"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        id_ok = queue_ingest(
+            conn,
+            "https://example.com/ok.png",
+            "substack_image",
+            "img_ok",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        id_bad = queue_ingest(
+            conn,
+            "https://example.com/bad.png",
+            "substack_image",
+            "img_bad",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q_ok = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_ok,)).fetchone())
+        q_bad = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_bad,)).fetchone())
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "curl":
+                dest = Path(cmd[cmd.index("-o") + 1])
+                dest.write_bytes(b"\x89PNG" + b"\x00" * 200)
+                return MagicMock(returncode=0)
+            if "batch_ocr.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                stage_dir = Path(cmd[2])
+                for staged in stage_dir.iterdir():
+                    if staged.name.startswith(id_ok):
+                        (out_dir / f"{staged.name}.ocr.json").write_text(
+                            json.dumps({"reading": "chart text"}),
+                            encoding="utf-8",
+                        )
+                return MagicMock(returncode=1, stdout="", stderr="partial modal failure")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q_ok, q_bad], config, conn, 42)
+
+        ok_row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (id_ok,),
+        ).fetchone()
+        bad_row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (id_bad,),
+        ).fetchone()
+        assert ok_row["status"] == "dispatched"
+        assert bad_row["status"] == "failed"
+        assert bad_row["error"] == "no OCR output"
+
 
 class TestAppendFailureMarksIngest:
     def test_missing_raw_marks_failed_not_dispatched(self, config, conn, monkeypatch):

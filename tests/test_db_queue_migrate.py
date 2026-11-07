@@ -777,7 +777,9 @@ def test_embedded_images_batch_ocr_failure_sets_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
 
     batch_ingest._process_embedded_images([q], config, conn, 5)
-    assert conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"] == "failed"
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()
+    assert row["status"] == "failed"
+    assert row["error"] == "no OCR output"
 
 
 def test_embedded_videos_transcribe_failure_sets_failed(tmp_path, monkeypatch):
