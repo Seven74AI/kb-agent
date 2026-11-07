@@ -7,7 +7,7 @@ tunnel_name: sevend-io-stream
 
 mcp:
   hostname: mcp.sevend.io
-  origin: http://127.0.0.1:8000
+  origin: http://127.0.0.1:8002
 
 consumer_keys:
   - cursor_cloud
@@ -15,5 +15,5 @@ consumer_keys:
 
 tunnel_ingress:
   - hostname: mcp.sevend.io
-    service: http://127.0.0.1:8000
+    service: http://127.0.0.1:8002
   - service: http_status:404

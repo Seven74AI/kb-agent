@@ -22,11 +22,18 @@ from agent.db import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _kb_api_token(monkeypatch):
+    """Most webhook routes require a configured API token."""
+    monkeypatch.setenv("KB_API_TOKEN", "test-api-token")
+
+
 @pytest.fixture
 def client():
-    """Flask test client."""
+    """Flask test client (sends bearer token on every request)."""
     app.config["TESTING"] = True
     with app.test_client() as c:
+        c.environ_base["HTTP_AUTHORIZATION"] = "Bearer test-api-token"
         yield c
 
 
@@ -520,3 +527,55 @@ def test_compute_staleness_no_logs(temp_dbs):
     )
     assert staleness is None
     assert not is_stale
+
+
+# ── API token auth ───────────────────────────────────────────────────────────
+
+
+def test_post_submit_returns_401_without_token(monkeypatch):
+    monkeypatch.setenv("KB_API_TOKEN", "test-api-token")
+    bare = app.test_client()
+    resp = bare.post("/submit", data={"url": "https://example.com/x"})
+    assert resp.status_code == 401
+    data = json.loads(resp.data)
+    assert data.get("error") == "Unauthorized"
+
+
+def test_post_submit_returns_503_when_token_unset(client, monkeypatch):
+    monkeypatch.delenv("KB_API_TOKEN", raising=False)
+    bare = app.test_client()
+    bare.environ_base["HTTP_AUTHORIZATION"] = "Bearer anything"
+    resp = bare.post("/submit", data={"url": "https://example.com/x"})
+    assert resp.status_code == 503
+    data = json.loads(resp.data)
+    assert "KB_API_TOKEN not configured" in data.get("error", "")
+
+
+def test_post_submit_ok_with_bearer_token(client, monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    monkeypatch.setattr("agent.webhook.config.vault_path", tmp_path / "vault")
+    (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    resp = client.post("/submit", data={"url": "https://example.com/authed"})
+    assert resp.status_code == 201
+
+
+def test_post_submit_ok_with_x_api_key_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("KB_API_TOKEN", "test-api-token")
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    monkeypatch.setattr("agent.webhook.config.vault_path", tmp_path / "vault")
+    (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        c.environ_base["HTTP_X_API_KEY"] = "test-api-token"
+        resp = c.post("/submit", data={"url": "https://example.com/x-api-key"})
+    assert resp.status_code == 201
+
+
+def test_dashboard_requires_auth(client, monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    monkeypatch.delenv("KB_API_TOKEN", raising=False)
+    bare = app.test_client()
+    resp = bare.get("/dashboard")
+    assert resp.status_code == 503

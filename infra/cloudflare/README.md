@@ -1,13 +1,13 @@
 # Cloudflare Access for KB Agent MCP (`mcp.sevend.io`)
 
-Secures the stateless MCP tracer (`mcp_server.py` on port **8000**, path `/mcp`) behind the existing **`sevend-io-stream`** Cloudflare Tunnel and a dedicated **Access** application.
+Secures the stateless MCP tracer (`mcp_server.py` on port **8002**, path `/mcp`) behind the existing **`sevend-io-stream`** Cloudflare Tunnel and a dedicated **Access** application.
 
 ## What this stack does
 
 | Layer | Behavior |
 | --- | --- |
 | **DNS** | `mcp.sevend.io` → CNAME to `{tunnel_id}.cfargotunnel.com` (proxied) |
-| **Tunnel** | Ingress on `mcp.sevend.io` → `http://127.0.0.1:8000` with Access JWT validation at the connector |
+| **Tunnel** | Ingress on `mcp.sevend.io` → `http://127.0.0.1:8002` with Access JWT validation at the connector |
 | **Access** | Self-hosted app on `mcp.sevend.io`; **Service Auth** (`non_identity`) policies — one **service token** per consumer |
 | **Clients** | Send `CF-Access-Client-Id` and `CF-Access-Client-Secret` on every MCP HTTP request |
 

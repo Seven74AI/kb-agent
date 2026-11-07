@@ -21,6 +21,18 @@ from fastmcp.utilities.tests import asgi_server
 CORE_ROOT = Path(__file__).resolve().parents[1] / "agent" / "core"
 FORBIDDEN_IMPORT_ROOTS = {"flask", "mcp", "fastmcp"}
 
+_MCP_TEST_TOKEN = "test-mcp-api-token"
+
+
+def _mcp_client_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_MCP_TEST_TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def _kb_api_token_for_mcp(monkeypatch):
+    monkeypatch.setenv("KB_API_TOKEN", _MCP_TEST_TOKEN)
+
+
 EXPECTED_MCP_TOOLS = frozenset({
     "submit_url",
     "ingest",
@@ -106,7 +118,7 @@ async def test_mcp_exposes_eleven_tools(mcp_server):
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             tools = await client.list_tools()
             names = {t.name for t in tools}
             assert names == EXPECTED_MCP_TOOLS
@@ -124,7 +136,7 @@ async def test_mcp_detect_type_tool(mcp_server, monkeypatch):
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             result = await client.call_tool(
                 "detect_type", {"url": "https://example.com/article"}
             )
@@ -145,7 +157,7 @@ async def test_mcp_submit_url_enqueues_task(mcp_server, mcp_config, monkeypatch)
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             result = await client.call_tool(
                 "submit_url", {"url": "https://example.com/mcp-submit-test"}
             )
@@ -177,7 +189,7 @@ async def test_mcp_submit_to_note_via_web_pipeline(mcp_server, mcp_config, monke
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             result = await client.call_tool(
                 "submit_url", {"url": "https://example.com/mcp-e2e-note"}
             )
@@ -250,7 +262,7 @@ async def test_mcp_list_and_get_task(mcp_server, mcp_config, monkeypatch):
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             listed = await client.call_tool("list_tasks", {"limit": 10})
             body = listed.data
             assert body["counts"]["total"] >= 1
@@ -275,7 +287,7 @@ async def test_mcp_resume_and_retry_task(mcp_server, mcp_config):
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             resumed = await client.call_tool("resume_task", {"reason": "cookies"})
             assert resumed.data["resumed"] == 1
 
@@ -299,7 +311,7 @@ async def test_mcp_search_notes_and_get_note(mcp_server, mcp_config):
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             hits = await client.call_tool("search_notes", {"query": "quantum"})
             assert any("mcp-search" in h["slug"] for h in hits.data)
             note = await client.call_tool(
@@ -332,7 +344,7 @@ async def test_mcp_bulk_import_calls_submit_per_url(mcp_server, mcp_config, monk
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             result = await client.call_tool(
                 "bulk_import",
                 {
@@ -379,7 +391,7 @@ async def test_mcp_ingest_playlist_expands_to_submit(mcp_server, mcp_config, mon
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             result = await client.call_tool(
                 "ingest_playlist",
                 {"playlist_url": "https://youtube.com/playlist?list=PLtest"},
@@ -401,7 +413,7 @@ async def test_mcp_watch_source_registers(mcp_server, mcp_config):
         path="/mcp",
         stateless_http=True,
     ) as running:
-        async with running.client() as client:
+        async with running.client(headers=_mcp_client_headers()) as client:
             result = await client.call_tool(
                 "watch_source",
                 {

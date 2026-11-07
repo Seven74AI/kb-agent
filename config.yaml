@@ -48,16 +48,19 @@ minio_bucket: knowledge-base
 # Firecrawl (shared with Hermes)
 firecrawl_url: http://localhost:3002/v2/scrape
 
-# Webhook
-webhook_host: 0.0.0.0
+# API auth (required when binding beyond loopback). KB_API_TOKEN in .env overrides this.
+api_token: ""
+
+# Webhook — loopback by default; bind 0.0.0.0 only with api_token set and an edge/tunnel.
+webhook_host: 127.0.0.1
 webhook_port: 5000
 
 # Notifications (Telegram) — set the real values in .env (KB_TELEGRAM_BOT_TOKEN / KB_TELEGRAM_CHAT_ID)
 telegram_bot_token: ""
 telegram_chat_id: ""
 
-# MCP tracer (stateless streamable HTTP)
-mcp_host: 0.0.0.0
+# MCP tracer (stateless streamable HTTP) — loopback by default; expose via tunnel + api_token.
+mcp_host: 127.0.0.1
 mcp_port: 8002
 mcp_path: /mcp
 

@@ -1,18 +1,21 @@
 """Flask webhook — POST /submit and GET /dashboard.
 
-Tailscale-only, no auth. Flask runs sync in main thread;
-the asyncio consumer runs in a background thread.
+Bearer token (`KB_API_TOKEN` / config `api_token`) required on mutating routes
+and GET /dashboard. Flask runs sync in main thread; the asyncio consumer runs
+in a background thread.
 """
 
 import os
+import secrets
 import sqlite3
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
-from agent.config import Config, load_config
+from agent.config import REPO_ROOT, Config, load_config
 from agent.core import (
     compute_staleness,
     format_elapsed,
@@ -28,6 +31,75 @@ from agent.notify import sanitize_visible_message
 
 app = Flask(__name__)
 config: Config = load_config()
+
+API_TOKEN_ENV = "KB_API_TOKEN"
+_TOKEN_NOT_CONFIGURED_MSG = "KB_API_TOKEN not configured"
+_PROTECTED_ENDPOINTS = frozenset({
+    "submit",
+    "resume",
+    "upload_cookies",
+    "remove_ingest_item",
+    "dashboard",
+})
+
+
+def _config_yaml_path() -> Path:
+    candidate = config.kb_agent_dir / "config.yaml"
+    try:
+        if candidate.exists():
+            return candidate
+    except (OSError, PermissionError):
+        pass
+    return REPO_ROOT / "config.yaml"
+
+
+def resolve_api_token() -> str | None:
+    """Shared API token: ``KB_API_TOKEN`` env overrides config.yaml ``api_token``."""
+    env_val = os.environ.get(API_TOKEN_ENV)
+    if env_val is not None:
+        stripped = str(env_val).strip()
+        return stripped or None
+    path = _config_yaml_path()
+    try:
+        exists = path.exists()
+    except (OSError, PermissionError):
+        exists = False
+    if not exists:
+        return None
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    yaml_token = raw.get("api_token", "")
+    if yaml_token is None:
+        return None
+    stripped = str(yaml_token).strip()
+    return stripped or None
+
+
+def extract_request_token(req) -> str | None:
+    auth_header = req.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        return token or None
+    api_key = req.headers.get("X-API-Key")
+    if api_key:
+        stripped = str(api_key).strip()
+        return stripped or None
+    return None
+
+
+@app.before_request
+def _require_api_token():
+    endpoint = request.endpoint
+    if endpoint not in _PROTECTED_ENDPOINTS:
+        return None
+    configured = resolve_api_token()
+    if not configured:
+        return jsonify({"error": _TOKEN_NOT_CONFIGURED_MSG}), 503
+    provided = extract_request_token(request)
+    if not provided or not secrets.compare_digest(provided, configured):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
 
 # ── DB Helpers ────────────────────────────────────────────────────────────────
 
