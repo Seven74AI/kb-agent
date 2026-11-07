@@ -20,6 +20,7 @@ from agent.pipelines.web import (
     _extract_body_images,
     _extract_rumble_urls,
     _extract_youtube_ids,
+    _is_content_image,
     SUBSTACK_BOILERPLATE,
 )
 
@@ -228,6 +229,20 @@ class TestSubstackEmbeddedMedia:
             "https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy",
             "https://rumble.com/vabc123-short",
         ]
+
+    def test_drops_non_image_bin_asset(self):
+        # Substack sometimes serves a .bin under the images/ prefix — not an image.
+        html = (
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/b24204eb_496x220.bin&quot;}"></div>'
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/chart_1664x1184.png&quot;}"></div>'
+        )
+        assert _extract_body_images(html) == [
+            "https://substack-post-media.s3.amazonaws.com/public/images/chart_1664x1184.png"
+        ]
+
+    def test_keeps_heic_and_avif(self):
+        assert _is_content_image("de5ede07_1690x2240.heic") is True
+        assert _is_content_image("335e0379_1536x1024.avif") is True
 
 
 class TestSubstackVideoMetadata:

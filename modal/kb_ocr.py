@@ -28,6 +28,8 @@ image = (
         "transformers>=4.49,<5",
         "qwen-vl-utils",
         "accelerate",
+        "pillow-heif",
+        "pillow-avif-plugin",
     )
 )
 
@@ -106,7 +108,7 @@ def main(image_dir: str = None, out_dir: str = "."):
         print("usage: modal run kb_ocr.py --image-dir <dir> [--out-dir ./out]")
         return
     os.makedirs(out_dir, exist_ok=True)
-    exts = (".png", ".jpg", ".jpeg", ".webp")
+    exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".avif")
     items = []
     for f in sorted(os.listdir(image_dir)):
         if f.lower().endswith(exts):
