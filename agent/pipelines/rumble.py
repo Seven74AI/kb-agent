@@ -217,7 +217,10 @@ def step_rumble_download_video(task: dict, config: Config) -> str:
 
     _assert_rumble_cdn_url_allowed(pick["url"])
     result = subprocess.run(
-        ["curl", "-s", "-L", "--max-time", "600", "-o", str(output_path), pick["url"]],
+        [
+            "curl", "-s", "-L", "--max-redirs", "0",
+            "--max-time", "600", "-o", str(output_path), pick["url"],
+        ],
         capture_output=True, text=True, timeout=650,
     )
     if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:

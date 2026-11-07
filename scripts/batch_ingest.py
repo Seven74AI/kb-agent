@@ -438,7 +438,10 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
         ext = Path(q["url"].split("?")[0]).suffix.lower() or ".png"
         dest = stage_dir / f"{q['id']}{ext}"
         r = subprocess.run(
-            ["curl", "-s", "-L", "--max-time", "60", "-o", str(dest), q["url"]],
+            [
+                "curl", "-s", "-L", "--max-redirs", "0",
+                "--max-time", "60", "-o", str(dest), q["url"],
+            ],
             capture_output=True, text=True, timeout=70,
         )
         if r.returncode != 0 or not dest.exists() or dest.stat().st_size < 100:
@@ -651,10 +654,12 @@ def main() -> None:
         for q in non_video:
             r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
             status = r.get("status")
-            if status in ("pending", "paused", "skipped"):
+            if status == "pending" and r.get("task_id"):
                 update_ingest_status(conn, q["id"], "dispatched")
                 dispatched += 1
-                print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id', status)}")
+                print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id')}")
+            elif status in ("skipped", "paused"):
+                print(f"  [skip-ingest] {q['slug']} ({q['content_type']}): {status} (left queued)")
             else:
                 update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
                 failed += 1

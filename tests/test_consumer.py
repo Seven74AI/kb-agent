@@ -300,8 +300,11 @@ async def test_consumer_logger_emits_scrubbed_error_without_traceback(caplog, co
         assert "RuntimeError" in record.getMessage()
 
     detail = [r for r in caplog.records if r.name == "agent.consumer.detail"]
-    assert detail, "expected detail logger record with traceback"
-    assert any(r.exc_info is not None for r in detail)
+    assert detail, "expected detail logger record"
+    for record in detail:
+        assert record.exc_info is None
+        assert "/root/kb-agent" not in record.getMessage()
+        assert "RuntimeError" in record.getMessage()
 
     del STEP_REGISTRY["log_step"]
 

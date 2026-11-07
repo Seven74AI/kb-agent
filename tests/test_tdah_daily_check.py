@@ -48,3 +48,39 @@ def test_tdah_fetch_calls_guard_before_urlopen(monkeypatch):
     out = mod.fetch("https://example.com/page")
     assert seen == ["https://example.com/page"]
     assert "<html>" in out
+
+
+def test_tdah_bunny_cdn_url_passes_fetch_guard():
+    mod = _load_tdah_module()
+    url = f"{mod.CDN}/00000000-0000-0000-0000-000000000000/play_720p.mp4"
+    mod._assert_fetch_url_allowed(url)
+
+
+def test_tdah_bunny_download_guards_cdn_and_disables_redirects(monkeypatch):
+    from agent.fetch_guard import _assert_fetch_url_allowed as real_guard
+
+    mod = _load_tdah_module()
+    guard_calls: list[str] = []
+    sh_calls: list[list] = []
+
+    def track_guard(url: str) -> None:
+        guard_calls.append(url)
+        real_guard(url)
+
+    monkeypatch.setattr(mod, "_assert_fetch_url_allowed", track_guard)
+    monkeypatch.setattr(mod, "sh", lambda cmd, **kw: sh_calls.append(cmd))
+
+    uu = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    expected = f"{mod.CDN}/{uu}/play_720p.mp4"
+    mod._assert_fetch_url_allowed(expected)
+    mod.sh(
+        ["curl", "-s", "--max-redirs", "0", "-H", mod.REF, "-o", "/tmp/x.mp4", expected],
+    )
+
+    assert guard_calls == [expected]
+    assert sh_calls
+    curl = sh_calls[0]
+    assert "--max-redirs" in curl
+    assert curl[curl.index("--max-redirs") + 1] == "0"
+    with pytest.raises(ValueError, match="not allowed"):
+        real_guard("http://127.0.0.1/stolen.mp4")

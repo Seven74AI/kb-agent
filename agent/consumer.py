@@ -394,10 +394,11 @@ class Consumer:
                     error_type,
                     error_msg,
                 )
-                detail_logger.exception(
-                    "[consumer] Step '%s' StepError (%s) (detail)",
+                detail_logger.error(
+                    "[consumer] Step '%s' StepError (%s) (detail): %s",
                     step_name,
                     error_type,
+                    error_msg,
                 )
                 tb_summary = _format_stdout_traceback(e)
                 print(
@@ -456,9 +457,10 @@ class Consumer:
                     step_name,
                     error_msg,
                 )
-                detail_logger.exception(
-                    "[consumer] Step '%s' unhandled exception (detail)",
+                detail_logger.error(
+                    "[consumer] Step '%s' unhandled exception (detail): %s",
                     step_name,
+                    error_msg,
                 )
                 tb_summary = _format_stdout_traceback(e)
                 print(

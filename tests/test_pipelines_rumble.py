@@ -175,6 +175,12 @@ class TestRumbleDownloadUsesCachedMetadata:
         mock_resolve.assert_not_called()
         cmd = mock_run.call_args[0][0]
         assert cdn_url in cmd
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        with pytest.raises(ValueError, match="not allowed"):
+            from agent.fetch_guard import _assert_fetch_url_allowed
+
+            _assert_fetch_url_allowed("http://127.0.0.1/redirected.mp4")
         assert result == str(video_path)
 
     @patch("agent.pipelines.rumble.ensure_h264", side_effect=lambda p: p)
