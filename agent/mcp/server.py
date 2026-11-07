@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import functools
+import logging
 import subprocess
 import sys
-import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,8 @@ from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
 from agent.mcp.db import open_agent_conn, open_logs_conn
 
+logger = logging.getLogger(__name__)
+
 
 def _safe_tool(fn):
     """Wrap a tool so unexpected exceptions return a uniform error envelope."""
@@ -37,10 +39,10 @@ def _safe_tool(fn):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 — uniform error shape for the caller
+            logger.exception("MCP tool %s failed", fn.__name__)
             return {
                 "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc(),
+                "error": f"{type(exc).__name__}: Tool execution failed.",
             }
     return wrapper
 

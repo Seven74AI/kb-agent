@@ -525,6 +525,15 @@ def step_ig_carousel_extract(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
 
+    try:
+        _assert_fetch_url_allowed(url)
+    except ValueError as exc:
+        raise StepError(
+            str(exc),
+            error_type=ErrorType.FAIL,
+            step_name="ig_carousel_extract",
+        ) from exc
+
     # Build Playwright script for alt text extraction
     playwright_script = f"""import asyncio, json, sys
 from playwright.async_api import async_playwright

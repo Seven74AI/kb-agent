@@ -367,6 +367,14 @@ class TestCarouselExtract:
     """Tests for step_ig_carousel_extract."""
 
     @patch("subprocess.run")
+    def test_extract_rejects_metadata_ip(self, mock_run, config, post_task):
+        post_task["source_url"] = METADATA_URL
+        with pytest.raises(StepError, match="not allowed") as exc:
+            step_ig_carousel_extract(post_task, config)
+        assert exc.value.error_type == ErrorType.FAIL
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
     def test_extract_success(self, mock_run, config, post_task):
         slides = json.dumps([
             {"slide": 1, "alt_text": "An AI diagram showing neural networks", "src": "https://cdn.ig/img1.jpg"},

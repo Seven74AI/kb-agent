@@ -37,6 +37,26 @@ from agent.streaming import log_progress
 # Populated at startup from pipelines/*.py modules
 STEP_REGISTRY: dict[str, tuple[Any, str]] = {}
 
+_STEP_LOG_MAX_LEN = 2000
+
+
+def _sanitize_step_log_message(message: str) -> str:
+    """Strip stack frames from persisted step log text (dashboard-visible)."""
+    marker = "Traceback (most recent call last):"
+    if marker not in message:
+        return message[:_STEP_LOG_MAX_LEN]
+    head, tail = message.split(marker, 1)
+    exc_line = ""
+    for line in reversed(tail.splitlines()):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("File "):
+            exc_line = stripped
+            break
+    summary = head.rstrip()
+    if exc_line and exc_line not in summary:
+        summary = f"{summary}\n{exc_line}" if summary else exc_line
+    return summary[:_STEP_LOG_MAX_LEN]
+
 # Content types routed through _execute_video (video semaphore — pyannote RAM).
 VIDEO_TASK_CONTENT_TYPES = (
     "youtube",
@@ -308,7 +328,13 @@ class Consumer:
         if self.logs_conn is None:
             return
         try:
-            log_progress(self.logs_conn, task_id, step_name, message, stream="stderr")
+            log_progress(
+                self.logs_conn,
+                task_id,
+                step_name,
+                _sanitize_step_log_message(message),
+                stream="stderr",
+            )
         except Exception:  # noqa: BLE001 — logging must never break error handling
             pass
 
@@ -361,6 +387,10 @@ class Consumer:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
                 error_msg = str(e)
                 tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                print(
+                    f"[consumer] Step '{step_name}' traceback:\n{tb}",
+                    flush=True,
+                )
                 self._log_error(
                     task_id,
                     step_name,
@@ -405,9 +435,17 @@ class Consumer:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                # Unclassified exception — capture the full traceback for debugging.
+                # Unclassified exception — full traceback on server stdout only.
                 tb = traceback.format_exc()
-                self._log_error(task_id, step_name, f"Unhandled exception:\n{tb}")
+                print(
+                    f"[consumer] Step '{step_name}' unhandled traceback:\n{tb}",
+                    flush=True,
+                )
+                self._log_error(
+                    task_id,
+                    step_name,
+                    f"Unhandled exception:\n{tb}",
+                )
                 # Fall back to step's on_error setting
                 _, default_on_error = STEP_REGISTRY.get(step_name, (None, "retry"))
                 error_msg = f"{type(e).__name__}: {e}"
