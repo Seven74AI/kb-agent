@@ -499,6 +499,97 @@ class TestSubstackVideoMetadata:
         result = step_substack_embedded_media(task_dict, config)
         assert "media ready" in result
 
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_media_ready_when_manifest_total_matches_queue_count(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid_a = "aaaa1111-1111-1111-1111-111111111111"
+        vid_b = "bbbb2222-2222-2222-2222-222222222222"
+        manifest = config.temp_dir / f"{slug}_media.json"
+        manifest.write_text(json.dumps({"url": post, "total": 2}), encoding="utf-8")
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        id_a, _ = queue_ingest(
+            conn, f"{post}#{vid_a}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        id_b, _ = queue_ingest(
+            conn, f"{post}#{vid_b}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, id_a, "dispatched")
+        update_ingest_status(conn, id_b, "dispatched")
+        conn.close()
+
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'"videoUpload":{{"id":"{vid_a}"}}'
+            f'"videoUpload":{{"id":"{vid_b}"}}'
+            "</body></html>"
+        )
+        result = step_substack_embedded_media(task_dict, config)
+        assert "media ready" in result
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        row = conn.execute(
+            "SELECT COUNT(*) FROM ingest_queue WHERE parent_slug = ?", (slug,),
+        ).fetchone()
+        conn.close()
+        updated = json.loads(manifest.read_text(encoding="utf-8"))
+        assert updated["total"] == row[0] == 2
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_media_gate_blocks_when_siblings_removed_below_manifest_total(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import (
+            AGENT_SCHEMA,
+            init_db,
+            queue_ingest,
+            remove_ingest,
+            update_ingest_status,
+        )
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid_a = "aaaa1111-1111-1111-1111-111111111111"
+        vid_b = "bbbb2222-2222-2222-2222-222222222222"
+        manifest = config.temp_dir / f"{slug}_media.json"
+        manifest.write_text(json.dumps({"url": post, "total": 2}), encoding="utf-8")
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        id_a, _ = queue_ingest(
+            conn, f"{post}#{vid_a}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        id_b, _ = queue_ingest(
+            conn, f"{post}#{vid_b}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, id_a, "dispatched")
+        update_ingest_status(conn, id_b, "failed", error="transcription error")
+        remove_ingest(conn, id_b)
+        conn.close()
+
+        # HTML only shows the surviving sibling — re-enqueue does not restore the removed row.
+        mock_fetch.return_value = (
+            f'<html><body><script>"videoUpload":{{"id":"{vid_a}"}}</script></body></html>'
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "media gate" in str(exc.value)
+        assert "ingest rows 1 != manifest total 2" in str(exc.value)
+
     @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_download_rejects_blocked_endpoint(self, mock_run, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)

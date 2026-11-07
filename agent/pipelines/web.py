@@ -499,10 +499,20 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         slug, images, youtube_ids, rumble_urls, native_video_ids, url, config, task.get("tags"),
     )
 
+    gate_total = enqueued_total
+    if had_manifest:
+        try:
+            prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            prior_total = prior.get("total")
+            if prior_total is not None:
+                gate_total = max(int(prior_total), enqueued_total)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+
     manifest = {
         "url": url,
         "content_type": task.get("content_type", "substack_text"),
-        "total": enqueued_total,
+        "total": gate_total,
     }
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
@@ -514,13 +524,24 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
         pending = count_pending_media(conn, slug)
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (slug,),
+        ).fetchone()
+        queue_count = row["n"] if hasattr(row, "keys") else row[0]
     finally:
         conn.close()
 
     if had_manifest and pending == 0:
+        if gate_total != queue_count:
+            raise StepError(
+                f"media gate: ingest rows {queue_count} != manifest total {gate_total}",
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
         return (
             f"media ready: {len(images)} images + {n_videos} videos "
-            f"({enqueued_total} siblings dispatched)"
+            f"({queue_count} siblings dispatched)"
         )
 
     raise StepError(
