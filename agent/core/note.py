@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+from agent.core.slugify import SLUG_MAX_LEN
+
 # Mirrors agent/pipelines/see_also.CONTENT_TYPE_FOLDERS (vault layout).
 CONTENT_TYPE_FOLDERS: dict[str, str] = {
     "web": "articles",
@@ -28,7 +30,7 @@ def _vault_folder(content_type: str) -> str:
 
 
 def _slug_path(slug: str) -> str:
-    return re.sub(r'[<>:"/\\|?*=&]', "_", slug)[:80]
+    return re.sub(r'[<>:"/\\|?*=&]', "_", slug)[:SLUG_MAX_LEN]
 
 
 def _note_candidates(slug: str, vault_path: Path, content_type: str | None) -> list[Path]:
@@ -41,10 +43,8 @@ def _note_candidates(slug: str, vault_path: Path, content_type: str | None) -> l
         folder = _vault_folder(content_type)
         if folder:
             candidates.append(knowledge / folder / f"{safe}.md")
-            candidates.append(knowledge / folder / f"{slug}.md")
         else:
             candidates.append(knowledge / f"{safe}.md")
-            candidates.append(knowledge / f"{slug}.md")
 
     for folder in sorted(set(CONTENT_TYPE_FOLDERS.values())):
         if folder:
@@ -53,7 +53,6 @@ def _note_candidates(slug: str, vault_path: Path, content_type: str | None) -> l
                 candidates.append(p)
 
     candidates.append(knowledge / f"{safe}.md")
-    candidates.append(knowledge / f"{slug}.md")
     return candidates
 
 
