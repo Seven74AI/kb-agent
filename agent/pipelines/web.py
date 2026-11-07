@@ -193,9 +193,14 @@ def _html_unescape(s: str) -> str:
     )
 
 
-def _fetch_substack_html(url: str) -> str:
+def _fetch_substack_html(url: str, config: Config | None = None) -> str:
+    cmd = ["curl", "-s", "-L", "--max-time", "20", url]
+    if config is not None:
+        cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+        if cookie.exists():
+            cmd += ["-b", str(cookie)]
     result = subprocess.run(
-        ["curl", "-s", "-L", "--max-time", "20", url],
+        cmd,
         capture_output=True, text=True, timeout=30,
     )
     return result.stdout or ""
@@ -350,7 +355,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     url = task["source_url"]
 
-    html = _fetch_substack_html(url)
+    html = _fetch_substack_html(url, config)
     if not html:
         raise StepError(
             "no html fetched",

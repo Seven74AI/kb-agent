@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from agent.core.resume import retry_task
+from agent.core.submit import dispatch_synthesize
+from agent.config import Config
 from agent.db import (
     AGENT_SCHEMA,
     _migrate,
@@ -229,6 +231,148 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
     assert steps["substack_embedded_media"] == "pending"
     assert steps["synthesize_note"] == "pending"
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+
+
+def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://example.com/embed.png"
+    queue_ingest(
+        conn, url, "substack_image", "img1",
+        parent_slug="article", media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='ocr failed', attempts=1 WHERE url=?",
+        (url,),
+    )
+    conn.commit()
+
+    _, created = queue_ingest(
+        conn, url, "substack_image", "img1",
+        parent_slug="article", media_kind="image",
+    )
+    assert created is False
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE url=?", (url,)).fetchone()
+    assert row["status"] == "queued"
+    assert row["error"] is None
+
+
+def test_queue_ingest_duplicate_keeps_failed_when_attempts_exhausted(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://example.com/embed2.png"
+    queue_ingest(
+        conn, url, "substack_image", "img2",
+        parent_slug="article", media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='gave up', attempts=3 WHERE url=?",
+        (url,),
+    )
+    conn.commit()
+
+    queue_ingest(conn, url, "substack_image", "img2", parent_slug="article", media_kind="image")
+    row = conn.execute("SELECT status, error FROM ingest_queue WHERE url=?", (url,)).fetchone()
+    assert row["status"] == "failed"
+    assert row["error"] == "gave up"
+
+
+def test_dispatch_synthesize_idempotent_when_task_pending(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/x"
+    slug = "parent_slug"
+    create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="pending",
+    )
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    first = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    second = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    assert first["duplicate"] is True
+    assert second["duplicate"] is True
+    assert first["task_id"] == second["task_id"]
+    assert conn.execute("SELECT COUNT(*) FROM tasks WHERE slug=?", (slug,)).fetchone()[0] == 1
+
+
+def test_reconcile_deferred_parent_syntheses_orphan(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "orphan_parent"
+    queue_ingest(
+        conn, "https://example.com/i1", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 1}',
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    def fake_dispatch(url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t1"}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+    batch_ingest._reconcile_deferred_parent_syntheses(conn, config)
+    assert calls == [parent]
+
+
+def test_embedded_video_download_failure_sets_failed(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    queue_ingest(
+        conn, "https://www.youtube.com/watch?v=abcdEFghijk", "youtube", "yt1",
+        parent_slug="p1", media_kind="video",
+    )
+    row = conn.execute("SELECT * FROM ingest_queue").fetchone()
+    q = dict(row)
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (None, "download failed"))
+
+    batch_ingest._process_embedded_videos([q], config, conn, 1)
+    status = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()["status"]
+    assert status == "failed"
 
 
 def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path, monkeypatch):

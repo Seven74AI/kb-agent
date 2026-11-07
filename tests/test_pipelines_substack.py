@@ -21,6 +21,7 @@ from agent.pipelines.web import (
     _extract_body_images,
     _extract_rumble_urls,
     _extract_youtube_ids,
+    _fetch_substack_html,
     _is_content_image,
     SUBSTACK_BOILERPLATE,
 )
@@ -297,6 +298,17 @@ class TestSubstackVideoMetadata:
             ["https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"],
             ["xyzXYZ12345"], [], config, None,
         )
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_fetch_substack_html_passes_cookie_when_present(self, mock_run, config):
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        cookie_path = config.cookie_dir / "substack_cookies.txt"
+        cookie_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        mock_run.return_value = MagicMock(stdout="<html></html>", returncode=0)
+        _fetch_substack_html("https://author.substack.com/p/post", config)
+        cmd = mock_run.call_args[0][0]
+        assert "-b" in cmd
+        assert str(cookie_path) in cmd
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_no_media_synthesizes_inline(self, mock_fetch, config, task_dict):

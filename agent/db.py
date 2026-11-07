@@ -314,16 +314,22 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
     conn.row_factory = sqlite3.Row
     parent_key = _ingest_parent_slug(parent_slug)
     row = conn.execute(
-        "SELECT id, status FROM ingest_queue WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+        "SELECT id, status, attempts FROM ingest_queue WHERE url = ? AND COALESCE(parent_slug, '') = ?",
         (url, parent_key),
     ).fetchone()
     if row:
         serialized = serialize_tags(tags)
-        if serialized:
-            with conn:
+        with conn:
+            if serialized:
                 conn.execute(
                     "UPDATE ingest_queue SET tags = ? WHERE url = ? AND COALESCE(parent_slug, '') = ?",
                     (serialized, url, parent_key),
+                )
+            if row["status"] == "failed" and row["attempts"] < 3:
+                conn.execute(
+                    "UPDATE ingest_queue SET status='queued', error=NULL, "
+                    "updated_at=datetime('now') WHERE url = ? AND COALESCE(parent_slug, '') = ?",
+                    (url, parent_key),
                 )
         return row["id"], False
     import uuid
@@ -351,6 +357,19 @@ def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
         (_ingest_parent_slug(parent_slug),),
     ).fetchone()
     return row["n"]
+
+
+def find_active_task(
+    conn: sqlite3.Connection, slug: str, content_type: str,
+) -> str | None:
+    """Return task id if a non-terminal task already exists for slug + content_type."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE slug = ? AND content_type = ? "
+        "AND status IN ('pending', 'in_progress', 'paused')",
+        (slug, content_type),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def recover_failed_media(conn: sqlite3.Connection, max_attempts: int = 3) -> int:
