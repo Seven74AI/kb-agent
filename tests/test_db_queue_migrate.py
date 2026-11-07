@@ -558,7 +558,135 @@ def test_has_synthesize_task_signal_includes_completed(tmp_path):
     )
     assert has_completed_synthesize_task(conn, slug) is True
     assert has_synthesize_task_signal(conn, slug) is True
-    assert has_active_synthesize_task(conn, slug) is True
+    assert has_active_synthesize_task(conn, slug) is False
+
+
+def test_prior_generation_done_synthesize_not_signal_for_new_deferral(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "gen_signal_parent"
+    url = "https://blog.substack.com/p/gen-signal"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor = get_parent_media_deferral(conn, slug)["updated_at"]
+    create_task(
+        conn,
+        url,
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') "
+        "WHERE slug = ? AND content_type GLOB '*_synthesize'",
+        (anchor, slug),
+    )
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    conn.commit()
+    assert get_parent_media_deferral(conn, slug)["media_changed"] == 1
+    assert has_synthesize_task_signal(conn, slug) is False
+    assert has_completed_synthesize_task(conn, slug) is False
+
+
+def test_has_active_synthesize_false_when_only_done_row(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "done_only_parent"
+    url = "https://blog.substack.com/p/done-only"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    create_task(
+        conn,
+        url,
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    conn.commit()
+    assert has_active_synthesize_task(conn, slug) is False
+
+
+def test_has_completed_parent_synthesis_rejects_stale_synth_with_vault(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    slug = "stale_vault_synth"
+    vault = tmp_path / "vault"
+    url = "https://blog.substack.com/p/stale-synth"
+    note_dir = vault / "Knowledge base" / "articles"
+    note_dir.mkdir(parents=True)
+    (note_dir / f"{slug}.md").write_text("# old note\n", encoding="utf-8")
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/s.png", "substack_image", "s",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    media_tmp = tmp_path / "media_tmp"
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now', '-2 days') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is False
+
+
+def test_retry_task_allowed_when_only_stale_terminal_synthesize(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "retry_stale_syn"
+    url = "https://author.substack.com/p/retry-stale"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor = get_parent_media_deferral(conn, slug)["updated_at"]
+    parent_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("awaiting media: 1 images enqueued", parent_id),
+    )
+    create_task(
+        conn,
+        url,
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') "
+        "WHERE slug = ? AND content_type GLOB '*_synthesize'",
+        (anchor, slug),
+    )
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    conn.commit()
+
+    assert has_active_synthesize_task(conn, slug) is False
+    assert retry_task(conn, parent_id) is True
 
 
 def test_retry_task_skips_when_synthesize_sibling_active(tmp_path):
@@ -1049,7 +1177,7 @@ def test_maybe_dispatch_unlocks_when_expected_total_grows(tmp_path, monkeypatch)
         parent_slug=parent, media_kind="image",
     )
     conn.execute(
-        "UPDATE ingest_queue SET status='dispatched' WHERE slug='i2' AND parent_slug=?",
+        "UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?",
         (parent,),
     )
     conn.commit()
@@ -1456,6 +1584,28 @@ def test_fail_task_persists_scrubbed_error_at_rest(tmp_path):
     assert "RuntimeError" in (row["error"] or "")
 
 
+def test_fail_task_redacts_credential_shapes_at_write(tmp_path):
+    """Invariant: tasks.error must not store raw api_key/Bearer values at write time."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    fail_task(
+        conn,
+        task_id,
+        "subprocess stderr: api_key=abc123 refused; header Bearer xyz",
+    )
+    row = conn.execute(
+        "SELECT error FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    err = row["error"] or ""
+    assert "abc123" not in err
+    assert "xyz" not in err or "Bearer [redacted]" in err
+    assert "[credential redacted]" in err
+    assert "Bearer [redacted]" in err
+
+
 def test_pause_task_persists_scrubbed_reason_at_rest(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -1500,6 +1650,88 @@ def _batch_test_config(tmp_path) -> Config:
     )
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     return config
+
+
+def test_parent_media_complete_rejects_marker_only_block(tmp_path):
+    from agent.db import ensure_parent_media_deferral, media_append_marker, parent_media_complete, queue_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "marker_only_parent"
+    ensure_parent_media_deferral(conn, parent, "https://blog.substack.com/p/m", "substack_text", 1)
+    ingest_id, _ = queue_ingest(
+        conn, "https://example.com/i.png", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', media_appended=1 WHERE id=?",
+        (ingest_id,),
+    )
+    conn.commit()
+    raw = tmp_path / f"{parent}_raw.md"
+    raw.write_text(f"# article\n\n{media_append_marker(ingest_id)}\n", encoding="utf-8")
+    assert parent_media_complete(conn, parent, raw_path=raw) is False
+
+
+def test_queue_ingest_resets_dispatched_siblings_when_media_changed(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "reset_siblings"
+    url = "https://blog.substack.com/p/reset"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1.png", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', media_appended=1 WHERE parent_slug=?",
+        (parent,),
+    )
+    conn.commit()
+
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
+    assert get_parent_media_deferral(conn, parent)["media_changed"] == 1
+    queue_ingest(
+        conn, "https://example.com/i2.png", "substack_image", "i2",
+        parent_slug=parent, media_kind="image",
+    )
+    rows = conn.execute(
+        "SELECT status, media_appended FROM ingest_queue WHERE parent_slug=?",
+        (parent,),
+    ).fetchall()
+    assert all(r["status"] == "queued" for r in rows)
+    assert all(r["media_appended"] == 0 for r in rows)
+
+
+def test_dispatch_synthesize_redispatches_stale_done_under_media_changed(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/x"
+    slug = "stale_done_parent"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    done_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="done",
+    )
+    conn.commit()
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    conn.commit()
+
+    config = _batch_test_config(tmp_path)
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+    result = dispatch_synthesize(
+        url, config, conn, content_type="substack_text_synthesize", slug=slug,
+    )
+    assert result.get("duplicate") is not True
+    assert conn.execute("SELECT COUNT(*) FROM tasks WHERE slug=?", (slug,)).fetchone()[0] == 2
+    old = conn.execute("SELECT status FROM tasks WHERE id=?", (done_id,)).fetchone()[0]
+    assert old == "failed"
 
 
 def test_dispatch_synthesize_idempotent_when_task_done(tmp_path):

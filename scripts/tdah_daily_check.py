@@ -101,7 +101,9 @@ def main():
             print(f"  [skip] {ns}: no Bunny UUID on detail page")
             continue
         mp4 = os.path.join(TMP, f"{ns}.mp4")
-        sh(["curl", "-sL", "-H", REF, "-o", mp4, f"{CDN}/{uu}/play_720p.mp4"])
+        cdn_url = f"{CDN}/{uu}/play_720p.mp4"
+        _assert_fetch_url_allowed(cdn_url)
+        sh(["curl", "-s", "--max-redirs", "0", "-H", REF, "-o", mp4, cdn_url])
         if not os.path.exists(mp4) or os.path.getsize(mp4) < 100000:
             print(f"  [skip] {ns}: download failed")
             continue

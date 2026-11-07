@@ -50,6 +50,16 @@ def test_sanitize_visible_message_caps_length():
     assert len(out) == 2000
 
 
+def test_sanitize_visible_message_redacts_credential_shapes():
+    raw = "upstream failed: api_key=abc123 and Authorization: Bearer xyz.token-99"
+    out = sanitize_visible_message(raw)
+    assert "abc123" not in out
+    assert "xyz.token" not in out
+    assert "[credential redacted]" in out
+    assert "Bearer [redacted]" in out
+    assert "upstream failed" in out
+
+
 def test_notify_task_sanitizes_reason():
     cfg = Config(
         kb_agent_dir=Path("/tmp/k"),

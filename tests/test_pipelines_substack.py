@@ -1033,6 +1033,34 @@ class TestSubstackVideoMetadata:
         assert "media gate" in str(exc.value)
         assert "ingest rows 1 != manifest total 2" in str(exc.value)
 
+    @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_download_curl_disables_redirects(
+        self, mock_run, _h264, config, task_dict, tmp_path,
+    ):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        meta_path.write_text(
+            json.dumps({
+                "video_id": "vid-1",
+                "domain": "testblog.substack.com",
+            }),
+            encoding="utf-8",
+        )
+        mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
+        mp4.write_bytes(b"\x00" * 2000)
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        step_substack_video_download(task_dict, config)
+
+        cmd = mock_run.call_args[0][0]
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        with pytest.raises(ValueError, match="not allowed"):
+            from agent.fetch_guard import _assert_fetch_url_allowed
+
+            _assert_fetch_url_allowed("http://169.254.169.254/evil")
+
     @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_download_rejects_blocked_endpoint(self, mock_run, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)

@@ -174,7 +174,10 @@ def step_substack_video_download(task: dict, config: Config) -> str:
     _assert_fetch_url_allowed(endpoint)
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
-    cmd = ["curl", "-s", "-L", "--max-time", "600", "-o", str(output_path), endpoint]
+    cmd = [
+        "curl", "-s", "-L", "--max-redirs", "0",
+        "--max-time", "600", "-o", str(output_path), endpoint,
+    ]
     if cookie.exists():
         cmd += ["-b", str(cookie)]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)

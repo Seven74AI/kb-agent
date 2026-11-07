@@ -343,6 +343,27 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
     return task_id
 
 
+def _reset_dispatched_parent_siblings_if_deferral_cycle(
+    conn: sqlite3.Connection, parent_slug: str,
+) -> None:
+    """Re-queue dispatched siblings when the parent deferral cycle is open (``media_changed``)."""
+    if not parent_slug:
+        return
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None or not int(deferral.get("media_changed") or 0):
+        return
+    with conn:
+        conn.execute(
+            """
+            UPDATE ingest_queue
+            SET status = 'queued', media_appended = 0, error = NULL,
+                updated_at = datetime('now')
+            WHERE parent_slug = ? AND status = 'dispatched'
+            """,
+            (parent_slug,),
+        )
+
+
 def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
                  status: str = "queued", tags=None, parent_slug=None, media_kind=None,
                  max_attempts: int = INGEST_MAX_MEDIA_ATTEMPTS) -> tuple[str, bool]:
@@ -358,6 +379,8 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
     """
     conn.row_factory = sqlite3.Row
     parent_key = _ingest_parent_slug(parent_slug)
+    if parent_key:
+        _reset_dispatched_parent_siblings_if_deferral_cycle(conn, parent_slug)
     row = conn.execute(
         "SELECT id, status, attempts FROM ingest_queue WHERE url = ? AND COALESCE(parent_slug, '') = ?",
         (url, parent_key),
@@ -419,38 +442,62 @@ def find_active_task(
 ) -> str | None:
     """Return a task id when ``dispatch_synthesize`` must not enqueue another.
 
-    Cross-run idempotency: any successful or in-flight synthesis for the slug
-    is treated as a duplicate — including terminal ``done`` / ``completed``.
-    For synthesize pipelines (``*_synthesize``), idempotency is slug-wide so
-    ``substack_text_synthesize`` and ``substack_image_synthesize`` collide and
-    a later parent retry cannot race a batch-dispatched synthesize task.
-    Only ``failed`` is omitted so reconciliation or a later batch run may
-    dispatch a retry; a done synthesis must never run twice.
+    In-flight work is always deduplicated. For ``*_synthesize``, terminal
+    ``done`` / ``completed`` rows count only when they belong to the current
+    deferral generation; stale terminals are superseded so a reconciled parent
+    may dispatch synthesis again. Idempotency is slug-wide across synthesize
+    pipelines. Only ``failed`` is omitted from duplicate detection.
     """
     conn.row_factory = sqlite3.Row
     if is_synthesize_content_type(content_type):
         row = conn.execute(
-            "SELECT id FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+            "SELECT id, status FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
             "LIMIT 1",
             (slug,),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT id FROM tasks WHERE slug = ? AND content_type = ? "
+            "SELECT id, status FROM tasks WHERE slug = ? AND content_type = ? "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
             "LIMIT 1",
             (slug, content_type),
         ).fetchone()
-    return row["id"] if row else None
+    if row is None:
+        return None
+    task_id = row["id"] if hasattr(row, "keys") else row[0]
+    status = row["status"] if hasattr(row, "keys") else row[1]
+    if is_synthesize_content_type(content_type) and status in ("done", "completed"):
+        deferral = get_parent_media_deferral(conn, slug)
+        if deferral is not None:
+            fresh = _deferral_synthesize_terminal_fresh(conn, slug, deferral)
+            if int(deferral.get("media_changed") or 0) or not fresh:
+                supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
+                return None
+    return task_id
+
+
+_SYNTHESIZE_IN_FLIGHT_STATUSES = "'pending', 'in_progress', 'paused'"
 
 
 def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
-    """True when a deferred synthesize task for *slug* is active (not ``failed``)."""
+    """True when a generation-fresh deferred synthesize task is in flight (not terminal)."""
     conn.row_factory = sqlite3.Row
+    deferral = get_parent_media_deferral(conn, slug)
+    if deferral is not None:
+        anchor = deferral["updated_at"]
+        op = _deferral_cycle_cmp(deferral)
+        row = conn.execute(
+            f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+            f"AND status IN ({_SYNTHESIZE_IN_FLIGHT_STATUSES}) "
+            f"AND datetime(updated_at) {op} datetime(?) "
+            "LIMIT 1",
+            (slug, anchor),
+        ).fetchone()
+        return row is not None
     row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
+        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"AND status IN ({_SYNTHESIZE_IN_FLIGHT_STATUSES}) "
         "LIMIT 1",
         (slug,),
     ).fetchone()
@@ -458,7 +505,10 @@ def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
 
 
 def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
-    """True when a deferred *_synthesize task for *slug* finished with ``done`` / ``completed``."""
+    """True when a generation-fresh *_synthesize task finished with ``done`` / ``completed``."""
+    deferral = get_parent_media_deferral(conn, slug)
+    if deferral is not None:
+        return _deferral_synthesize_terminal_fresh(conn, slug, deferral)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
@@ -509,6 +559,67 @@ def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, def
     return row is not None
 
 
+def _deferral_media_landing_anchor(
+    conn: sqlite3.Connection, slug: str, deferral: dict,
+) -> str:
+    """Latest sibling ``dispatched_at`` or deferral ``updated_at``, whichever is later."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT MAX(dispatched_at) AS latest FROM ingest_queue WHERE parent_slug = ?",
+        (slug,),
+    ).fetchone()
+    latest = None
+    if row is not None:
+        latest = row["latest"] if hasattr(row, "keys") else row[0]
+    anchor = deferral["updated_at"]
+    if not latest:
+        return anchor
+    picked = conn.execute(
+        "SELECT CASE WHEN datetime(?) >= datetime(?) THEN ? ELSE ? END",
+        (latest, anchor, latest, anchor),
+    ).fetchone()
+    return picked[0] if picked else anchor
+
+
+def _parent_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT error FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
+        "LIMIT 1",
+        (slug, anchor),
+    ).fetchone()
+    if row is None:
+        return False
+    err = row["error"] if hasattr(row, "keys") else row[0]
+    return not _is_superseded_parent_error(err)
+
+
+def _synthesize_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
+        "LIMIT 1",
+        (slug, anchor),
+    ).fetchone()
+    return row is not None
+
+
+def _has_stale_deferral_synthesize_terminal(
+    conn: sqlite3.Connection, slug: str, anchor: str,
+) -> bool:
+    """Terminal *_synthesize from before media landed for this cycle (vault shortcut hazard)."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "AND status IN ('done', 'completed') AND datetime(updated_at) <= datetime(?) "
+        "LIMIT 1",
+        (slug, anchor),
+    ).fetchone()
+    return row is not None
+
+
 def supersede_stale_deferral_synthesize_tasks(
     conn: sqlite3.Connection, slug: str, deferral: dict,
 ) -> int:
@@ -530,7 +641,7 @@ def supersede_stale_deferral_synthesize_tasks(
 
 
 def has_synthesize_task_signal(conn: sqlite3.Connection, slug: str) -> bool:
-    """True when batch synthesis is queued, in flight, or finished (any non-``failed`` *_synthesize)."""
+    """True when generation-fresh batch synthesis is in flight or finished for the deferral cycle."""
     return has_active_synthesize_task(conn, slug) or has_completed_synthesize_task(conn, slug)
 
 
@@ -575,6 +686,13 @@ def has_completed_parent_synthesis(
         if not note.is_file():
             return False
         if int(deferral.get("media_changed") or 0):
+            return False
+        media_anchor = _deferral_media_landing_anchor(conn, slug, deferral)
+        if _parent_terminal_after_anchor(conn, slug, media_anchor):
+            return True
+        if _synthesize_terminal_after_anchor(conn, slug, media_anchor):
+            return True
+        if _has_stale_deferral_synthesize_terminal(conn, slug, media_anchor):
             return False
         return True
 
@@ -675,6 +793,24 @@ def media_append_marker(ingest_id: str) -> str:
     return f"<!-- kb-ingest-media:{ingest_id} -->"
 
 
+def _sibling_media_block_has_body(text: str, ingest_id: str, sibling_ids: list[str]) -> bool:
+    """True when the raw segment for *ingest_id* includes a section heading and body."""
+    marker = media_append_marker(ingest_id)
+    pos = text.find(marker)
+    if pos < 0:
+        return False
+    start = 0
+    for sid in sibling_ids:
+        if sid == ingest_id:
+            break
+        prior = media_append_marker(sid)
+        prior_pos = text.find(prior)
+        if prior_pos >= 0 and prior_pos < pos:
+            start = prior_pos + len(prior)
+    segment = text[start:pos].strip()
+    return bool(segment) and "##" in segment
+
+
 def parent_media_complete(
     conn: sqlite3.Connection,
     parent_slug: str,
@@ -714,8 +850,14 @@ def parent_media_complete(
     if not raw_path.is_file():
         return False
     text = raw_path.read_text(encoding="utf-8")
+    sibling_ids = [
+        sibling["id"] if hasattr(sibling, "keys") else sibling[0] for sibling in rows
+    ]
     for sibling in rows:
-        if media_append_marker(sibling["id"]) not in text:
+        sid = sibling["id"] if hasattr(sibling, "keys") else sibling[0]
+        if media_append_marker(sid) not in text:
+            return False
+        if not _sibling_media_block_has_body(text, sid, sibling_ids):
             return False
     return True
 
@@ -743,11 +885,19 @@ def append_parent_media_atomic(
             set_ingest_media_appended(conn, ingest_id)
         return True
     if media_flag:
-        pending_text = text + f"\n\n{marker}\n"
-        tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
-        tmp_path.write_text(pending_text, encoding="utf-8")
-        os.replace(tmp_path, raw_path)
-        return True
+        section_present = f"## {section}" in text and body.strip() in text
+        if section_present:
+            pending_text = text + f"\n\n{marker}\n"
+            tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
+            tmp_path.write_text(pending_text, encoding="utf-8")
+            os.replace(tmp_path, raw_path)
+            return True
+        with conn:
+            conn.execute(
+                "UPDATE ingest_queue SET media_appended = 0, updated_at = datetime('now') WHERE id = ?",
+                (ingest_id,),
+            )
+        media_flag = False
     block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
     pending_text = text + block
     tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
@@ -800,6 +950,8 @@ def ensure_parent_media_deferral(
     """Persist the deferral manifest total (never lowered; may grow on conflict)."""
     if not parent_slug:
         return
+    prior = get_parent_media_deferral(conn, parent_slug)
+    prior_total = int(prior["expected_total"]) if prior else 0
     with conn:
         conn.execute(
             """
@@ -821,6 +973,22 @@ def ensure_parent_media_deferral(
             """,
             (parent_slug, source_url, content_type, int(expected_total)),
         )
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if (
+        prior is not None
+        and deferral is not None
+        and int(deferral["expected_total"]) > prior_total
+    ):
+        with conn:
+            conn.execute(
+                """
+                UPDATE ingest_queue
+                SET status = 'queued', media_appended = 0, error = NULL,
+                    updated_at = datetime('now')
+                WHERE parent_slug = ? AND status = 'dispatched'
+                """,
+                (parent_slug,),
+            )
 
 
 def bootstrap_parent_media_deferral_from_manifest(
@@ -877,6 +1045,7 @@ def mark_parent_media_changed(conn: sqlite3.Connection, parent_slug: str) -> Non
             """,
             (parent_slug,),
         )
+    _reset_dispatched_parent_siblings_if_deferral_cycle(conn, parent_slug)
 
 
 def remove_ingest(
@@ -1206,10 +1375,6 @@ def get_all_tasks(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
 
 
 _LLM_ARCHIVE_RAW_ENV = "KB_LLM_ARCHIVE_RAW"
-_LLM_ARCHIVE_SECRET_RE = re.compile(
-    r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*\S+"
-)
-_LLM_ARCHIVE_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
 
 
 def llm_archive_store_raw() -> bool:
@@ -1223,10 +1388,7 @@ def redact_llm_archive_text(text: str, *, store_raw: bool | None = None) -> str:
         return text or ""
     from agent.notify import sanitize_visible_message
 
-    out = sanitize_visible_message(text or "")
-    out = _LLM_ARCHIVE_BEARER_RE.sub("Bearer [redacted]", out)
-    out = _LLM_ARCHIVE_SECRET_RE.sub("[credential redacted]", out)
-    return out
+    return sanitize_visible_message(text or "")
 
 
 def archive_llm_call(conn: sqlite3.Connection, task_id: str, role: str,

@@ -21,6 +21,19 @@ _SUBPROCESS_STDERR_LINE_RE = re.compile(
     r"^(?:yt-dlp|curl|megadl|ffmpeg|mc:|ERROR:|\[download\])",
     re.IGNORECASE,
 )
+_CREDENTIAL_SECRET_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*(?!Bearer\b)\S+"
+)
+_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
+
+
+def redact_credential_shapes(text: str) -> str:
+    """Replace token-shaped assignment and Bearer headers with fixed placeholders."""
+    if not text:
+        return text
+    text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _CREDENTIAL_SECRET_RE.sub("[credential redacted]", text)
+    return text
 
 
 def _scrub_paths(text: str) -> str:
@@ -47,6 +60,7 @@ def _truncate_subprocess_stderr_lines(text: str) -> str:
 
 def _finalize_visible_message(text: str) -> str:
     text = _scrub_paths(text)
+    text = redact_credential_shapes(text)
     text = _truncate_subprocess_stderr_lines(text)
     return text[:_VISIBLE_ERROR_MAX_LEN]
 

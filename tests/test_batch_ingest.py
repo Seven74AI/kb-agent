@@ -158,6 +158,35 @@ class TestAppendToParent:
         assert row["media_appended"] == 1
         assert not list(config.temp_dir.glob("*.tmp"))
 
+    def test_append_parent_media_atomic_repairs_full_block_when_flag_without_body(
+        self, config, conn,
+    ):
+        from agent.db import append_parent_media_atomic, media_append_marker, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1 WHERE id = ?",
+            (ingest_id,),
+        )
+        conn.commit()
+
+        assert append_parent_media_atomic(conn, ingest_id, raw, "Image", "OCR text") is True
+        body = raw.read_text(encoding="utf-8")
+        assert "## Image" in body
+        assert "OCR text" in body
+        assert media_append_marker(ingest_id) in body
+
     def test_append_parent_media_atomic_repairs_marker_when_flag_without_marker(self, config, conn):
         from agent.db import append_parent_media_atomic, media_append_marker, queue_ingest
 
@@ -308,6 +337,47 @@ class TestBatchLockInMain:
 
 
 class TestEmbeddedImageFetchGuard:
+    def test_prevalidated_image_curl_disables_redirects(self, config, conn, monkeypatch, tmp_path):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.kb_agent_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_redirect"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img_redirect",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q = {
+            "id": ingest_id,
+            "url": "https://example.com/img.png",
+            "parent_slug": parent,
+            "slug": "img_redirect",
+        }
+        redirect_target = "http://127.0.0.1/redirected"
+        with pytest.raises(ValueError, match="not allowed"):
+            batch_ingest._assert_fetch_url_allowed(redirect_target)
+
+        curl_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            curl_calls.append(list(cmd))
+            if cmd[0] == "curl" and "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 200)
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=1)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q], config, conn, 12)
+        assert curl_calls
+        curl_cmd = curl_calls[0]
+        assert "--max-redirs" in curl_cmd
+        assert curl_cmd[curl_cmd.index("--max-redirs") + 1] == "0"
+
     def test_blocked_image_url_marks_failed(self, config, conn, monkeypatch):
         import scripts.batch_ingest as batch_ingest
 
@@ -1216,3 +1286,47 @@ class TestCorruptJsonHandling:
         batch_ingest._deferred_synthesize_dispatched.clear()
         assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
         dispatch.assert_not_called()
+
+
+class TestStandaloneNonVideoDispatch:
+    """Mirror batch_ingest standalone non-video dispatch gate (pending + task_id only)."""
+
+    @staticmethod
+    def _apply_non_video_status(conn, ingest_id: str, r: dict) -> str | None:
+        from agent.db import update_ingest_status
+
+        status = r.get("status")
+        if status == "pending" and r.get("task_id"):
+            update_ingest_status(conn, ingest_id, "dispatched")
+            return "dispatched"
+        if status in ("skipped", "paused"):
+            return None
+        update_ingest_status(conn, ingest_id, "failed", error=str(r.get("error") or status))
+        return "failed"
+
+    def test_skipped_submit_leaves_ingest_queued(self, conn):
+        ingest_id, _ = queue_ingest(conn, "https://example.com/page", "web", "web_slug")
+        outcome = self._apply_non_video_status(
+            conn, ingest_id, {"status": "skipped", "reason": "Already in vault"},
+        )
+        assert outcome is None
+        row = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone()
+        assert row["status"] == "queued"
+
+    def test_paused_submit_leaves_ingest_queued(self, conn):
+        ingest_id, _ = queue_ingest(conn, "https://example.com/page2", "web", "web_slug2")
+        outcome = self._apply_non_video_status(
+            conn, ingest_id, {"status": "paused", "task_id": "paused-task", "reason": "cookies"},
+        )
+        assert outcome is None
+        row = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone()
+        assert row["status"] == "queued"
+
+    def test_pending_with_task_id_dispatches(self, conn):
+        ingest_id, _ = queue_ingest(conn, "https://example.com/page3", "web", "web_slug3")
+        outcome = self._apply_non_video_status(
+            conn, ingest_id, {"status": "pending", "task_id": "new-task"},
+        )
+        assert outcome == "dispatched"
+        row = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone()
+        assert row["status"] == "dispatched"
