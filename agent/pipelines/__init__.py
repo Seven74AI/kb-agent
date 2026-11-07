@@ -38,6 +38,7 @@ def import_all_pipelines() -> None:
         bunny_stream,
         instagram,
         mega_video,
+        rumble,
         threads,
         web,
         wikispooks,

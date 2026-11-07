@@ -20,6 +20,19 @@ from agent.archival import step_minio_upload as archival_minio_upload
 from agent.archival import step_git_push as archival_git_push
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
+from agent.pipelines.video_common import ensure_h264
+from agent.pipelines.youtube import (
+    step_cleanup_temp as _yt_cleanup_temp,
+    step_diarize as _yt_diarize,
+    step_extract_audio as _yt_extract_audio,
+    step_fetch_transcript as _yt_fetch_transcript,
+    step_git_push as _yt_git_push,
+    step_merge_and_identify as _yt_merge_and_identify,
+    step_minio_upload as _yt_minio_upload,
+    step_quality_gate as _yt_quality_gate,
+    step_synthesize_youtube as _yt_synthesize,
+    step_transcribe as _yt_transcribe,
+)
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -87,25 +100,71 @@ def step_substack_cleanup(task: dict, config: Config) -> str:
     return "cleaned"
 
 
-def step_substack_video_pause(task: dict, config: Config) -> str:
-    """Pause a Substack video task — video download is not yet implemented.
+def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
+    """Find the native ``videoUpload.id`` and write ``{slug}_metadata.json``.
 
-    Per CONTEXT.md: Substack video download is NOT fully solved.
-    Mux CDN requires signed JWT token not available via the public API.
-
-    This step always raises StepError(PAUSE) so the consumer stores the
-    reason and the operator can handle it manually.
-
-    Raises:
-        StepError(PAUSE): Always — video download not implemented.
+    Native Substack video is NOT Mux/signed-JWT-gated — the public endpoint
+    ``/api/v1/video/upload/<id>/src?type=mp4`` 307-redirects to a CloudFront-
+    signed URL that Substack's server mints. The video id lives in the post JSON
+    as ``videoUpload.id``. The Substack cookie is only needed for PAYWALLED
+    posts (to see the id at all).
     """
-    from agent.exceptions import StepError, ErrorType
-    raise StepError(
-        "Substack video download failed — Mux CDN requires signed JWT, "
-        "not available via public API. See CONTEXT.md.",
-        error_type=ErrorType.PAUSE,
-        step_name="substack_video_pause",
+    slug = task.get("slug", task["id"][:8])
+    url = task["source_url"]
+    domain = urlparse(url).netloc
+
+    cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+    cmd = ["curl", "-s", "-L", "--max-time", "30", url]
+    if cookie.exists():
+        cmd += ["-b", str(cookie)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+    html = result.stdout or ""
+
+    vid = re.search(r'"videoUpload"\s*:\s*\{\s*"id"\s*:\s*"([a-f0-9-]+)"', html)
+    if not vid:
+        raise StepError(
+            "No native video id (videoUpload.id) found — paywalled or non-video post",
+            error_type=ErrorType.PAUSE, step_name="substack_video_metadata",
+        )
+    title_m = re.search(r"<title>([^<]+)</title>", html)
+    meta = {
+        "title": title_m.group(1).strip() if title_m else "",
+        "video_id": vid.group(1),
+        "domain": domain,
+    }
+    Path(config.temp_dir, f"{slug}_metadata.json").write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8",
     )
+    return f"video_id={vid.group(1)}"
+
+
+def step_substack_video_download(task: dict, config: Config) -> str:
+    """Download native video via the public ``/api/v1/video/upload/<id>/src`` endpoint."""
+    slug = task.get("slug", task["id"][:8])
+    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    if not meta_path.exists():
+        raise StepError(
+            "metadata missing — run extract_metadata first",
+            error_type=ErrorType.RETRY, step_name="substack_video_download",
+        )
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    vid, domain = meta["video_id"], meta["domain"]
+    output_path = Path(config.temp_dir) / f"{slug}.mp4"
+    endpoint = f"https://{domain}/api/v1/video/upload/{vid}/src?type=mp4"
+
+    cookie = Path(config.cookie_dir) / "substack_cookies.txt"
+    cmd = ["curl", "-s", "-L", "--max-time", "600", "-o", str(output_path), endpoint]
+    if cookie.exists():
+        cmd += ["-b", str(cookie)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
+        raise StepError(
+            f"Substack video download failed: {result.stderr.strip()[:200] or 'empty file'}",
+            error_type=ErrorType.RETRY, step_name="substack_video_download",
+        )
+
+    output_path = Path(ensure_h264(output_path))
+    return str(output_path)
 
 
 # Body-image dimension below this (both sides) is an avatar/icon, not content.
@@ -200,6 +259,20 @@ def _extract_youtube_ids(html: str) -> list[str]:
     return ids
 
 
+_RUMBLE_URL_RE = re.compile(r'https?://rumble\.com/v[a-z0-9]+(?:-[a-z0-9-]+)?')
+
+
+def _extract_rumble_urls(html: str) -> list[str]:
+    """Embedded Rumble URLs, deduped, order-preserved."""
+    decoded = _html_unescape(html)
+    out: list[str] = []
+    for m in _RUMBLE_URL_RE.finditer(decoded):
+        url = m.group(0).rstrip("\\").rstrip('"')
+        if url not in out:
+            out.append(url)
+    return out
+
+
 def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
     """Download an image and run Tesseract OCR; return the text (or '' on failure)."""
     img_path = Path(config.temp_dir) / f"{slug}_img{idx}"
@@ -216,27 +289,29 @@ def _download_and_ocr(img_url: str, slug: str, idx: int, config: Config) -> str:
     return ocr.stdout.strip()
 
 
-def _enqueue_embedded_videos(video_ids: list[str], config: Config, tags) -> int:
-    """Enqueue embedded YouTube URLs into the durable ingest inbox for the nightly batch.
+def _enqueue_embedded_media(youtube_ids: list[str], rumble_urls: list[str], config: Config, tags) -> int:
+    """Enqueue embedded YouTube + Rumble videos into the nightly batch queue.
 
     Deliberately does NOT download here — videos are batch-processed at night
     (scripts/batch_ingest.py). Lazy-imports to avoid a circular import with
     agent.pipelines (agent.core.submit imports this module).
     """
-    if not video_ids:
+    if not youtube_ids and not rumble_urls:
         return 0
     from agent.core.submit import submit_ingest
     from agent.db import AGENT_SCHEMA, init_db
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
-        for vid in video_ids:
+        for vid in youtube_ids:
             submit_ingest(
                 f"https://www.youtube.com/watch?v={vid}", config, conn, tags=tags,
             )
+        for url in rumble_urls:
+            submit_ingest(url, config, conn, content_type="rumble", tags=tags)
     finally:
         conn.close()
-    return len(video_ids)
+    return len(youtube_ids) + len(rumble_urls)
 
 
 def step_substack_embedded_media(task: dict, config: Config) -> str:
@@ -274,8 +349,9 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                 encoding="utf-8",
             )
 
-    video_ids = _extract_youtube_ids(html)
-    enqueued = _enqueue_embedded_videos(video_ids, config, task.get("tags"))
+    youtube_ids = _extract_youtube_ids(html)
+    rumble_urls = _extract_rumble_urls(html)
+    enqueued = _enqueue_embedded_media(youtube_ids, rumble_urls, config, task.get("tags"))
 
     return f"images_ocr={ocr_count} videos_enqueued={enqueued}"
 
@@ -826,7 +902,26 @@ register_pipeline("substack_text", [
 ])
 
 register_pipeline("substack_video", [
-    Step(name="substack_video_pause", fn=step_substack_video_pause, on_error="fail"),
+    Step(name="extract_metadata", fn=step_substack_video_extract_metadata, on_error="pause"),
+    Step(name="download_video", fn=step_substack_video_download, on_error="retry"),
+    Step(name="extract_audio", fn=_yt_extract_audio, on_error="retry"),
+    Step(name="diarize", fn=_yt_diarize, on_error="retry"),
+    Step(name="transcribe", fn=_yt_transcribe, on_error="retry"),
+    Step(name="merge_and_identify", fn=_yt_merge_and_identify, on_error="retry"),
+    Step(name="cleanup_temp", fn=_yt_cleanup_temp, on_error="fail"),
+    Step(name="synthesize_youtube", fn=_yt_synthesize, on_error="retry"),
+    Step(name="quality_gate", fn=_yt_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=_yt_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=_yt_git_push, on_error="retry"),
+])
+
+register_pipeline("substack_video_synthesize", [
+    Step(name="fetch_transcript", fn=_yt_fetch_transcript, on_error="retry"),
+    Step(name="synthesize_youtube", fn=_yt_synthesize, on_error="retry"),
+    Step(name="quality_gate", fn=_yt_quality_gate, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=_yt_git_push, on_error="retry"),
 ])
 
 register_pipeline("substack_image", [
