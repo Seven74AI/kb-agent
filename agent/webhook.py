@@ -135,6 +135,8 @@ ALLOWED_COOKIE_FILES = {
     "yt_cookies.txt": "YouTube / Instagram Reels (yt-dlp netscape format)",
     "ig_cookies.txt": "Instagram Posts (yt-dlp netscape format)",
     "threads_cookies.txt": "Threads (yt-dlp netscape format)",
+    "substack_cookies.txt": "Substack (native video + paywalled posts)",
+    "rumble_cookies.txt": "Rumble (yt-dlp netscape format)",
 }
 
 
