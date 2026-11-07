@@ -875,19 +875,32 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
 
-    to_remove = []
+    paths_to_unlink: list[Path] = []
     for ext in ["_reel.mp4", "_reel.webm", "_16k.wav", "_8k.wav",
-                "_playwright.py", "_carousel_slides.json", "_carousel_meta.json"]:
+                "_playwright.py", "_carousel_slides.json", "_carousel_meta.json",
+                "_ig_comment.json"]:
         path = Path(config.temp_dir) / f"{safe_slug}{ext}"
         if path.exists():
-            to_remove.append(str(path.name))
+            paths_to_unlink.append(path)
 
-    removed = []
-    for filename in to_remove:
-        path = Path(config.temp_dir) / filename
+    source_url = task.get("source_url", "")
+    parsed = urlparse(source_url)
+    qs = parse_qs(parsed.query)
+    comment_id = (qs.get("comment_id") or [""])[0]
+    if comment_id:
+        try:
+            path_token = _safe_comment_id_path_token(comment_id)
+            conf_path = Path(config.cookie_dir) / f".curl-ig-comment-{path_token}.conf"
+            if conf_path.is_file():
+                paths_to_unlink.append(conf_path)
+        except StepError:
+            pass
+
+    removed: list[str] = []
+    for path in paths_to_unlink:
         try:
             path.unlink()
-            removed.append(filename)
+            removed.append(path.name)
         except OSError:
             pass
 
@@ -1053,70 +1066,77 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
     comment = None
     data: dict = {}
     min_id: str | None = None
-    for _ in range(_IG_COMMENT_PAGE_CAP):
-        api_url = _comments_api_url(min_id)
-        _assert_fetch_url_allowed(api_url)
-        curl_cfg = "\n".join(
-            [
-                "silent",
-                "max-time = 25",
-                f'user-agent = "{IG_APP_UA}"',
-                f'header = "x-ig-app-id: {IG_WEB_APP_ID}"',
-                f'header = "x-csrftoken: {csrftoken}"',
-                f'header = "Cookie: sessionid={cookies["sessionid"]}"',
-                f'url = "{api_url}"',
-            ]
-        ) + "\n"
-        conf_path.write_text(curl_cfg, encoding="utf-8")
-        os.chmod(conf_path, 0o600)
+    try:
+        for _ in range(_IG_COMMENT_PAGE_CAP):
+            api_url = _comments_api_url(min_id)
+            _assert_fetch_url_allowed(api_url)
+            curl_cfg = "\n".join(
+                [
+                    "silent",
+                    "max-time = 25",
+                    f'user-agent = "{IG_APP_UA}"',
+                    f'header = "x-ig-app-id: {IG_WEB_APP_ID}"',
+                    f'header = "x-csrftoken: {csrftoken}"',
+                    f'header = "Cookie: sessionid={cookies["sessionid"]}"',
+                    f'url = "{api_url}"',
+                ]
+            ) + "\n"
+            conf_path.write_text(curl_cfg, encoding="utf-8")
+            os.chmod(conf_path, 0o600)
 
-        result = subprocess.run(
-            ["curl", "-s", "--max-redirs", "0", "--config", str(conf_path)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+            result = subprocess.run(
+                ["curl", "-s", "--max-redirs", "0", "--config", str(conf_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
 
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                raise StepError(
+                    f"Comment API returned non-JSON: {result.stdout[:200]}",
+                    error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
+                )
+            if data.get("status") == "fail":
+                raise StepError(
+                    f"Comment API failed: {data.get('message', '')}",
+                    error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
+                )
+
+            comment = next(
+                (c for c in data.get("comments", []) if str(c.get("pk")) == comment_id),
+                None,
+            )
+            if comment is not None:
+                break
+            min_id = data.get("next_min_id")
+            if not min_id:
+                break
+
+        if comment is None:
+            raise StepError(
+                f"comment_id {comment_id} not found in comment pages",
+                error_type=ErrorType.PAUSE, step_name="ig_comment_fetch",
+            )
+
+        caption = data.get("caption") or {}
+        return {
+            "comment_id": comment_id,
+            "comment_text": comment.get("text", ""),
+            "comment_author": (comment.get("user") or {}).get("username", "unknown"),
+            "comment_created_at": comment.get("created_at"),
+            "parent_shortcode": shortcode,
+            "parent_url": f"https://www.instagram.com/reel/{shortcode}/",
+            "parent_caption": caption.get("text", ""),
+            "parent_author": (caption.get("user") or {}).get("username", "unknown"),
+        }
+    finally:
         try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            raise StepError(
-                f"Comment API returned non-JSON: {result.stdout[:200]}",
-                error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
-            )
-        if data.get("status") == "fail":
-            raise StepError(
-                f"Comment API failed: {data.get('message', '')}",
-                error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
-            )
-
-        comment = next(
-            (c for c in data.get("comments", []) if str(c.get("pk")) == comment_id),
-            None,
-        )
-        if comment is not None:
-            break
-        min_id = data.get("next_min_id")
-        if not min_id:
-            break
-
-    if comment is None:
-        raise StepError(
-            f"comment_id {comment_id} not found in comment pages",
-            error_type=ErrorType.PAUSE, step_name="ig_comment_fetch",
-        )
-
-    caption = data.get("caption") or {}
-    return {
-        "comment_id": comment_id,
-        "comment_text": comment.get("text", ""),
-        "comment_author": (comment.get("user") or {}).get("username", "unknown"),
-        "comment_created_at": comment.get("created_at"),
-        "parent_shortcode": shortcode,
-        "parent_url": f"https://www.instagram.com/reel/{shortcode}/",
-        "parent_caption": caption.get("text", ""),
-        "parent_author": (caption.get("user") or {}).get("username", "unknown"),
-    }
+            if conf_path.is_file():
+                conf_path.unlink()
+        except OSError:
+            pass
 
 
 def step_ig_comment_fetch(task: dict, config: Config) -> str:

@@ -38,23 +38,54 @@ def conn(tmp_path):
 
 
 class TestAppendToParent:
-    def test_append_returns_false_when_raw_missing(self, config):
+    def test_append_without_conn_refuses(self, config):
         import scripts.batch_ingest as batch_ingest
 
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        assert batch_ingest._append_to_parent(config, "parent", "Image", "text") is False
+        with pytest.raises(ValueError, match="conn and ingest_id"):
+            batch_ingest._append_to_parent(config, "parent", "Image", "text")
 
-    def test_append_returns_true_and_writes(self, config):
+    def test_append_returns_false_when_raw_missing(self, config, conn):
         import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        assert batch_ingest._append_to_parent(
+            config, parent, "Image", "text", conn=conn, ingest_id=ingest_id,
+        ) is False
+
+    def test_append_returns_true_and_writes(self, config, conn):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import media_append_marker, queue_ingest
 
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
         raw = config.temp_dir / f"{parent}_raw.md"
         raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
-        assert batch_ingest._append_to_parent(config, parent, "Image", "OCR text") is True
+        assert batch_ingest._append_to_parent(
+            config, parent, "Image", "OCR text", conn=conn, ingest_id=ingest_id,
+        ) is True
         body = raw.read_text(encoding="utf-8")
         assert "## Image" in body
         assert "OCR text" in body
+        assert media_append_marker(ingest_id) in body
 
     def test_append_idempotent_on_reprocess(self, config, conn):
         import scripts.batch_ingest as batch_ingest
@@ -713,7 +744,16 @@ class TestAppendFailureMarksIngest:
 
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         parent = "parent"
-        ingest_id = "ingest-1"
+        from agent.db import queue_ingest
+
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
         statuses: list[tuple] = []
 
         def track_status(connection, item_id, status, error=None):
@@ -736,14 +776,21 @@ class TestAppendFailureMarksIngest:
         for q_item, dest_path in [(q, dest)]:
             ocr_path = ocr_dir / f"{dest_path.name}.ocr.json"
             reading = json.loads(ocr_path.read_text(encoding="utf-8")).get("reading", "")
-            if not batch_ingest._append_to_parent(config, q_item["parent_slug"], "Image", reading):
+            if not batch_ingest._append_to_parent(
+                config,
+                q_item["parent_slug"],
+                "Image",
+                reading,
+                conn=conn,
+                ingest_id=q_item["id"],
+            ):
                 batch_ingest.update_ingest_status(
                     conn, q_item["id"], "failed", error="parent raw markdown missing",
                 )
             else:
                 batch_ingest.update_ingest_status(conn, q_item["id"], "dispatched")
 
-        assert ("ingest-1", "failed", "parent raw markdown missing") in statuses
+        assert (ingest_id, "failed", "parent raw markdown missing") in statuses
 
 
 class TestResolveMediaKind:

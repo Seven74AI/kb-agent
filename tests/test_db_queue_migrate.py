@@ -1167,6 +1167,19 @@ def test_has_completed_parent_synthesis_vault_requires_deferral_reconciled(tmp_p
     note_path.write_text("# stale after media\n", encoding="utf-8")
     assert has_completed_parent_synthesis(
         conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is False
+
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
     ) is True
 
 
@@ -1392,6 +1405,34 @@ def test_maybe_dispatch_skips_when_parent_synthesis_completed(tmp_path, monkeypa
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
     conn.row_factory = sqlite3.Row
+    parent = "standalone_done_parent"
+    url = "https://blog.substack.com/p/standalone-done"
+    create_task(conn, url, "substack_text", parent, ["synthesize_note"], status="completed")
+    conn.commit()
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    dispatch = MagicMock()
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+    dispatch.assert_not_called()
+
+
+def test_maybe_dispatch_does_not_skip_when_siblings_after_inline_complete(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
     parent = "inline_done_parent"
     url = "https://blog.substack.com/p/inline-done"
     create_task(conn, url, "substack_text", parent, ["synthesize_note"], status="completed")
@@ -1411,16 +1452,74 @@ def test_maybe_dispatch_skips_when_parent_synthesis_completed(tmp_path, monkeypa
     )
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     (config.temp_dir / f"{parent}_media.json").write_text(
-        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 1}',
+        json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
         encoding="utf-8",
     )
+    _stamp_parent_raw_media(conn, config.temp_dir, parent)
 
-    dispatch = MagicMock()
-    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+    assert has_completed_parent_synthesis(
+        conn, parent, vault_path=config.vault_path, temp_dir=config.temp_dir,
+    ) is False
+
+    def fake_dispatch(dispatch_url, cfg, agent_conn, **kwargs):
+        return {"status": "pending", "task_id": "t-batch", "duplicate": False}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
     batch_ingest._deferred_synthesize_dispatched.clear()
 
-    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
-    dispatch.assert_not_called()
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+
+
+def test_has_completed_parent_synthesis_deferral_less_ignores_superseded_parent(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "sup_deferral_less"
+    url = "https://blog.substack.com/p/sup-less"
+    parent_id = create_task(
+        conn, url, "substack_text", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("deferred synthesis dispatched; parent ingestion superseded", parent_id),
+    )
+    queue_ingest(
+        conn, "https://example.com/i.png", "substack_image", "i",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(conn, slug) is False
+
+
+def test_has_completed_parent_synthesis_deferral_mtime_requires_fresh_terminal(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "mtime_only_parent"
+    vault = tmp_path / "vault"
+    url = "https://blog.substack.com/p/mtime"
+    note_dir = vault / "Knowledge base" / "articles"
+    note_dir.mkdir(parents=True)
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/x.png", "substack_image", "x",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    conn.commit()
+    media_tmp = tmp_path / "media_tmp"
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    note_path = note_dir / f"{slug}.md"
+    note_path.write_text("# fresh note\n", encoding="utf-8")
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is False
 
 
 def test_maybe_dispatch_unlocks_when_expected_total_grows(tmp_path, monkeypatch):

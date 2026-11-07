@@ -276,15 +276,11 @@ def _append_to_parent(
 ) -> bool:
     """Append a media reading/transcript to the parent article's raw markdown."""
     raw_path = Path(config.temp_dir) / f"{parent_slug}_raw.md"
-    if conn is not None and ingest_id:
-        return append_parent_media_atomic(conn, ingest_id, raw_path, section, body)
-    if not raw_path.exists():
-        return False
-    raw_path.write_text(
-        raw_path.read_text(encoding="utf-8") + f"\n\n## {section}\n\n{body.strip()}\n",
-        encoding="utf-8",
-    )
-    return True
+    if conn is None or not ingest_id:
+        raise ValueError(
+            "parent media append requires conn and ingest_id (marker-guarded atomic path)",
+        )
+    return append_parent_media_atomic(conn, ingest_id, raw_path, section, body)
 
 
 def _parent_tags(conn, parent_slug: str):
@@ -347,14 +343,6 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     """Fire the parent's deferred synthesis once every sibling media item is done."""
     if parent_slug in _deferred_synthesize_dispatched:
         return False
-    if has_completed_parent_synthesis(
-        conn,
-        parent_slug,
-        vault_path=config.vault_path,
-        temp_dir=config.temp_dir,
-    ):
-        print(f"  [skip] {parent_slug}: parent synthesis already completed")
-        return False
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
     if manifest_path.exists():
         manifest, manifest_err = _read_json_file(manifest_path, "manifest")
@@ -372,6 +360,14 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     if deferral is None:
         bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, config.temp_dir)
         deferral = get_parent_media_deferral(conn, parent_slug)
+    if has_completed_parent_synthesis(
+        conn,
+        parent_slug,
+        vault_path=config.vault_path,
+        temp_dir=config.temp_dir,
+    ):
+        print(f"  [skip] {parent_slug}: parent synthesis already completed")
+        return False
     if deferral is None:
         print(f"  [skip] {parent_slug}: deferral record missing; fail closed")
         return False

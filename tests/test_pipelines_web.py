@@ -99,6 +99,23 @@ def test_firecrawl_extract_rejects_metadata_ip(mock_run, config, task_dict):
     mock_run.assert_not_called()
 
 
+@patch("agent.pipelines.web.subprocess.run")
+def test_firecrawl_extract_curl_disables_redirects(mock_run, config, task_dict, tmp_path):
+    """Firecrawl client curl must not follow redirects (SSRF policy)."""
+    config.temp_dir = tmp_path / "tmp"
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    long_markdown = "# Title\n\n" + ("Content paragraph. " * 80)
+    mock_run.return_value = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"data": {"markdown": long_markdown}}),
+        stderr="",
+    )
+    step_firecrawl_extract(task_dict, config)
+    cmd = mock_run.call_args[0][0]
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
+
+
 # ── _estimate_tokens tests ────────────────────────────────────────────────────
 
 def test_estimate_tokens_empty():
