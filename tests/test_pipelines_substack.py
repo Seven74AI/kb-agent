@@ -375,6 +375,145 @@ class TestSubstackVideoMetadata:
         assert "re-fetch found no embeds but siblings pending" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
+    def test_zero_embeds_manifest_and_queue_gone_but_deferral_marker_pauses(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        mock_fetch.return_value = "<html><body>empty re-fetch</body></html>"
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        task_id = create_task(
+            conn, post, "substack_text", slug,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        )
+        conn.execute(
+            """
+            UPDATE task_steps SET output = ?, status = 'done'
+            WHERE task_id = ? AND name = 'substack_cleanup'
+            """,
+            (f"cleaned\nmedia_deferred:{slug}", task_id),
+        )
+        conn.commit()
+        conn.close()
+
+        task_dict["id"] = task_id
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "prior deferral" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_zero_embeds_deferral_marker_allows_inline_when_synthesize_task_exists(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        mock_fetch.return_value = "<html><body>plain text</body></html>"
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        task_id = create_task(
+            conn, post, "substack_text", slug,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'substack_cleanup'",
+            (f"cleaned\nmedia_deferred:{slug}", task_id),
+        )
+        create_task(
+            conn, post, "substack_text_synthesize", slug,
+            ["synthesize_note"], status="pending",
+        )
+        conn.commit()
+        conn.close()
+
+        task_dict["id"] = task_id
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "no embedded media"
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_zero_embeds_deferral_marker_allows_inline_when_raw_has_media_sections(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_raw.md").write_text(
+            "# Article\n\nIntro.\n\n## Image\n\nChart OCR.\n",
+            encoding="utf-8",
+        )
+        mock_fetch.return_value = "<html><body>plain text</body></html>"
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        task_id = create_task(
+            conn, post, "substack_text", slug,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'substack_cleanup'",
+            (f"media_deferred:{slug}", task_id),
+        )
+        conn.commit()
+        conn.close()
+
+        task_dict["id"] = task_id
+        result = step_substack_embedded_media(task_dict, config)
+        assert result == "no embedded media"
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_deferring_media_persists_marker_on_parent_task(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, create_task, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        mock_fetch.return_value = (
+            '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
+        )
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        task_id = create_task(
+            conn, post, "substack_text", slug,
+            ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET output = 'cleaned' WHERE task_id = ? AND name = 'substack_cleanup'",
+            (task_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        task_dict["id"] = task_id
+        with pytest.raises(StepError):
+            step_substack_embedded_media(task_dict, config)
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        row = conn.execute(
+            "SELECT output FROM task_steps WHERE task_id = ? AND name = 'substack_cleanup'",
+            (task_id,),
+        ).fetchone()
+        conn.close()
+        assert row[0] and f"media_deferred:{slug}" in row[0]
+
+    @patch("agent.pipelines.web._fetch_substack_html")
     def test_zero_embeds_with_deferral_manifest_pauses_not_inline(
         self, mock_fetch, config, task_dict, tmp_path,
     ):
