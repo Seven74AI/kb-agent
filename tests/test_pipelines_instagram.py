@@ -437,13 +437,13 @@ class TestQualityGate:
         assert data["passed"] is True
 
     def test_quality_gate_carousel_missing_section(self, config, post_task):
+        from agent.exceptions import StepError
+
         note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{post_task['slug']}.md"
         note_path.write_text("## Summary\nContent\n" * 50)
 
-        result = step_ig_quality_gate(post_task, config)
-        data = json.loads(result)
-        assert data["passed"] is False
-        assert any("Slide-by-Slide" in f for f in data.get("failures", []))
+        with pytest.raises(StepError, match="Slide-by-Slide"):
+            step_ig_quality_gate(post_task, config)
 
     @patch("agent.pipelines.instagram.run_threads_video_quality_gate", return_value=(True, 1))
     def test_quality_gate_reel_synthesize_uses_key_point_gate(self, mock_gate, config, reel_task):
