@@ -3,24 +3,7 @@
 import re
 from pathlib import Path
 
-# Mirrors agent/pipelines/see_also.CONTENT_TYPE_FOLDERS (vault layout).
-CONTENT_TYPE_FOLDERS: dict[str, str] = {
-    "web": "articles",
-    "substack": "articles",
-    "substack_text": "articles",
-    "substack_image": "articles",
-    "book": "books",
-    "book_epub": "books",
-    "book_pdf": "books",
-    "mega": "books",
-    "book_batch": "books",
-    "youtube": "videos",
-    "threads_text": "threads",
-    "threads_video": "threads",
-    "instagram_reel": "instagram",
-    "instagram_post": "instagram",
-    "bunny_stream": "",
-}
+from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 
 
 def _vault_folder(content_type: str) -> str:

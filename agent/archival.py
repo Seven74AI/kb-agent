@@ -99,32 +99,65 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
 
 # ── MinIO helpers ─────────────────────────────────────────────────────────────
 
-# Mapping from content-type to MinIO bucket folder
-CONTENT_TYPE_TO_MINIO_FOLDER: dict[str, str] = {
-    "web": "articles",
-    "substack": "articles",
-    "instagram_post": "articles",
-    "threads": "threads",
-    "youtube": "videos",
-    "instagram_reel": "reels",
-    "book": "books",
-    "book_epub": "books",
-    "book_pdf": "books",
-    "mega": "books",
-}
+def _build_content_type_folder_maps() -> tuple[dict[str, str], dict[str, str]]:
+    """Single source of truth: content_type -> (minio folder, vault subfolder)."""
+    pairs: dict[str, tuple[str, str]] = {}
 
-# Mapping from content-type to vault subfolder
-CONTENT_TYPE_TO_VAULT_FOLDER: dict[str, str] = {
-    "web": "articles",
-    "substack": "articles",
-    "instagram_post": "articles",
-    "threads": "articles",
-    "youtube": "videos",
-    "instagram_reel": "videos",
-    "book": "books",
-    "book_epub": "books",
-    "book_pdf": "books",
-}
+    def _add(types: list[str], minio: str, vault: str) -> None:
+        for content_type in types:
+            pairs[content_type] = (minio, vault)
+
+    _add(
+        [
+            "web",
+            "substack",
+            "substack_text",
+            "substack_image",
+            "substack_text_synthesize",
+            "substack_image_synthesize",
+            "wikispooks",
+        ],
+        "articles",
+        "articles",
+    )
+    _add(["book", "book_epub", "book_pdf", "mega", "book_batch"], "books", "books")
+    _add(
+        [
+            "youtube",
+            "youtube_synthesize",
+            "rumble",
+            "rumble_synthesize",
+            "substack_video",
+            "substack_video_synthesize",
+            "mega_video",
+        ],
+        "videos",
+        "videos",
+    )
+    _add(
+        ["threads_text", "threads_video", "threads_video_synthesize"],
+        "threads",
+        "threads",
+    )
+    _add(
+        [
+            "instagram_post",
+            "instagram_comment",
+            "instagram_reel",
+            "instagram_reel_synthesize",
+        ],
+        "instagram",
+        "instagram",
+    )
+    pairs["instagram_reel"] = ("videos", "instagram")
+    _add(["bunny_stream", "bunny_stream_synthesize"], "videos", "")
+
+    minio = {k: v[0] for k, v in pairs.items()}
+    vault = {k: v[1] for k, v in pairs.items()}
+    return minio, vault
+
+
+CONTENT_TYPE_TO_MINIO_FOLDER, CONTENT_TYPE_TO_VAULT_FOLDER = _build_content_type_folder_maps()
 
 
 def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str:

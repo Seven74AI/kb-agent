@@ -731,7 +731,15 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
     if content_type in ("instagram_reel", "instagram_reel_synthesize"):
         # Reels are short-form — key points only, not the YouTube Concepts gate.
         passed, rounds = run_threads_video_quality_gate(note_path, config, task["id"])
-        return json.dumps({"passed": passed, "rounds": rounds})
+        if not passed:
+            content = note_path.read_text(encoding="utf-8")
+            raise StepError(
+                f"Instagram reel quality gate failed after {rounds} rounds. "
+                f"First line: {content.split(chr(10))[0]}",
+                error_type=ErrorType.FAIL,
+                step_name="ig_quality_gate",
+            )
+        return json.dumps({"passed": True, "rounds": rounds})
     elif content_type == "instagram_comment":
         # Comment note: must capture the comment + parent context.
         content = note_path.read_text(encoding="utf-8")
@@ -743,7 +751,13 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
             failures.append("Missing The Comment section")
         if "## Parent Context" not in content:
             failures.append("Missing Parent Context section")
-        return json.dumps({"passed": not failures, "failures": failures, "rounds": 1})
+        if failures:
+            raise StepError(
+                f"Instagram comment quality gate failed: {'; '.join(failures)}",
+                error_type=ErrorType.FAIL,
+                step_name="ig_quality_gate",
+            )
+        return json.dumps({"passed": True, "failures": [], "rounds": 1})
     else:
         # Carousel: simple size + section check
         content = note_path.read_text(encoding="utf-8")
@@ -752,16 +766,22 @@ def step_ig_quality_gate(task: dict, config: Config) -> str:
         # Must have Slide-by-Slide Analysis section
         has_slide_analysis = "## Slide-by-Slide Analysis" in content or "## Slide-by-Slide" in content
 
-        passed = size >= 2000 and has_slide_analysis
         failures = []
         if size < 2000:
             failures.append(f"Note too short: {size} chars < 2000")
         if not has_slide_analysis:
             failures.append("Missing Slide-by-Slide Analysis section")
 
+        if failures:
+            raise StepError(
+                f"Instagram quality gate failed: {'; '.join(failures)}",
+                error_type=ErrorType.FAIL,
+                step_name="ig_quality_gate",
+            )
+
         return json.dumps({
-            "passed": passed,
-            "failures": failures,
+            "passed": True,
+            "failures": [],
             "rounds": 1,
         })
 

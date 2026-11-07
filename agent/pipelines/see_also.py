@@ -10,29 +10,9 @@ import re
 import subprocess
 from pathlib import Path
 
+from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.config import Config
 from agent.llm import get_llm_client
-
-
-# ── Content type → vault folder mapping ──────────────────────────────────────
-
-CONTENT_TYPE_FOLDERS: dict[str, str] = {
-    "web": "articles",
-    "substack": "articles",
-    "substack_text": "articles",
-    "substack_image": "articles",
-    "book": "books",
-    "book_epub": "books",
-    "book_pdf": "books",
-    "mega": "books",
-    "book_batch": "books",
-    "youtube": "videos",
-    "threads_text": "threads",
-    "threads_video": "threads",
-    "instagram_reel": "instagram",
-    "instagram_post": "instagram",
-    "bunny_stream": "",
-}
 
 
 def _get_folder(content_type: str) -> str:
