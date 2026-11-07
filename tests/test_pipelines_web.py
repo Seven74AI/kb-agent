@@ -471,16 +471,15 @@ def test_pipeline_registered():
     assert step_names.index("minio_upload") < step_names.index("git_push")
 
 
-def test_pipeline_fallback():
-    """Test that unknown content types fall back to web pipeline."""
+def test_pipeline_unknown_content_type_returns_none():
+    """Unknown content types must not silently use the web pipeline."""
     from agent.pipelines import get_pipeline
 
     pipeline = get_pipeline("nonexistent")
-    assert pipeline is not None
-    assert len(pipeline) > 0
-    # Should match web pipeline
+    assert pipeline is None
     web_pipeline = get_pipeline("web")
-    assert [s.name for s in pipeline] == [s.name for s in web_pipeline]
+    assert web_pipeline is not None
+    assert len(web_pipeline) > 0
 
 
 # ── step_see_also tests ───────────────────────────────────────────────────────
