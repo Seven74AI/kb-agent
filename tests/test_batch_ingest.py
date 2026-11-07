@@ -133,6 +133,36 @@ class TestBatchLockInMain:
         release(config)
 
 
+class TestEmbeddedImageFetchGuard:
+    def test_blocked_image_url_marks_failed(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = queue_ingest(
+            conn,
+            "http://169.254.169.254/latest/meta-data/",
+            "substack_image",
+            "img_blocked",
+            parent_slug="parent_blocked",
+            media_kind="image",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        curl_calls: list = []
+        monkeypatch.setattr(
+            batch_ingest.subprocess,
+            "run",
+            lambda cmd, **kw: (curl_calls.append(cmd) or MagicMock(returncode=0)),
+        )
+        batch_ingest._process_embedded_images([q], config, conn, 99)
+        assert not curl_calls
+        row = conn.execute(
+            "SELECT status, error FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["status"] == "failed"
+        assert "blocked fetch url" in row["error"].lower()
+
+
 class TestEmbeddedImageSizeCap:
     def test_oversized_image_marked_failed_not_staged(self, config, conn, monkeypatch, tmp_path):
         import scripts.batch_ingest as batch_ingest
@@ -144,7 +174,7 @@ class TestEmbeddedImageSizeCap:
         raw.write_text("# Post\n", encoding="utf-8")
         ingest_id = queue_ingest(
             conn,
-            "https://cdn.example/img.png",
+            "https://example.com/img.png",
             "substack_image",
             "img_slug",
             parent_slug=parent,
@@ -170,7 +200,7 @@ class TestEmbeddedImageSizeCap:
         batch_ingest._process_embedded_images(
             [{
                 "id": ingest_id,
-                "url": "https://cdn.example/img.png",
+                "url": "https://example.com/img.png",
                 "parent_slug": parent,
                 "slug": "img_slug",
             }],
@@ -356,7 +386,7 @@ class TestCorruptJsonHandling:
         (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
         ingest_id = queue_ingest(
             conn,
-            "https://cdn.example/chart.png",
+            "https://example.com/chart.png",
             "substack_image",
             "img_bad_ocr",
             parent_slug=parent,

@@ -19,7 +19,8 @@ from agent.pipelines.web import (
     step_substack_embedded_media,
     step_substack_video_extract_metadata,
     _extract_body_images,
-    _extract_native_video_id,
+    _extract_native_video_ids,
+    step_substack_video_download,
     _extract_rumble_urls,
     _extract_youtube_ids,
     _fetch_substack_html,
@@ -223,6 +224,15 @@ class TestSubstackEmbeddedMedia:
         ids = _extract_youtube_ids(html)
         assert ids == ["xwmL7Qr6ft4", "abcDEF12345"]
 
+    def test_extract_youtube_ids_prose_links(self):
+        html = (
+            '<p>See https://www.youtube.com/watch?v=dQw4w9WgXcQ and '
+            'https://youtu.be/abcDEF12345 for more.</p>'
+            '<p>Short: https://www.youtube.com/shorts/shortVid1234</p>'
+        )
+        ids = _extract_youtube_ids(html)
+        assert ids == ["dQw4w9WgXcQ", "shortVid1234", "abcDEF12345"]
+
     def test_extract_rumble_urls(self):
         html = (
             '<a href="https://rumble.com/v2y5lfu-evidence-of-crimes-against-humanity-darkfield-blood-microscopy">a</a>'
@@ -348,15 +358,28 @@ class TestSubstackVideoMetadata:
         assert exc.value.error_type == ErrorType.RETRY
         mock_enqueue.assert_not_called()
 
-    def test_extract_native_video_id_from_preloads(self):
+    def test_extract_native_video_ids_from_preloads(self):
         html = (
             '{"videoUpload":{"id":"a7315fa8-8027-4432-a7e3-652479bc5275"}}'
         )
-        assert _extract_native_video_id(html) == "a7315fa8-8027-4432-a7e3-652479bc5275"
+        assert _extract_native_video_ids(html) == ["a7315fa8-8027-4432-a7e3-652479bc5275"]
 
-    def test_extract_native_video_id_from_api_path(self):
+    def test_extract_native_video_ids_from_api_path(self):
         html = '<a href="/api/v1/video/upload/deadbeef-1111-2222-3333-444455556666/src">'
-        assert _extract_native_video_id(html) == "deadbeef-1111-2222-3333-444455556666"
+        assert _extract_native_video_ids(html) == [
+            "deadbeef-1111-2222-3333-444455556666"
+        ]
+
+    def test_extract_native_video_ids_multiple_uploads(self):
+        html = (
+            '{"videoUpload":{"id":"aaaa1111-1111-1111-1111-111111111111"}}'
+            'later in page '
+            '"videoUpload":{"id":"bbbb2222-2222-2222-2222-222222222222"}'
+        )
+        assert _extract_native_video_ids(html) == [
+            "aaaa1111-1111-1111-1111-111111111111",
+            "bbbb2222-2222-2222-2222-222222222222",
+        ]
 
     def test_paywall_shell_detected(self):
         html = (
@@ -374,6 +397,78 @@ class TestSubstackVideoMetadata:
             step_substack_embedded_media(task_dict, config)
         assert exc.value.error_type == ErrorType.PAUSE
         assert "substack cookie" in str(exc.value).lower()
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_native_videos_enqueue_distinct_urls(self, mock_fetch, config, task_dict, tmp_path):
+        from agent.db import AGENT_SCHEMA, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        post = task_dict["source_url"]
+        mock_fetch.return_value = (
+            "<html><body>"
+            '{"videoUpload":{"id":"aaaa1111-1111-1111-1111-111111111111"}}'
+            '{"videoUpload":{"id":"bbbb2222-2222-2222-2222-222222222222"}}'
+            "</body></html>"
+        )
+        with pytest.raises(StepError):
+            step_substack_embedded_media(task_dict, config)
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            rows = conn.execute(
+                "SELECT url FROM ingest_queue WHERE parent_slug=? ORDER BY url",
+                (task_dict["slug"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [r[0] for r in rows] == [
+            f"{post}#aaaa1111-1111-1111-1111-111111111111",
+            f"{post}#bbbb2222-2222-2222-2222-222222222222",
+        ]
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_retry_skips_pause_when_siblings_dispatched(self, mock_fetch, config, task_dict, tmp_path):
+        from agent.db import AGENT_SCHEMA, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+        manifest = config.temp_dir / f"{slug}_media.json"
+        manifest.write_text(json.dumps({"url": post, "total": 1}), encoding="utf-8")
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#{vid}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.close()
+
+        mock_fetch.return_value = (
+            f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+        )
+        result = step_substack_embedded_media(task_dict, config)
+        assert "media ready" in result
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_download_rejects_blocked_endpoint(self, mock_run, config, task_dict):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        meta_path = config.temp_dir / f"{slug}_metadata.json"
+        meta_path.write_text(
+            json.dumps({
+                "video_id": "vid-1",
+                "domain": "127.0.0.1",
+            }),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="not allowed"):
+            step_substack_video_download(task_dict, config)
+        mock_run.assert_not_called()
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_native_video_enqueued_with_text_post(self, mock_fetch, config, task_dict, tmp_path):
