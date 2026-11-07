@@ -319,25 +319,3 @@ def step_git_push(
             step_name="git_push",
         ) from e
 
-
-# ── Vault pull (pre-flight) ───────────────────────────────────────────────────
-
-def step_git_pull_vault(config) -> str:
-    """Pull the latest vault state before starting a task.
-
-    Ensures See Also searches use the latest notes.
-
-    Args:
-        config: Config dataclass.
-
-    Returns:
-        Status message.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(config.vault_path), "pull"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        return f"Pull failed (continuing): {e.stderr.strip()}"

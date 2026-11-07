@@ -12,7 +12,8 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.webhook import app, _format_elapsed, _compute_staleness, slugify
+from agent.core import slugify
+from agent.webhook import app, _format_elapsed, _compute_staleness
 from agent.db import (
     AGENT_SCHEMA, LOGS_SCHEMA,
     create_task, init_db, resume_tasks_by_reason,

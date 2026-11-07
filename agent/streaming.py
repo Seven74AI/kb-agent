@@ -4,7 +4,6 @@ Core utilities:
 - stream_to_logs: Reads subprocess stdout/stderr line-by-line, writes to logs.db.
 - stream_both: Streams both stdout and stderr simultaneously.
 - run_with_streaming: Launches an async subprocess with live streaming.
-- read_logs: Reads recent log entries for a task step.
 
 Process management (see CONTEXT.md):
 - No timeouts on steps — HTTP calls have built-in ~30s timeouts.
@@ -15,7 +14,6 @@ Process management (see CONTEXT.md):
 
 import asyncio
 import sqlite3
-from pathlib import Path
 
 
 async def stream_to_logs(
@@ -130,70 +128,6 @@ async def run_with_streaming(
     )
 
     return proc
-
-
-async def wait_with_logging(
-    proc: asyncio.subprocess.Process,
-    logs_conn: sqlite3.Connection,
-    task_id: str,
-    step_name: str,
-) -> int:
-    """Wait for a subprocess to complete, logging the exit status.
-
-    Args:
-        proc: The subprocess handle.
-        logs_conn: SQLite connection to logs.db.
-        task_id: The task UUID.
-        step_name: Step name for log entries.
-
-    Returns:
-        The process return code.
-    """
-    returncode = await proc.wait()
-
-    with logs_conn:
-        logs_conn.execute(
-            "INSERT INTO step_logs (task_id, step_name, stream, content) "
-            "VALUES (?, ?, 'stderr', ?)",
-            (task_id, step_name, f"[consumer] Process exited with code {returncode}"),
-        )
-
-    return returncode
-
-
-def read_logs(logs_path: Path, task_id: str, step_name: str | None = None,
-              limit: int = 100) -> list[dict]:
-    """Read recent log entries for a task step.
-
-    Args:
-        logs_path: Path to logs.db.
-        task_id: Task UUID to filter by.
-        step_name: Optional step name filter.
-        limit: Max entries to return.
-
-    Returns:
-        List of log entry dicts with step_name, stream, content, logged_at.
-    """
-    conn = sqlite3.connect(str(logs_path))
-    conn.row_factory = sqlite3.Row
-
-    if step_name:
-        rows = conn.execute(
-            "SELECT step_name, stream, content, logged_at FROM step_logs "
-            "WHERE task_id = ? AND step_name = ? "
-            "ORDER BY logged_at DESC LIMIT ?",
-            (task_id, step_name, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT step_name, stream, content, logged_at FROM step_logs "
-            "WHERE task_id = ? "
-            "ORDER BY logged_at DESC LIMIT ?",
-            (task_id, limit),
-        ).fetchall()
-
-    conn.close()
-    return [dict(r) for r in rows]
 
 
 def log_progress(

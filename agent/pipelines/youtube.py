@@ -10,11 +10,9 @@ knowledge-base skill). Diarization mandatory for all video content.
 """
 
 import json
-import os
 import re
 import shutil
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,7 +25,6 @@ from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
-    MAX_QUALITY_RETRIES,
     VIDEO_DENSITY_MIN,
     check_density as _check_density,
     ensure_h264,

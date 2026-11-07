@@ -45,7 +45,6 @@ def merge_speakers(diar_path, trans_path):
     t = json.load(open(trans_path))["segments"]
     out = []
     for seg in t:
-        mid = (seg["start"] + seg["end"]) / 2
         best, spk = -1, "SPEAKER_00"
         for s in d:
             ov = min(seg["end"], s["end"]) - max(seg["start"], s["start"])

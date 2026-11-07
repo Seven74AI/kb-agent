@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent.config import Config, load_config
+from agent.config import Config
 from agent.core.slugify import slugify
 from agent.quality import (
     count_fact_checks,
@@ -343,13 +343,3 @@ def write_comparison_report(
     html_path = out_dir / "review.html"
     html_path.write_text(build_review_html(entries), encoding="utf-8")
     return {"json": json_path, "html": html_path}
-
-
-def default_hermes_vault() -> Path:
-    import os
-
-    for key in ("HERMES_VAULT_PATH", "OBSIDIAN_VAULT_PATH"):
-        val = os.getenv(key)
-        if val:
-            return Path(val)
-    return load_config().vault_path

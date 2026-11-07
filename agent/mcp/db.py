@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from agent.config import Config
-from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db
+from agent.db import AGENT_SCHEMA, LOGS_SCHEMA
 
 
 def agent_db_path(config: Config) -> Path:

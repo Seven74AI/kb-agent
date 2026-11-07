@@ -17,10 +17,8 @@ Process management:
 
 import asyncio
 import inspect
-import os
 import sqlite3
 import traceback
-from pathlib import Path
 from typing import Any
 
 from agent.config import Config
@@ -350,7 +348,6 @@ class Consumer:
                 # Store PID in output if we launched a subprocess
                 update_step(self.agent_conn, step_id, "done", str(output))
                 retries = 0  # Reset on success
-                last_error_type = None
 
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'

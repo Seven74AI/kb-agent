@@ -19,11 +19,10 @@ from agent.core import (
     list_tasks,
     plan_submission,
     resume_tasks,
-    slugify,
     submit_plan,
 )
 from agent.core.resume import normalize_reason_pattern
-from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, init_db, list_ingest_queue, remove_ingest
+from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
 
 app = Flask(__name__)
 config: Config = load_config()

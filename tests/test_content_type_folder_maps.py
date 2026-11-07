@@ -4,7 +4,7 @@ import pytest
 
 from agent.archival import CONTENT_TYPE_TO_MINIO_FOLDER, CONTENT_TYPE_TO_VAULT_FOLDER
 from agent.core import note as note_module
-from agent.pipelines import import_all_pipelines, list_pipelines
+from agent.pipelines import PIPELINES, import_all_pipelines
 from agent.pipelines import see_also as see_also_module
 
 
@@ -23,8 +23,9 @@ def test_video_content_types_map_to_videos_folder(content_type):
 
 
 def test_every_registered_pipeline_has_folder_mappings():
-    missing_vault = [ct for ct in list_pipelines() if ct not in CONTENT_TYPE_TO_VAULT_FOLDER]
-    missing_minio = [ct for ct in list_pipelines() if ct not in CONTENT_TYPE_TO_MINIO_FOLDER]
+    registered = sorted(PIPELINES.keys())
+    missing_vault = [ct for ct in registered if ct not in CONTENT_TYPE_TO_VAULT_FOLDER]
+    missing_minio = [ct for ct in registered if ct not in CONTENT_TYPE_TO_MINIO_FOLDER]
     assert missing_vault == [], f"missing vault map: {missing_vault}"
     assert missing_minio == [], f"missing minio map: {missing_minio}"
 

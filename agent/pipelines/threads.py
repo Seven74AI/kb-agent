@@ -16,16 +16,14 @@ Pitfalls handled:
 import json
 import re
 import subprocess
-import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.llm import LLMClient, get_llm_client
+from agent.llm import get_llm_client
 from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -649,7 +647,6 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     transcript_text = _format_transcript_for_llm(merged)
 
     # Build prompt
-    source_domain = urlparse(source_url).netloc or "threads.net"
     date_str = datetime.now().strftime("%Y-%m-%d")
     # Pre-compute reply context line
     if parent_context:
@@ -780,7 +777,6 @@ def step_threads_text_synthesize(task: dict, config: Config) -> str:
     llm = get_llm_client(config)
     llm.set_task_context(task["id"], logs_conn)
 
-    source_domain = urlparse(source_url).netloc or "threads.net"
     date_str = datetime.now().strftime("%Y-%m-%d")
 
     system_prompt = f"""You are a knowledge base curator specialized in social media content.

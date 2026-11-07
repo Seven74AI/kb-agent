@@ -12,7 +12,6 @@ Supports:
 """
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -93,7 +92,6 @@ def step_megadl_download(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
-    content_type = task.get("content_type", "mega")
 
     # Determine download directory
     dl_dir = Path(config.temp_dir) / f"mega_{slug}"
@@ -1073,7 +1071,6 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
     """
     slug = task.get("slug", task["id"][:8])
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
-    full_text_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
 
     passed, failures = quality_gate_book(note_path, config)
 

@@ -20,7 +20,7 @@ same functions.
 | `agent/pipelines/*.py` | Step functions invoked **only** by the consumer (after a task exists) |
 | `agent/quality.py` | Quality gates run inside pipeline steps |
 | `agent/archival.py` | MinIO / Git steps run inside pipelines |
-| `agent/see_also.py` (via `agent/pipelines/see_also.py`) | Vault search during `see_also` step |
+| `agent/pipelines/see_also.py` | Vault search during `see_also` step |
 | `scripts/tdah_daily_check.py` | Cron-style scheduled job (legacy Hermes kanban path; future `watch_source`) |
 | `scripts/rotate_logs.py` | Scheduled log archival (FTS on **logs**, not vault notes) |
 | `scripts/batch_transcribe.py`, `modal/kb_transcribe.py` | Batch transcription helpers (no submit/detect/status API) |
@@ -71,7 +71,7 @@ only **claims** existing `pending` rows.
 | File | Symbol | Purity | Dependencies | Must switch to core |
 |------|--------|--------|--------------|---------------------|
 | `agent/db.py` | `create_task` | IO | SQLite `agent.db`, step name list | **`core.submit_url`** (or `core.enqueue_task`) — single implementation; webhook + mega delegate + watch cron |
-| `agent/webhook.py` | `PIPELINE_STEPS` | Pure (data) | Step name lists per content type | **`core.pipeline_steps_for(content_type)`** — duplicated conceptually vs `agent/pipelines` registry |
+| `agent/core/submit.py` | `plan_submission` → `get_pipeline_names` | Mixed | `agent.pipelines` registry | **`core.pipeline_steps_for(content_type)`** — already unified via registry; core submit re-exports |
 | `agent/webhook.py` | `slugify` | Pure | — | **`core.slugify_url`** |
 | `agent/detection.py` | `dedup_check` | IO | `grep` on vault | Part of **`core.submit_url`** pre-checks (also used on HTTP submit only) |
 | `agent/detection.py` | `preflight_health` | IO | cookies, curl, `which megadl` | Part of **`core.submit_url`** (HTTP only) |
@@ -308,7 +308,7 @@ duplicated business logic across HTTP, MCP, cron, or consumer).
 
 - [ ] `agent/webhook.py` — `submit()` orchestration
 - [ ] `agent/db.py` — `create_task`
-- [ ] `agent/webhook.py` — `PIPELINE_STEPS`, `slugify`
+- [ ] `agent/core/submit.py` — `plan_submission` (step names via registry), `slugify` in core
 - [ ] `agent/pipelines/books.py` — future delegate → child tasks
 - [ ] `scripts/tdah_daily_check.py` — replace Hermes kanban with `submit_url`
 
@@ -357,8 +357,8 @@ duplicated business logic across HTTP, MCP, cron, or consumer).
    `Consumer._recover_orphans` overlap; consumer version is stricter (resets task
    with no running step). Consolidate in core before MCP exposes resume/status.
 
-2. **Dual pipeline step lists** — `webhook.PIPELINE_STEPS` vs `agent/pipelines`
-   registry must stay in sync manually; core should derive steps from one registry.
+2. **Pipeline step lists** — HTTP submit uses `plan_submission` →
+   `get_pipeline_names` from the `agent/pipelines` registry (no separate webhook dict).
 
 3. **Dual vault folder maps** — `see_also.CONTENT_TYPE_FOLDERS` vs
    `archival.CONTENT_TYPE_TO_VAULT_FOLDER`.
@@ -368,9 +368,6 @@ duplicated business logic across HTTP, MCP, cron, or consumer).
 
 5. **FTS unused for tasks/notes** — vault search is grep-only in consumer; MCP
    `search_notes` may need richer indexing later.
-
-6. **`step_git_pull_vault`** — defined in `archival.py` but **not wired** into any
-   pipeline; See Also may stale without explicit pull.
 
 ---
 
