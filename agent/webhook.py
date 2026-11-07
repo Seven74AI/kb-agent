@@ -217,6 +217,30 @@ ALLOWED_COOKIE_FILES = {
     "substack_cookies.txt": "Substack (native video + paywalled posts)",
     "rumble_cookies.txt": "Rumble (yt-dlp netscape format)",
 }
+MAX_COOKIE_UPLOAD_BYTES = 1 * 1024 * 1024
+
+
+def _netscape_cookie_upload_error(payload: bytes) -> str | None:
+    """Return a client error message when cookie bytes are invalid, else None."""
+    if len(payload) > MAX_COOKIE_UPLOAD_BYTES:
+        return f"cookie file exceeds {MAX_COOKIE_UPLOAD_BYTES} byte limit"
+    if not payload.strip():
+        return "cookie file is empty"
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return "cookie file must be UTF-8 text"
+    lines = text.lstrip("\ufeff").splitlines()
+    non_empty = [ln for ln in lines if ln.strip()]
+    if not non_empty:
+        return "cookie file is empty"
+    header = non_empty[0].strip().lower()
+    if not (
+        header.startswith("# netscape http cookie file")
+        or header.startswith("# http cookie file")
+    ):
+        return "cookie file must be Netscape HTTP Cookie File format"
+    return None
 
 
 @app.route("/upload-cookies", methods=["POST"])
@@ -239,13 +263,18 @@ def upload_cookies():
     if not uploaded_file or uploaded_file.filename == "":
         return jsonify({"error": "cookie_file is required"}), 400
 
+    payload = uploaded_file.read()
+    cookie_err = _netscape_cookie_upload_error(payload)
+    if cookie_err:
+        return jsonify({"error": cookie_err}), 400
+
     # Ensure cookies directory exists
     cookie_dir = config.cookie_dir
     cookie_dir.mkdir(parents=True, exist_ok=True)
 
     # Save the file
     dest_path = cookie_dir / cookie_type
-    uploaded_file.save(str(dest_path))
+    dest_path.write_bytes(payload)
 
     # Set permissions: read/write for owner only (chmod 600)
     os.chmod(dest_path, stat.S_IRUSR | stat.S_IWUSR)

@@ -14,6 +14,7 @@ sys.path.insert(0, "/root/kb-agent")
 from agent.config import load_config  # noqa: E402
 from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
+from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
 
 MAIN = "https://www.terragrandir.com/conferences-tdah-adulte-2026/"
 CDN = "https://vz-46d29c85-ed.b-cdn.net"
@@ -46,6 +47,7 @@ def sh(cmd, **kw):
 
 
 def fetch(url, headers=None):
+    _assert_fetch_url_allowed(url)
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
     return urllib.request.urlopen(req, timeout=40).read().decode("utf-8", "replace")
 

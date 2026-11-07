@@ -23,6 +23,7 @@ import traceback
 from typing import Any
 
 logger = logging.getLogger(__name__)
+detail_logger = logging.getLogger(__name__ + ".detail")
 
 from agent.config import Config
 from agent.db import (
@@ -387,8 +388,14 @@ class Consumer:
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
                 error_msg = sanitize_visible_message(str(e))
-                logger.exception(
-                    "[consumer] Step '%s' StepError (%s)",
+                logger.error(
+                    "[consumer] Step '%s' StepError (%s): %s",
+                    step_name,
+                    error_type,
+                    error_msg,
+                )
+                detail_logger.exception(
+                    "[consumer] Step '%s' StepError (%s) (detail)",
                     step_name,
                     error_type,
                 )
@@ -443,8 +450,14 @@ class Consumer:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                logger.exception(
-                    "[consumer] Step '%s' unhandled exception",
+                error_msg = sanitize_visible_message(f"{type(e).__name__}: {e}")
+                logger.error(
+                    "[consumer] Step '%s' unhandled exception: %s",
+                    step_name,
+                    error_msg,
+                )
+                detail_logger.exception(
+                    "[consumer] Step '%s' unhandled exception (detail)",
                     step_name,
                 )
                 tb_summary = _format_stdout_traceback(e)
@@ -454,7 +467,6 @@ class Consumer:
                 )
                 # Fall back to step's on_error setting
                 _, default_on_error = STEP_REGISTRY.get(step_name, (None, "retry"))
-                error_msg = sanitize_visible_message(f"{type(e).__name__}: {e}")
                 self._log_error(
                     task_id,
                     step_name,

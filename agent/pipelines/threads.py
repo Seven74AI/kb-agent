@@ -61,6 +61,14 @@ THREADS_MAX_POSTS_PER_SESSION = 3
 THREADS_VIDEO_DENSITY_MIN = 100
 
 
+def _download_artifact_stem(task: dict) -> str:
+    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
+    if task.get("_batch_ingest"):
+        return task["id"]
+    slug = task.get("slug", task["id"][:8])
+    return _slug_path(slug)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> str:
@@ -349,7 +357,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
         JSON string: {"content_type": "threads_text" | "threads_video", "raw_page": "..."}
     """
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
+    stem = _download_artifact_stem(task)
 
     html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
@@ -381,7 +389,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
             parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
 
-    raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_threads_raw.json"
+    raw_path = Path(config.temp_dir) / f"{stem}_threads_raw.json"
     raw_path.write_text(
         json.dumps(
             {
@@ -510,8 +518,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
         Path to the downloaded video file.
     """
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
+    stem = _download_artifact_stem(task)
 
     html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
@@ -533,7 +540,10 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
         )
 
     # Download video with Referer header
-    output_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
+    if task.get("_batch_ingest"):
+        output_path = Path(config.temp_dir) / f"{stem}.mp4"
+    else:
+        output_path = Path(config.temp_dir) / f"{stem}_threads_video.mp4"
 
     try:
         _assert_fetch_url_allowed(video_url)

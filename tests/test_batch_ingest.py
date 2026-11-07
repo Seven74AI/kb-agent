@@ -158,7 +158,7 @@ class TestAppendToParent:
         assert row["media_appended"] == 1
         assert not list(config.temp_dir.glob("*.tmp"))
 
-    def test_append_parent_media_atomic_reappends_when_flag_without_marker(self, config, conn):
+    def test_append_parent_media_atomic_repairs_marker_when_flag_without_marker(self, config, conn):
         from agent.db import append_parent_media_atomic, media_append_marker, queue_ingest
 
         config.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +172,10 @@ class TestAppendToParent:
             media_kind="image",
         )
         raw = config.temp_dir / f"{parent}_raw.md"
-        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+        raw.write_text(
+            "# Article\n\nBody.\n\n## Image\n\nOCR text\n",
+            encoding="utf-8",
+        )
         conn.execute(
             "UPDATE ingest_queue SET media_appended = 1 WHERE id = ?",
             (ingest_id,),
@@ -181,7 +184,8 @@ class TestAppendToParent:
 
         assert append_parent_media_atomic(conn, ingest_id, raw, "Image", "OCR text") is True
         body = raw.read_text(encoding="utf-8")
-        assert "OCR text" in body
+        assert body.count("## Image") == 1
+        assert body.count("OCR text") == 1
         assert media_append_marker(ingest_id) in body
 
 
@@ -1037,6 +1041,90 @@ class TestBatchPipelineIdKeyedDownloadArtifacts:
         assert meta_a["source_url"] == rumble_url
         assert meta_b["source_url"] == rumble_url
         assert not (config.temp_dir / f"{shared_slug}.mp4").exists()
+
+    def test_embedded_instagram_reel_produces_id_keyed_video(self, config, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        (config.cookie_dir / "ig_cookies.txt").write_text(
+            "instagram.com\tTRUE\t/\tFALSE\t0\tsessionid\ttest\n",
+            encoding="utf-8",
+        )
+        ingest_id = "ingest-ig-reel-001"
+        shared_slug = "instagram.com_reel_ABC123"
+        q = {
+            "id": ingest_id,
+            "slug": shared_slug,
+            "url": "https://www.instagram.com/reel/ABC123/",
+            "content_type": "instagram_reel",
+        }
+
+        def fake_run(cmd, **_kw):
+            if "-o" in cmd or "--output" in cmd:
+                key = "-o" if "-o" in cmd else "--output"
+                out = Path(cmd[cmd.index(key) + 1])
+                target = out.with_suffix(".mp4") if out.suffix else Path(str(out) + ".mp4")
+                target.write_bytes(b"\x00" * 2000)
+                return MagicMock(returncode=0, stderr="", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr("agent.pipelines.instagram.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.pipelines.instagram.ensure_h264", lambda p: p)
+
+        path, err = batch_ingest._download_video(q, config)
+        assert err is None
+        assert path == config.temp_dir / f"{ingest_id}.mp4"
+        slug_reel = config.temp_dir / f"{shared_slug}_reel.mp4"
+        assert not slug_reel.exists()
+
+    def test_embedded_threads_video_same_url_different_parents_no_collision(
+        self, config, monkeypatch,
+    ):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.cookie_dir.mkdir(parents=True, exist_ok=True)
+        (config.cookie_dir / "threads_cookies.txt").write_text("# ok\n", encoding="utf-8")
+
+        threads_url = "https://www.threads.net/@user/post/XYZ"
+        shared_slug = "threads.net_user_post_XYZ"
+        video_html = (
+            '{"video_versions":[{"url":"https://example.com/threads-v.mp4",'
+            '"height":720}],"caption":{"text":"clip"},"permalink":"https://www.threads.com/'
+            '\\u0040user/post/XYZ","is_reply":false}<div class="_ab6c">x</div>'
+        )
+
+        monkeypatch.setattr(
+            "agent.pipelines.threads._curl_threads",
+            lambda *_a, **_kw: video_html,
+        )
+
+        def fake_run(cmd, **_kw):
+            if "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr("agent.pipelines.threads.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.pipelines.threads.ensure_h264", lambda p: p)
+
+        id_a = "ingest-threads-parent-a"
+        id_b = "ingest-threads-parent-b"
+        for ingest_id in (id_a, id_b):
+            q = {
+                "id": ingest_id,
+                "slug": shared_slug,
+                "url": threads_url,
+                "content_type": "threads_video",
+            }
+            path, err = batch_ingest._download_video(q, config)
+            assert err is None
+            assert path == config.temp_dir / f"{ingest_id}.mp4"
+            assert (config.temp_dir / f"{ingest_id}_threads_raw.json").is_file()
+
+        assert not (config.temp_dir / f"{shared_slug}_threads_video.mp4").exists()
+        assert (config.temp_dir / f"{id_a}.mp4").exists()
+        assert (config.temp_dir / f"{id_b}.mp4").exists()
 
 
 class TestCorruptJsonHandling:

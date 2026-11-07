@@ -469,6 +469,66 @@ def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     return row is not None
 
 
+def _is_superseded_parent_error(error: str | None) -> bool:
+    return bool(error and "superseded" in error.lower())
+
+
+def _deferral_cycle_cmp(deferral: dict) -> str:
+    """SQL comparison operator for deferral-generation freshness."""
+    return ">" if int(deferral.get("media_changed") or 0) else ">="
+
+
+def _deferral_terminal_parent_fresh(conn: sqlite3.Connection, slug: str, deferral: dict) -> bool:
+    """Inline parent synthesis finished in the current deferral generation."""
+    conn.row_factory = sqlite3.Row
+    anchor = deferral["updated_at"]
+    op = _deferral_cycle_cmp(deferral)
+    row = conn.execute(
+        f"SELECT error FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
+        "LIMIT 1",
+        (slug, anchor),
+    ).fetchone()
+    if row is None:
+        return False
+    err = row["error"] if hasattr(row, "keys") else row[0]
+    return not _is_superseded_parent_error(err)
+
+
+def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, deferral: dict) -> bool:
+    """Batch *_synthesize finished in the current deferral generation."""
+    conn.row_factory = sqlite3.Row
+    anchor = deferral["updated_at"]
+    op = _deferral_cycle_cmp(deferral)
+    row = conn.execute(
+        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
+        "LIMIT 1",
+        (slug, anchor),
+    ).fetchone()
+    return row is not None
+
+
+def supersede_stale_deferral_synthesize_tasks(
+    conn: sqlite3.Connection, slug: str, deferral: dict,
+) -> int:
+    """Fail terminal *_synthesize rows from prior deferral generations so batch may re-dispatch."""
+    if not slug or deferral is None:
+        return 0
+    anchor = deferral["updated_at"]
+    with conn:
+        cur = conn.execute(
+            """
+            UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type GLOB '*_synthesize'
+            AND status IN ('pending', 'in_progress', 'paused', 'done', 'completed')
+            AND datetime(updated_at) <= datetime(?)
+            """,
+            ("superseded by deferral media cycle", slug, anchor),
+        )
+        return cur.rowcount
+
+
 def has_synthesize_task_signal(conn: sqlite3.Connection, slug: str) -> bool:
     """True when batch synthesis is queued, in flight, or finished (any non-``failed`` *_synthesize)."""
     return has_active_synthesize_task(conn, slug) or has_completed_synthesize_task(conn, slug)
@@ -481,12 +541,43 @@ def has_completed_parent_synthesis(
     vault_path: Path | None = None,
     temp_dir: Path | None = None,
 ) -> bool:
-    """True when synthesis for *slug* already finished on the parent or batch path.
+    """True when synthesis for *slug* already finished for the active deferral generation.
 
     Used to make parent inline synthesis and batch ``*_synthesize`` dispatch
-    mutually exclusive: once any owner completes, the other path must stand down.
+    mutually exclusive. Terminal parent rows superseded by batch, stale
+    ``*_synthesize`` tasks, and vault notes from prior cycles do not count.
     """
     conn.row_factory = sqlite3.Row
+    raw_path = (temp_dir / f"{slug}_raw.md") if temp_dir is not None else None
+    deferral = get_parent_media_deferral(conn, slug)
+
+    if deferral is not None:
+        if _deferral_terminal_parent_fresh(conn, slug, deferral):
+            return True
+        if _deferral_synthesize_terminal_fresh(conn, slug, deferral):
+            return True
+        if count_pending_media(conn, slug) > 0:
+            return False
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (slug,),
+        ).fetchone()
+        actual = row["n"] if hasattr(row, "keys") else row[0]
+        if actual != deferral["expected_total"]:
+            return False
+        if raw_path is None:
+            return False
+        if not parent_media_complete(conn, slug, raw_path=raw_path):
+            return False
+        if vault_path is None:
+            return False
+        note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
+        if not note.is_file():
+            return False
+        if int(deferral.get("media_changed") or 0):
+            return False
+        return True
+
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') "
@@ -496,27 +587,6 @@ def has_completed_parent_synthesis(
     if row is not None:
         return True
     if has_completed_synthesize_task(conn, slug):
-        return True
-    if vault_path is not None:
-        note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
-        if not note.is_file():
-            return False
-        if count_pending_media(conn, slug) > 0:
-            return False
-        deferral = get_parent_media_deferral(conn, slug)
-        if deferral is None:
-            return False
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-            (slug,),
-        ).fetchone()
-        actual = row["n"] if hasattr(row, "keys") else row[0]
-        if actual != deferral["expected_total"]:
-            return False
-        if temp_dir is not None:
-            raw_path = temp_dir / f"{slug}_raw.md"
-            if not parent_media_complete(conn, slug, raw_path=raw_path):
-                return False
         return True
     return False
 
@@ -673,7 +743,11 @@ def append_parent_media_atomic(
             set_ingest_media_appended(conn, ingest_id)
         return True
     if media_flag:
-        pass
+        pending_text = text + f"\n\n{marker}\n"
+        tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
+        tmp_path.write_text(pending_text, encoding="utf-8")
+        os.replace(tmp_path, raw_path)
+        return True
     block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
     pending_text = text + block
     tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
@@ -733,7 +807,17 @@ def ensure_parent_media_deferral(
                 (parent_slug, source_url, content_type, expected_total)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(parent_slug) DO UPDATE SET
-                expected_total = MAX(expected_total, excluded.expected_total)
+                expected_total = MAX(parent_media_deferral.expected_total, excluded.expected_total),
+                updated_at = CASE
+                    WHEN excluded.expected_total > parent_media_deferral.expected_total
+                    THEN datetime('now')
+                    ELSE parent_media_deferral.updated_at
+                END,
+                media_changed = CASE
+                    WHEN excluded.expected_total > parent_media_deferral.expected_total
+                    THEN 1
+                    ELSE parent_media_deferral.media_changed
+                END
             """,
             (parent_slug, source_url, content_type, int(expected_total)),
         )
@@ -906,8 +990,10 @@ def claim_task(conn: sqlite3.Connection) -> dict | None:
 def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
     """Get the next pending step for a task, ordered by step_order.
 
-    A paused ``synthesize_note`` with a deferred-media reason blocks later pending
-    steps so the consumer cannot skip ahead to ``quality_gate`` / ``minio_upload``.
+    Any paused step before the next pending step whose task/step reason matches
+    :func:`is_deferred_media_pause` blocks the consumer from advancing past the
+    media gate (including skipping a paused ``substack_embedded_media`` to run
+    ``synthesize_note``).
 
     Args:
         conn: Agent database connection.
@@ -924,25 +1010,30 @@ def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
         """,
         (task_id,),
     ).fetchone()
-    synthesize_paused = conn.execute(
+    task_row = conn.execute(
+        "SELECT error FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    task_error = task_row[0] if task_row else None
+    pending_order = pending_row["step_order"] if pending_row is not None else None
+
+    paused_rows = conn.execute(
         """
         SELECT * FROM task_steps
-        WHERE task_id = ? AND name = 'synthesize_note' AND status = 'paused'
-        ORDER BY step_order LIMIT 1
+        WHERE task_id = ? AND status = 'paused'
+        ORDER BY step_order
         """,
         (task_id,),
-    ).fetchone()
-    if synthesize_paused is not None:
-        task_row = conn.execute(
-            "SELECT error FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
-        task_error = task_row[0] if task_row else None
-        step_output = synthesize_paused["output"]
-        if is_deferred_media_pause(task_error) or is_deferred_media_pause(step_output):
-            if pending_row is None or (
-                synthesize_paused["step_order"] < pending_row["step_order"]
-            ):
-                return dict(synthesize_paused)
+    ).fetchall()
+    for paused in paused_rows:
+        step_output = paused["output"]
+        if not (
+            is_deferred_media_pause(task_error)
+            or is_deferred_media_pause(step_output)
+        ):
+            continue
+        if pending_order is None or paused["step_order"] < pending_order:
+            return dict(paused)
+
     if pending_row is None:
         return None
     return dict(pending_row)
@@ -957,6 +1048,10 @@ def update_step(conn: sqlite3.Connection, step_id: int, status: str, output: str
         status: New status ('running', 'done', 'failed', 'paused').
         output: Optional output text from the step.
     """
+    if output is not None:
+        from agent.notify import sanitize_visible_message
+
+        output = sanitize_visible_message(output)
     terminal = status in ("done", "failed", "paused")
     with conn:
         if status == "running":
@@ -1000,6 +1095,9 @@ def fail_task(conn: sqlite3.Connection, task_id: str, error: str):
         task_id: The task UUID.
         error: Human-readable error description.
     """
+    from agent.notify import sanitize_visible_message
+
+    error = sanitize_visible_message(error)
     with conn:
         conn.execute(
             "UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ?",
@@ -1015,6 +1113,9 @@ def pause_task(conn: sqlite3.Connection, task_id: str, reason: str):
         task_id: The task UUID.
         reason: Why the task is paused (e.g., 'cookies invalid').
     """
+    from agent.notify import sanitize_visible_message
+
+    reason = sanitize_visible_message(reason)
     with conn:
         conn.execute(
             "UPDATE tasks SET status = 'paused', error = ?, updated_at = datetime('now') WHERE id = ?",

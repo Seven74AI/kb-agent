@@ -43,6 +43,7 @@ from agent.db import (  # noqa: E402
     finish_batch_run,
     get_parent_media_deferral,
     has_completed_parent_synthesis,
+    supersede_stale_deferral_synthesize_tasks,
     init_db,
     append_parent_media_atomic,
     parent_media_complete,
@@ -250,6 +251,13 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                 content_type=f"{q['content_type']}_synthesize", slug=q["slug"],
                 tags=q.get("tags"),
             )
+            if rr.get("status") == "error":
+                err = rr.get("error") or "dispatch_synthesize failed"
+                update_ingest_status(conn, q["id"], "failed", error=err)
+                failed += 1
+                causes.append(f"{q['slug']}: {err}")
+                print(f"  [warn] {q['slug']}: dispatch failed ({err})")
+                continue
             update_ingest_status(conn, q["id"], "dispatched")
             dispatched += 1
             print(f"  [dispatch] {q['slug']} -> {rr.get('task_id', rr.get('status'))}")
@@ -380,6 +388,8 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
             f"(rows {actual}/{expected}, raw={raw_path.name})"
         )
         return False
+    if int(deferral.get("media_changed") or 0):
+        supersede_stale_deferral_synthesize_tasks(conn, parent_slug, deferral)
     rr = dispatch_synthesize(
         deferral["source_url"], config, conn,
         content_type=f"{deferral['content_type']}_synthesize", slug=parent_slug,
