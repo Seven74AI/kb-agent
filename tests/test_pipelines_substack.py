@@ -13,6 +13,7 @@ sys.path.insert(0, str(WORKSPACE))
 
 from agent.config import Config
 from agent.detection import _detect_substack_subtype
+from agent.exceptions import ErrorType, StepError
 from agent.pipelines.web import (
     step_substack_cleanup,
     step_substack_embedded_media,
@@ -305,10 +306,11 @@ class TestSubstackVideoMetadata:
 
     @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._enqueue_embedded_media")
-    def test_no_html_is_noop(self, mock_enqueue, mock_fetch, config, task_dict):
+    def test_empty_html_raises_retry(self, mock_enqueue, mock_fetch, config, task_dict):
         mock_fetch.return_value = ""
-        result = step_substack_embedded_media(task_dict, config)
-        assert result == "no html fetched"
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.RETRY
         mock_enqueue.assert_not_called()
 
 
