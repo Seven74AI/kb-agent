@@ -461,6 +461,12 @@ class Consumer:
         from agent.pipelines import get_pipeline
         content_type = task.get("content_type", "web")
         pipeline = get_pipeline(content_type)
+        if pipeline is None:
+            raise StepError(
+                f"No pipeline registered for content_type={content_type!r}",
+                error_type=ErrorType.FAIL,
+                step_name=step_name,
+            )
         entry = None
         if pipeline:
             for s in pipeline:

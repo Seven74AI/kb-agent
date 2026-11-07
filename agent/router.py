@@ -16,7 +16,15 @@ API_URL = "https://openrouter.ai/api/alpha/decisions"
 
 # Platforms the regex first pass resolves directly — no Jev needed.
 SIMPLE_PLATFORMS = frozenset(
-    {"youtube", "instagram_reel", "instagram_post", "bunny_stream", "wikispooks", "book"}
+    {
+        "youtube",
+        "instagram_reel",
+        "instagram_post",
+        "bunny_stream",
+        "wikispooks",
+        "book",
+        "rumble",
+    }
 )
 
 # Platforms whose subtype requires inspecting fetched content (Jev's job).
@@ -37,6 +45,7 @@ CRITERIA = {
     "book_batch": "A book archive or multiple books (zip/rar/7z or many book files)",
     "bunny_stream": "A TDAH conference talk (terragrandir.com or player.mediadelivery.net)",
     "wikispooks": "A Wikispooks.org wiki page",
+    "rumble": "A Rumble video (rumble.com/v… or rumble.com/embed/…)",
     "web": "A generic web article or page from any other domain",
 }
 
