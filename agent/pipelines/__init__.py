@@ -50,13 +50,14 @@ def import_all_pipelines() -> None:
 def get_pipeline(content_type: str) -> list[Step] | None:
     """Get the pipeline steps for a content type.
 
-    Falls back to 'web' pipeline if content_type not registered. Auto-imports
-    the pipeline modules on first call so callers that never import them (e.g.
-    the standalone batch collector) still get a populated registry.
+    Returns ``None`` when ``content_type`` is not registered (no silent web
+    fallback). Auto-imports the pipeline modules on first call so callers that
+    never import them (e.g. the standalone batch collector) still get a populated
+    registry.
     """
     if not _all_imported:
         import_all_pipelines()
-    return PIPELINES.get(content_type, PIPELINES.get("web"))
+    return PIPELINES.get(content_type)
 
 
 def list_pipelines() -> list[str]:
