@@ -475,6 +475,21 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                 error_type=ErrorType.PAUSE,
                 step_name="substack_embedded_media",
             )
+        manifest_path = Path(config.temp_dir, f"{slug}_media.json")
+        had_manifest = manifest_path.exists()
+        from agent.db import AGENT_SCHEMA, count_pending_media, init_db
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            pending = count_pending_media(conn, slug)
+        finally:
+            conn.close()
+        if had_manifest or pending > 0:
+            raise StepError(
+                "awaiting media — re-fetch found no embeds but siblings pending",
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
         return "no embedded media"
 
     manifest_path = Path(config.temp_dir, f"{slug}_media.json")

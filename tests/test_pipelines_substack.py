@@ -350,6 +350,51 @@ class TestSubstackVideoMetadata:
         assert result == "no embedded media"
 
     @patch("agent.pipelines.web._fetch_substack_html")
+    def test_zero_embeds_with_pending_siblings_pauses_not_inline(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db, queue_ingest
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        mock_fetch.return_value = "<html><body>transient empty shell</body></html>"
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        queue_ingest(
+            conn, f"{post}#vid", "substack_video", slug,
+            parent_slug=slug, media_kind="video", status="queued",
+        )
+        conn.close()
+
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "re-fetch found no embeds but siblings pending" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_zero_embeds_with_deferral_manifest_pauses_not_inline(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"url": post, "content_type": "substack_text", "total": 2}),
+            encoding="utf-8",
+        )
+        mock_fetch.return_value = "<html><body>cookie loss — no embeds in html</body></html>"
+
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "re-fetch found no embeds but siblings pending" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._enqueue_embedded_media")
     def test_empty_html_raises_retry(self, mock_enqueue, mock_fetch, config, task_dict):
         mock_fetch.return_value = ""
