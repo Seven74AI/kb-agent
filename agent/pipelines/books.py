@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from agent.archival import append_note_tags
 from agent.config import Config
 from agent.notify import sanitize_visible_message
-from agent.redact import prepare_ocr_reading_for_write, redact_http_urls_in_text, write_vault_note
+from agent.redact import redact_http_urls_in_text, write_vault_note
 from agent.pipelines.video_common import _artifact_stem
 from agent.db import init_db, LOGS_SCHEMA
 from agent.fetch_guard import _assert_fetch_url_allowed

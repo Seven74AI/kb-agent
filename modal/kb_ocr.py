@@ -12,7 +12,6 @@ Apache-2.0 and ungated — no HF token needed (the volume is still reused for th
 model cache, so downloads happen once).
 """
 
-import json
 import os
 import time
 

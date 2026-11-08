@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
-from agent.db import _persist_visible_error
 from agent.notify import scrub_outbound_visible_message
 from agent.redact import url_for_display
 
