@@ -142,10 +142,11 @@ def main(audio_dir: str = None, out_dir: str = ".", language: str = None, initia
         print("no .wav files found")
         return
     results = transcribe_batch.remote(items, language, initial_prompt, hotwords)
+    from agent.redact import write_transcription_sidecar_json
+
     for r in results:
         name = r["name"]
         for k in ("diarization", "transcript"):
             p = os.path.join(out_dir, f"{name}.{k}.json")
-            with open(p, "w") as f:
-                json.dump(r[k], f, indent=2, ensure_ascii=False)
+            write_transcription_sidecar_json(p, r[k], indent=2)
             print(f"wrote {p}")

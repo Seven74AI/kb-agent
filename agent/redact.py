@@ -163,7 +163,28 @@ def _redact_segment_text_fields(segments: Any) -> None:
             continue
         text = seg.get("text")
         if isinstance(text, str):
-            seg["text"] = redact_http_urls_in_text(text)
+            seg["text"] = prepare_ocr_reading_for_write(text)
+
+
+def redact_transcription_sidecar_payload(data: dict) -> dict:
+    """Return a copy of diarization/transcript JSON with segment text fully scrubbed."""
+    out = copy.deepcopy(data)
+    _redact_segment_text_fields(out.get("segments"))
+    return out
+
+
+def write_transcription_sidecar_json(
+    path: Path,
+    data: dict,
+    *,
+    indent: int | None = 2,
+) -> None:
+    """Persist diarization/transcript sidecar JSON with URL + credential scrub on segment text."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    redacted = redact_transcription_sidecar_payload(data)
+    payload = json.dumps(redacted, indent=indent, ensure_ascii=False)
+    path.write_text(payload, encoding="utf-8")
 
 
 def redact_merged_transcript_payload(data: dict) -> dict:

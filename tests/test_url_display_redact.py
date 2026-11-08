@@ -1,6 +1,8 @@
 """Regression: outward surfaces never emit http(s) URLs with query or fragment."""
 
+import json
 import sqlite3
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,7 +14,9 @@ from agent.redact import (
     failure_text_for_display,
     prepare_ocr_reading_for_write,
     redact_http_urls_in_text,
+    redact_merged_transcript_payload,
     scrub_vault_note_content,
+    write_transcription_sidecar_json,
     write_vault_note,
 )
 from agent.core.status import get_task, list_tasks
@@ -110,6 +114,51 @@ def test_prepare_ocr_reading_for_write_scrubs_credentials_and_urls():
     assert "Bearer [redacted]" in scrubbed
     assert "token=secret" not in scrubbed
     assert "https://cdn.example.com/video.mp4" in scrubbed
+
+
+def test_write_transcription_sidecar_json_scrubs_credentials_and_urls(tmp_path):
+    payload = {
+        "language": "en",
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "text": (
+                    "api_key=spokenleak sessionid=spokencookie "
+                    f"see {TOKENIZED}"
+                ),
+            },
+        ],
+    }
+    out = tmp_path / "clip.transcript.json"
+    write_transcription_sidecar_json(out, payload)
+    parsed = json.loads(out.read_text(encoding="utf-8"))
+    text = parsed["segments"][0]["text"]
+    assert "spokenleak" not in text
+    assert "spokencookie" not in text
+    assert "[credential redacted]" in text
+    assert "sessionid=[REDACTED]" in text
+    assert "token=secret" not in text
+    assert "https://cdn.example.com/video.mp4" in text
+
+
+def test_redact_merged_transcript_payload_scrubs_credentials_in_segments():
+    raw = {
+        "segments": [
+            {"time": 0.0, "speaker": "SPEAKER_00", "text": "api_key=mergeleak"},
+        ],
+    }
+    merged = redact_merged_transcript_payload(raw)
+    assert "mergeleak" not in merged["segments"][0]["text"]
+    assert "[credential redacted]" in merged["segments"][0]["text"]
+
+
+def test_kb_transcribe_local_entrypoint_wires_transcription_sidecar_scrub():
+    text = Path(__file__).resolve().parents[1].joinpath("modal", "kb_transcribe.py").read_text(
+        encoding="utf-8",
+    )
+    assert "write_transcription_sidecar_json" in text
+    assert "json.dump(r[k]" not in text
 
 
 def test_prepare_vault_note_for_write_redacts_body_and_frontmatter(tmp_path):
