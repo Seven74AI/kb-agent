@@ -5,6 +5,7 @@ The simplest pipeline. No cookies, no video. Verifies the entire architecture.
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -16,6 +17,9 @@ from urllib.parse import urljoin, urlparse
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
+from agent.notify import sanitize_visible_message
+
+logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
 from agent.archival import append_note_tags
@@ -509,6 +513,12 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     parent_slug=parent_slug, media_kind="image",
                 )
             except Exception:
+                logger.warning(
+                    "embedded media enqueue failed (image) parent=%s url=%s",
+                    parent_slug,
+                    img_url,
+                    exc_info=True,
+                )
                 continue
             if _submit_embed_succeeded(result):
                 success_count += 1
@@ -519,6 +529,12 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     parent_slug=parent_slug, media_kind="video",
                 )
             except Exception:
+                logger.warning(
+                    "embedded media enqueue failed (youtube) parent=%s id=%s",
+                    parent_slug,
+                    vid,
+                    exc_info=True,
+                )
                 continue
             if _submit_embed_succeeded(result):
                 success_count += 1
@@ -529,6 +545,12 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     parent_slug=parent_slug, media_kind="video",
                 )
             except Exception:
+                logger.warning(
+                    "embedded media enqueue failed (rumble) parent=%s url=%s",
+                    parent_slug,
+                    url,
+                    exc_info=True,
+                )
                 continue
             if _submit_embed_succeeded(result):
                 success_count += 1
@@ -539,6 +561,12 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     parent_slug=parent_slug, media_kind="video",
                 )
             except Exception:
+                logger.warning(
+                    "embedded media enqueue failed (native video) parent=%s id=%s",
+                    parent_slug,
+                    vid,
+                    exc_info=True,
+                )
                 continue
             if _submit_embed_succeeded(result):
                 success_count += 1
@@ -789,7 +817,7 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
         Path to the raw markdown file.
 
     Raises:
-        ValueError: If content is too short or extraction fails.
+        StepError: On curl/parse failures (RETRY) or content too short (FAIL).
     """
     url = task["source_url"]
     _assert_fetch_url_allowed(url)
@@ -810,18 +838,32 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
     )
 
     if result.returncode != 0:
-        raise RuntimeError(f"Firecrawl curl failed: {result.stderr.strip()}")
+        raise StepError(
+            sanitize_visible_message(
+                f"Firecrawl curl failed: {result.stderr.strip()[:200]}",
+            ),
+            error_type=ErrorType.RETRY,
+            step_name="firecrawl_extract",
+        )
 
     try:
         data = json.loads(result.stdout)
         markdown = data["data"]["markdown"]
     except (json.JSONDecodeError, KeyError) as e:
-        raise ValueError(f"Firecrawl response parse error: {e}") from e
+        raise StepError(
+            sanitize_visible_message(f"Firecrawl response parse error: {e}"),
+            error_type=ErrorType.RETRY,
+            step_name="firecrawl_extract",
+        ) from e
 
     if len(markdown) < 500:
-        raise ValueError(
-            f"Content too short ({len(markdown)} chars) — "
-            f"possible 404 or empty page"
+        raise StepError(
+            sanitize_visible_message(
+                f"Content too short ({len(markdown)} chars) — "
+                f"possible 404 or empty page",
+            ),
+            error_type=ErrorType.FAIL,
+            step_name="firecrawl_extract",
         )
 
     raw_path = Path(config.temp_dir) / f"{slug}_raw.md"

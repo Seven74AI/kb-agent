@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
-from agent.exceptions import StepError
+from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.web import (
     step_firecrawl_extract,
@@ -114,6 +114,65 @@ def test_firecrawl_extract_curl_disables_redirects(mock_run, config, task_dict, 
     cmd = mock_run.call_args[0][0]
     assert "--max-redirs" in cmd
     assert cmd[cmd.index("--max-redirs") + 1] == "0"
+
+
+@patch("agent.pipelines.web.subprocess.run")
+def test_firecrawl_extract_curl_failure_raises_step_error_retry(
+    mock_run, config, task_dict,
+):
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="connection reset")
+    with pytest.raises(StepError) as exc:
+        step_firecrawl_extract(task_dict, config)
+    assert exc.value.error_type == ErrorType.RETRY
+    assert exc.value.step_name == "firecrawl_extract"
+    assert "Firecrawl curl failed" in str(exc.value)
+
+
+@patch("agent.pipelines.web.subprocess.run")
+def test_firecrawl_extract_short_content_raises_step_error_fail(
+    mock_run, config, task_dict, tmp_path,
+):
+    config.temp_dir = tmp_path / "tmp"
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    mock_run.return_value = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"data": {"markdown": "# Hi\n\nshort"}}),
+        stderr="",
+    )
+    with pytest.raises(StepError) as exc:
+        step_firecrawl_extract(task_dict, config)
+    assert exc.value.error_type == ErrorType.FAIL
+    assert "Content too short" in str(exc.value)
+
+
+def test_enqueue_embedded_media_logs_submit_failures(config, caplog):
+    import logging
+
+    from agent.pipelines.web import _enqueue_embedded_media
+
+    caplog.set_level(logging.WARNING, logger="agent.pipelines.web")
+
+    with patch("agent.core.submit.submit_ingest", side_effect=RuntimeError("db locked")):
+        with patch("agent.db.init_db") as mock_init:
+            conn = MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"n": 0}
+            mock_init.return_value = conn
+            stats = _enqueue_embedded_media(
+                "parent_slug",
+                ["https://example.com/img.png"],
+                [],
+                [],
+                [],
+                "https://example.com/post",
+                config,
+                None,
+            )
+
+    assert stats.success_count == 0
+    warns = [r for r in caplog.records if "embedded media enqueue failed" in r.message]
+    assert len(warns) == 1
+    assert warns[0].exc_info is not None
 
 
 # ── _estimate_tokens tests ────────────────────────────────────────────────────

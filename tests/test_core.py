@@ -26,7 +26,7 @@ from agent.core import (
 )
 from agent.core.bulk import expand_youtube_playlist
 from agent.core.resume import ResumeReasonError
-from agent.core.submit import plan_submission, submit_plan
+from agent.core.submit import plan_submission, submit_ingest, submit_plan
 from agent.db import (
     AGENT_SCHEMA,
     LOGS_SCHEMA,
@@ -125,6 +125,39 @@ def test_slugify_instagram_comment_preserves_comment_id():
     assert a.endswith("_c_999888777")
     assert b.endswith("_c_111222333")
     assert a != b
+
+
+REEL_BASE = "https://www.instagram.com/reel/ABC123/"
+
+
+def test_submit_ingest_instagram_comment_slugs_differ(core_config, agent_conn):
+    """INVARIANT: slug derives from the same content_type used for routing."""
+    url_a = f"{REEL_BASE}?comment_id=999888777"
+    url_b = f"{REEL_BASE}?comment_id=111222333"
+    out_a = submit_ingest(url_a, core_config, agent_conn)
+    out_b = submit_ingest(url_b, core_config, agent_conn)
+    assert out_a["content_type"] == "instagram_comment"
+    assert out_b["content_type"] == "instagram_comment"
+    assert out_a["slug"] != out_b["slug"]
+    assert out_a["slug"].endswith("_c_999888777")
+    assert out_b["slug"].endswith("_c_111222333")
+
+
+def test_submit_ingest_instagram_reel_slug_unchanged(core_config, agent_conn):
+    out = submit_ingest(REEL_BASE, core_config, agent_conn)
+    assert out["content_type"] == "instagram_reel"
+    assert "_c_" not in out["slug"]
+    assert out["slug"] == slugify(REEL_BASE, content_type="instagram_reel")
+
+
+def test_plan_submission_and_submit_ingest_agree_on_slug(core_config, agent_conn, monkeypatch):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    url = f"{REEL_BASE}?comment_id=42"
+    plan = plan_submission(url, core_config)
+    assert plan["status"] == "pending"
+    ingest = submit_ingest(url, core_config, agent_conn)
+    assert ingest["slug"] == plan["slug"]
+    assert ingest["content_type"] == plan["content_type"]
 
 
 def test_plan_submission_normalizes_url_before_dedup(core_config, monkeypatch):

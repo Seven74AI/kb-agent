@@ -173,7 +173,7 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
 
     platform = detect_platform(url)
     subtype = content_type or detect_content_subtype(url, platform)
-    slug = slugify(url)
+    slug = slugify(url, content_type=subtype)
 
     ingest_id, created = queue_ingest(
         agent_conn, url, subtype, slug, tags=tags,

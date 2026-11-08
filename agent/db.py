@@ -798,7 +798,12 @@ def _embedded_media_landing_anchor(conn: sqlite3.Connection, slug: str) -> str |
     return latest or None
 
 
-def _embedded_context_synthesis_complete(conn: sqlite3.Connection, slug: str) -> bool:
+def _embedded_context_synthesis_complete(
+    conn: sqlite3.Connection,
+    slug: str,
+    *,
+    temp_dir: Path | None = None,
+) -> bool:
     """Generation-fresh completion when embedded media implies batch-owned synthesis."""
     anchor = _embedded_media_landing_anchor(conn, slug)
     if anchor:
@@ -806,6 +811,8 @@ def _embedded_context_synthesis_complete(conn: sqlite3.Connection, slug: str) ->
             return True
         if _parent_terminal_after_anchor(conn, slug, anchor):
             return True
+        return False
+    if _slug_has_embedded_media_context(conn, slug, temp_dir):
         return False
     if has_completed_synthesize_task(conn, slug):
         return True
@@ -818,6 +825,7 @@ def _parent_synthesis_media_complete(
     *,
     deferral: dict | None,
     raw_path: Path | None,
+    temp_dir: Path | None = None,
 ) -> bool:
     """Fail-closed gate: every sibling dispatched and media verifiably landed."""
     if count_pending_media(conn, slug) > 0:
@@ -835,6 +843,23 @@ def _parent_synthesis_media_complete(
             return False
         return parent_media_complete(conn, slug, raw_path=raw_path)
     if _parent_sibling_media_count(conn, slug) > 0:
+        if raw_path is None:
+            return False
+        return parent_media_complete(conn, slug, raw_path=raw_path)
+    if _slug_has_media_manifest(temp_dir, slug):
+        if temp_dir is not None:
+            bootstrap_parent_media_deferral_from_manifest(conn, slug, temp_dir)
+        deferral = get_parent_media_deferral(conn, slug)
+        if deferral is None:
+            return False
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (slug,),
+        ).fetchone()
+        actual = row["n"] if hasattr(row, "keys") else row[0]
+        if actual != deferral["expected_total"]:
+            return False
         if raw_path is None:
             return False
         return parent_media_complete(conn, slug, raw_path=raw_path)
@@ -864,9 +889,15 @@ def has_completed_parent_synthesis(
 
     if deferral is not None or embedded:
         if not _parent_synthesis_media_complete(
-            conn, slug, deferral=deferral, raw_path=raw_path,
+            conn,
+            slug,
+            deferral=deferral,
+            raw_path=raw_path,
+            temp_dir=temp_dir,
         ):
             return False
+
+        deferral = get_parent_media_deferral(conn, slug)
 
         if deferral is not None:
             media_anchor = _deferral_media_landing_anchor(conn, slug, deferral)
@@ -896,7 +927,7 @@ def has_completed_parent_synthesis(
                         return True
             return False
 
-        return _embedded_context_synthesis_complete(conn, slug)
+        return _embedded_context_synthesis_complete(conn, slug, temp_dir=temp_dir)
 
     if _non_superseded_parent_terminal(conn, slug):
         return True

@@ -86,6 +86,22 @@ class TestFlaresolverrSsrf:
             _flaresolverr_get("http://169.254.169.254/latest/meta-data/")
         mock_run.assert_not_called()
 
+    @patch("agent.pipelines.rumble.subprocess.run")
+    def test_flaresolverr_curl_disables_redirects(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "solution": {"response": "<html></html>"},
+            }),
+            stderr="",
+        )
+        _flaresolverr_get("https://rumble.com/v12345-example")
+        cmd = mock_run.call_args[0][0]
+        assert "--max-redirs" in cmd
+        assert cmd[cmd.index("--max-redirs") + 1] == "0"
+        assert any("localhost:8191" in str(part) for part in cmd)
+
 
 class TestResolveRumble:
 
