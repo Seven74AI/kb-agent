@@ -3,7 +3,7 @@
 import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1380,6 +1380,196 @@ def test_fresh_deferral_generation_ignores_superseded_parent(tmp_path):
     conn.commit()
 
     assert has_completed_parent_synthesis(conn, slug) is False
+
+
+def test_has_completed_parent_synthesis_monotonic_pending_with_fresh_synth_deferral(
+    tmp_path,
+):
+    """Fresh terminal *_synthesize must not count while a sibling is still pending."""
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "mono_deferral"
+    url = "https://blog.substack.com/p/mono-deferral"
+    vault = tmp_path / "vault"
+    media_tmp = tmp_path / "media_tmp"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/pending.png", "substack_image", "pend",
+        parent_slug=slug, media_kind="image",
+    )
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is False
+
+
+def test_has_completed_parent_synthesis_monotonic_pending_with_fresh_synth_embedded(
+    tmp_path,
+):
+    """Deferral-less embedded context: pending siblings block terminal synthesis."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "mono_embedded"
+    url = "https://blog.substack.com/p/mono-embedded"
+    media_tmp = tmp_path / "media_tmp"
+    media_tmp.mkdir(parents=True)
+    manifest = media_tmp / f"{slug}_media.json"
+    manifest.write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
+        encoding="utf-8",
+    )
+    queue_ingest(
+        conn, "https://example.com/pending.png", "substack_image", "pend",
+        parent_slug=slug, media_kind="image",
+    )
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(conn, slug, temp_dir=media_tmp) is False
+
+
+def test_has_completed_parent_synthesis_monotonic_complete_media_and_fresh_terminal(
+    tmp_path,
+):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "mono_complete"
+    url = "https://blog.substack.com/p/mono-complete"
+    vault = tmp_path / "vault"
+    media_tmp = tmp_path / "media_tmp"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/ok.png", "substack_image", "ok",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is True
+
+
+def test_has_completed_parent_synthesis_monotonic_stale_terminal_with_pending_sibling(
+    tmp_path,
+):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "mono_stale_pending"
+    url = "https://blog.substack.com/p/mono-stale"
+    vault = tmp_path / "vault"
+    media_tmp = tmp_path / "media_tmp"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/pending.png", "substack_image", "pend",
+        parent_slug=slug, media_kind="image",
+    )
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now', '-2 days') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is False
+
+
+def test_has_completed_parent_synthesis_standalone_terminal(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "mono_standalone"
+    url = "https://blog.substack.com/p/standalone"
+    create_task(
+        conn, url, "substack_text", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.commit()
+    assert has_completed_parent_synthesis(conn, slug) is True
+
+
+@patch("agent.pipelines.web._fetch_substack_html")
+def test_step_substack_embedded_media_ensures_deferral_on_enqueue(
+    mock_fetch, tmp_path,
+):
+    from agent.db import AGENT_SCHEMA, get_parent_media_deferral, init_db
+    from agent.pipelines.web import step_substack_embedded_media
+
+    kb = tmp_path / "kb"
+    (kb / "data").mkdir(parents=True)
+    media_tmp = tmp_path / "tmp"
+    media_tmp.mkdir(parents=True)
+    config = Config(
+        kb_agent_dir=kb,
+        vault_path=tmp_path / "vault",
+        temp_dir=media_tmp,
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    slug = "embed_deferral"
+    post = "https://author.substack.com/p/embed"
+    vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+    task = {
+        "id": "task-embed-deferral",
+        "slug": slug,
+        "source_url": post,
+        "content_type": "substack_text",
+        "tags": [],
+    }
+    mock_fetch.return_value = (
+        f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+    )
+
+    from agent.exceptions import StepError
+
+    with pytest.raises(StepError, match="awaiting media"):
+        step_substack_embedded_media(task, config)
+
+    conn = init_db(kb / "data" / "agent.db", AGENT_SCHEMA)
+    deferral = get_parent_media_deferral(conn, slug)
+    conn.close()
+    assert deferral is not None
+    assert deferral["expected_total"] == 1
+    assert deferral["source_url"] == post
 
 
 def test_ensure_parent_media_deferral_grows_expected_total(tmp_path):

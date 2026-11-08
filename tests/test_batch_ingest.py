@@ -1254,6 +1254,106 @@ class TestBatchPipelineIdKeyedDownloadArtifacts:
         assert (config.temp_dir / f"{id_b}.mp4").exists()
 
 
+class TestChildProcessLogScrubbing:
+    """Child stdout/stderr tails in batch logs must be scrubbed at write time."""
+
+    def test_process_videos_scrubs_transcribe_child_stderr(self, config, conn, monkeypatch, capsys):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.kb_agent_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = queue_ingest(
+            conn, "https://www.youtube.com/watch?v=scrub1", "youtube", "yt_scrub_log",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        fake_video = config.temp_dir / "yt_scrub_log.mp4"
+        fake_video.write_bytes(b"x" * 200)
+        monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+        sensitive = (
+            "modal run ok prefix "
+            "yt-dlp: cookiefile /root/kb-agent/cookies/yt.txt "
+            "api_key=supersecret99 "
+            "suffix"
+        )
+
+        def fake_run(cmd, **kwargs):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / f"{ingest_id}.json").write_text(
+                    json.dumps({"segments": [{"text": "hello"}]}),
+                    encoding="utf-8",
+                )
+                return MagicMock(returncode=0, stdout="", stderr=sensitive)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest, "upload_file_to_minio", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            batch_ingest,
+            "dispatch_synthesize",
+            lambda *_a, **_k: {"status": "pending", "task_id": "t1"},
+        )
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+
+        batch_ingest._process_videos([q], config, conn, 501)
+        logged = capsys.readouterr().out
+        assert "/root/kb-agent" not in logged
+        assert "supersecret99" not in logged
+        assert "[path]" in logged
+        assert "[credential redacted]" in logged
+        assert "modal run ok prefix" in logged
+
+    def test_process_embedded_images_scrubs_ocr_child_stderr(self, config, conn, monkeypatch, capsys):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.kb_agent_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_ocr_scrub"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://example.com/chart.png",
+            "substack_image",
+            "img_scrub_log",
+            parent_slug=parent,
+            media_kind="image",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        sensitive = (
+            "ocr status: reading complete "
+            "Netscape cookie at /home/ubuntu/secret/cookies.txt "
+            "token=abcdef "
+            "done"
+        )
+
+        def fake_run(cmd, **kw):
+            if "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 200)
+                return MagicMock(returncode=0)
+            if "batch_ocr.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                stage_dir = Path(cmd[2])
+                for staged in stage_dir.iterdir():
+                    (out_dir / f"{staged.name}.ocr.json").write_text(
+                        json.dumps({"reading": "chart labels"}),
+                        encoding="utf-8",
+                    )
+                return MagicMock(returncode=0, stdout=sensitive, stderr="")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_images([q], config, conn, 502)
+        logged = capsys.readouterr().out
+        assert "/home/ubuntu" not in logged
+        assert "abcdef" not in logged
+        assert "[path]" in logged
+        assert "[credential redacted]" in logged
+        assert "ocr status: reading complete" in logged
+
+
 class TestCorruptJsonHandling:
     def test_corrupt_ocr_json_marks_failed(self, config, conn, monkeypatch):
         import scripts.batch_ingest as batch_ingest

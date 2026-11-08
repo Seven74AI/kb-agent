@@ -65,6 +65,24 @@ OCR_BATCH_MAX_FAILURE_RATE = 0.20
 # Parent slugs whose deferred synthesize task was already dispatched this run.
 _deferred_synthesize_dispatched: set[str] = set()
 
+
+def _child_captured_output(result: subprocess.CompletedProcess[str]) -> str:
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    return stdout or stderr
+
+
+def _print_scrubbed_child_tail(
+    result: subprocess.CompletedProcess[str],
+    *,
+    tail_chars: int,
+) -> None:
+    """Emit trailing child stdout/stderr to the batch log with write-time scrubbing."""
+    raw = _child_captured_output(result)
+    if not raw:
+        return
+    print(sanitize_visible_message(raw[-tail_chars:]))
+
 # content_type -> download-phase step names (everything before the ffmpeg audio
 # extraction, which batch_transcribe.py does itself).
 VIDEO_DOWNLOAD_STEPS = {
@@ -218,7 +236,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
              str(bdir), "--out-dir", str(out_dir)] + TRANSCRIBE_ARGS.get(ctype, []),
             capture_output=True, text=True, timeout=7200,
         )
-        print((r.stdout or r.stderr)[-1500:])
+        _print_scrubbed_child_tail(r, tail_chars=1500)
         if r.returncode != 0:
             for q, _ in items:
                 update_ingest_status(conn, q["id"], "failed", error=f"batch_transcribe failed (exit {r.returncode})")
@@ -463,7 +481,7 @@ def _process_embedded_images(image_items: list[dict], config, conn, run_id: int)
          str(stage_dir), "--out-dir", str(out_dir)],
         capture_output=True, text=True, timeout=3600,
     )
-    print((r.stdout or r.stderr)[-800:])
+    _print_scrubbed_child_tail(r, tail_chars=800)
     if r.returncode != 0:
         print(f"  [warn] batch_ocr exit {r.returncode}; processing available outputs")
 
