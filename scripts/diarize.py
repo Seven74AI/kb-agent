@@ -13,10 +13,14 @@ Input must be 8kHz WAV mono (not MP3 — pyannote rejects MP3 with sample count 
 Output: JSON with {"segments": [{"start": float, "end": float, "speaker": str}, ...]}
 """
 
-import json
 import os
 import sys
 import time
+from pathlib import Path
+
+_bootstrap_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_bootstrap_root))
+sys.path.insert(0, "/root/kb-agent")
 
 if "HF_TOKEN" not in os.environ:
     print(
@@ -57,8 +61,13 @@ for turn, _, speaker in diarization.speaker_diarization.itertracks(yield_label=T
 
 unique_speakers = len(set(s["speaker"] for s in segments))
 
-with open(output_path, "w") as f:
-    json.dump({"segments": segments}, f, indent=2)
+from agent.redact import write_transcription_sidecar_json
+
+write_transcription_sidecar_json(
+    Path(output_path),
+    {"segments": segments},
+    indent=2,
+)
 
 elapsed = time.time() - start
 print(f"[{time.strftime('%H:%M:%S')}] DONE: {len(segments)} segments, "

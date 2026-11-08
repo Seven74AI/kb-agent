@@ -26,6 +26,7 @@ from agent.redact import (
     redact_http_urls_in_text,
     url_for_display,
     write_merged_transcript_json,
+    write_transcription_sidecar_json,
     write_vault_note,
 )
 from agent.llm import get_llm_client
@@ -389,13 +390,11 @@ def step_diarize(task: dict, config: Config) -> str:
             step_name="diarize",
         )
 
+    data = json.loads(output_json.read_text(encoding="utf-8"))
+    write_transcription_sidecar_json(output_json, data, indent=2)
+
     if logs_conn:
-        segment_count = "?"
-        try:
-            data = json.loads(output_json.read_text())
-            segment_count = str(len(data.get("segments", [])))
-        except Exception:
-            pass
+        segment_count = str(len(data.get("segments", [])))
         log_progress(logs_conn, task_id, step_name,
                      f"Diarization complete: {segment_count} segments")
 
@@ -479,13 +478,11 @@ def step_transcribe(task: dict, config: Config) -> str:
             step_name="transcribe",
         )
 
+    data = json.loads(output_json.read_text(encoding="utf-8"))
+    write_transcription_sidecar_json(output_json, data, indent=2)
+
     if logs_conn:
-        seg_count = "?"
-        try:
-            data = json.loads(output_json.read_text())
-            seg_count = str(len(data.get("segments", [])))
-        except Exception:
-            pass
+        seg_count = str(len(data.get("segments", [])))
         log_progress(logs_conn, task_id, step_name,
                      f"Transcription complete: {seg_count} segments")
 
