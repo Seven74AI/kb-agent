@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from agent.archival import append_note_tags
 from agent.config import Config
 from agent.notify import sanitize_visible_message
-from agent.redact import redact_http_urls_in_text, write_vault_note
+from agent.redact import prepare_ocr_reading_for_write, redact_http_urls_in_text, write_vault_note
 from agent.pipelines.video_common import _artifact_stem
 from agent.db import init_db, LOGS_SCHEMA
 from agent.fetch_guard import _assert_fetch_url_allowed
@@ -779,7 +779,7 @@ def step_extract_epub(task: dict, config: Config) -> str:
         with open(output_path, "w", encoding="utf-8") as f:
             for idx, chars, text in all_text:
                 f.write(f"\n\n=== CHAPTER {idx} ===\n\n")
-                f.write(redact_http_urls_in_text(text))
+                f.write(prepare_ocr_reading_for_write(text))
 
         total = sum(c for _, c, _ in all_text)
 
@@ -868,7 +868,7 @@ def step_extract_pdf(task: dict, config: Config) -> str:
 
         output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write(redact_http_urls_in_text("\n\n".join(full_text)))
+            f.write(prepare_ocr_reading_for_write("\n\n".join(full_text)))
 
         total_chars = sum(len(t) for t in full_text)
 
@@ -910,7 +910,7 @@ def _write_pdf_full_text(
 
     output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(redact_http_urls_in_text("\n\n".join(full_text)))
+        f.write(prepare_ocr_reading_for_write("\n\n".join(full_text)))
 
     total_chars = sum(len(t) for t in full_text)
     payload = {
@@ -1022,7 +1022,7 @@ def step_extract_pdf_scanned(task: dict, config: Config) -> str:
 
     combined = "\n\n".join(p.read_text(encoding="utf-8", errors="replace") for p in md_files)
     output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
-    output_path.write_text(redact_http_urls_in_text(combined), encoding="utf-8")
+    output_path.write_text(prepare_ocr_reading_for_write(combined), encoding="utf-8")
 
     task["_book_title"] = pdf_path.stem
     task["_book_author"] = "Unknown"

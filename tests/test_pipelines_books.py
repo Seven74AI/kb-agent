@@ -475,6 +475,40 @@ class TestEpubExtraction:
     @patch("agent.pipelines.books.ITEM_DOCUMENT", 9)
     @patch("agent.pipelines.books.epub")
     @patch("agent.pipelines.books.BeautifulSoup")
+    def test_extract_epub_scrubs_credential_shapes_in_full_text(
+        self, mock_bs, mock_epub, config, book_task,
+    ):
+        epub_path = Path(config.temp_dir) / "secret_book.epub"
+        epub_path.parent.mkdir(parents=True, exist_ok=True)
+        epub_path.write_text("dummy epub content")
+        book_task["source_url"] = str(epub_path)
+        mock_book = MagicMock()
+        mock_epub.read_epub.return_value = mock_book
+        mock_epub.ITEM_DOCUMENT = 9
+
+        body = (
+            "Chapter with api_key=bookleakvalue and sessionid=booksidvalue "
+            "and enough filler text to pass the chapter size threshold."
+        )
+        soup = MagicMock()
+        soup.get_text.return_value = body
+        item = MagicMock()
+        item.get_body_content.return_value = b"<p>test</p>"
+        mock_bs.return_value = soup
+        mock_book.get_items_of_type.return_value = [item]
+        mock_book.get_metadata.return_value = [("Secret Book",)]
+
+        Path(config.temp_dir).mkdir(parents=True, exist_ok=True)
+        result = step_extract_epub(book_task, config)
+        full_text = Path(json.loads(result)["full_text_path"]).read_text(encoding="utf-8")
+        assert "bookleakvalue" not in full_text
+        assert "booksidvalue" not in full_text
+        assert "[credential redacted]" in full_text
+        assert "sessionid=[REDACTED]" in full_text
+
+    @patch("agent.pipelines.books.ITEM_DOCUMENT", 9)
+    @patch("agent.pipelines.books.epub")
+    @patch("agent.pipelines.books.BeautifulSoup")
     def test_extract_epub_preserves_order(self, mock_bs, mock_epub, config, book_task):
         """ePub extraction preserves chapter order (not size-sorted)."""
         # Create dummy epub file
