@@ -20,7 +20,7 @@ from agent.redact import redact_http_urls_in_text, url_for_display
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import _artifact_stem
+from agent.pipelines.video_common import _artifact_stem, _find_video_file
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -101,10 +101,48 @@ def _assert_bunny_cdn_url_allowed(url: str) -> None:
     _assert_fetch_url_allowed(url)
 
 
-def extract_bunny_video_uuid(text: str) -> str | None:
-    """Extract Bunny video UUID from page HTML or embed URL."""
-    m = BUNNY_UUID_RE.search(text)
-    return m.group(1).lower() if m else None
+def _terragrandir_slug_from_url(source_url: str) -> str | None:
+    """Last path segment of a terragrandir detail page (talk slug)."""
+    path = urlparse(source_url).path.strip("/")
+    if not path:
+        return None
+    return path.split("/")[-1]
+
+
+def extract_bunny_video_uuid(
+    text: str, *, source_url: str | None = None
+) -> str | None:
+    """Extract Bunny video UUID scoped to ``source_url``, not the first embed match."""
+    if source_url and "player.mediadelivery.net" in source_url:
+        m = BUNNY_UUID_RE.search(source_url)
+        if m:
+            return m.group(1).lower()
+
+    og_video = re.search(
+        r'<meta\s+property="og:video(?::url)?"\s+content="([^"]+)"',
+        text,
+        re.IGNORECASE,
+    )
+    if og_video:
+        m = BUNNY_UUID_RE.search(og_video.group(1))
+        if m:
+            return m.group(1).lower()
+
+    matches = list(BUNNY_UUID_RE.finditer(text))
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0].group(1).lower()
+
+    slug = _terragrandir_slug_from_url(source_url) if source_url else None
+    if slug:
+        slug_pos = text.lower().find(slug.lower())
+        if slug_pos >= 0:
+            return min(
+                matches, key=lambda m: abs(m.start() - slug_pos)
+            ).group(1).lower()
+
+    return matches[0].group(1).lower()
 
 
 def _curl_page(url: str, timeout: int = 40) -> str:
@@ -136,7 +174,7 @@ def _curl_page(url: str, timeout: int = 40) -> str:
 def _resolve_embed_url(source_url: str) -> tuple[str, str]:
     """Return (embed_page_url, video_uuid) for a terragrandir or player URL."""
     if "player.mediadelivery.net" in source_url:
-        uuid = extract_bunny_video_uuid(source_url)
+        uuid = extract_bunny_video_uuid(source_url, source_url=source_url)
         if not uuid:
             raise StepError(
                 "Could not parse Bunny video UUID from player URL",
@@ -146,7 +184,7 @@ def _resolve_embed_url(source_url: str) -> tuple[str, str]:
         return source_url, uuid
 
     html = _curl_page(source_url)
-    uuid = extract_bunny_video_uuid(html)
+    uuid = extract_bunny_video_uuid(html, source_url=source_url)
     if not uuid:
         raise StepError(
             "No Bunny Stream embed found on page",
@@ -155,7 +193,7 @@ def _resolve_embed_url(source_url: str) -> tuple[str, str]:
         )
 
     embed_match = re.search(
-        r"https://player\.mediadelivery\.net/embed/\d+/[a-f0-9-]{36}",
+        rf"https://player\.mediadelivery\.net/embed/\d+/{re.escape(uuid)}",
         html,
         re.IGNORECASE,
     )
@@ -168,7 +206,13 @@ def _resolve_embed_url(source_url: str) -> tuple[str, str]:
 def _resolve_cdn_base(embed_url: str, video_uuid: str) -> str:
     """Discover vz-*.b-cdn.net base URL from the embed page."""
     html = _curl_page(embed_url)
-    m = BUNNY_CDN_BASE_RE.search(html)
+    uuid_pat = re.compile(
+        rf"(https://vz-[a-z0-9-]+\.b-cdn\.net)/{re.escape(video_uuid)}/playlist\.m3u8",
+        re.IGNORECASE,
+    )
+    m = uuid_pat.search(html)
+    if not m:
+        m = BUNNY_CDN_BASE_RE.search(html)
     if m:
         cdn_base = m.group(1)
         _assert_bunny_cdn_url_allowed(f"{cdn_base}/{video_uuid}/playlist.m3u8")
@@ -418,7 +462,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
     """Upload MP4, MP3, and merged transcript JSON to MinIO."""
     stem = _artifact_stem(task)
     display_slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{stem}.mp4"
+    video_path = _find_video_file(config, stem)
 
     uploaded = upload_video_artifacts(stem, config, video_path)
 

@@ -1569,6 +1569,56 @@ def _sibling_media_block_has_body(text: str, ingest_id: str, sibling_ids: list[s
     return bool(segment) and "##" in segment
 
 
+def _sibling_media_block_bounds(
+    text: str, ingest_id: str, sibling_ids: list[str],
+) -> tuple[int, int] | None:
+    """Inclusive-exclusive slice ``[start:end)`` covering one sibling's media block and marker."""
+    marker = media_append_marker(ingest_id)
+    pos = text.find(marker)
+    if pos < 0:
+        return None
+    start = 0
+    for sid in sibling_ids:
+        if sid == ingest_id:
+            break
+        prior = media_append_marker(sid)
+        prior_pos = text.find(prior)
+        if prior_pos >= 0 and prior_pos < pos:
+            start = prior_pos + len(prior)
+    end = pos + len(marker)
+    while end < len(text) and text[end] in "\n\r":
+        end += 1
+    while start > 0 and text[start - 1] in "\n\r":
+        start -= 1
+    return start, end
+
+
+def _strip_sibling_media_block(text: str, ingest_id: str, sibling_ids: list[str]) -> str:
+    """Remove a marker-delimited sibling media block (heading, body, marker) from raw text."""
+    bounds = _sibling_media_block_bounds(text, ingest_id, sibling_ids)
+    if bounds is None:
+        return text
+    start, end = bounds
+    return text[:start] + text[end:]
+
+
+def _ordered_sibling_ids_for_ingest(conn: sqlite3.Connection, ingest_id: str) -> list[str]:
+    row = conn.execute(
+        "SELECT parent_slug FROM ingest_queue WHERE id = ?", (ingest_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    parent_slug = row["parent_slug"] if hasattr(row, "keys") else row[0]
+    if not parent_slug:
+        return []
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id FROM ingest_queue WHERE parent_slug = ? ORDER BY created_at ASC, id ASC",
+        (parent_slug,),
+    ).fetchall()
+    return [r["id"] if hasattr(r, "keys") else r[0] for r in rows]
+
+
 def parent_media_complete(
     conn: sqlite3.Connection,
     parent_slug: str,
@@ -1677,10 +1727,11 @@ def append_parent_media_atomic(
     safe_body = redact_http_urls_in_text(body).strip()
     text = raw_path.read_text(encoding="utf-8")
     media_flag = bool(row["media_appended"] if hasattr(row, "keys") else row[0])
-    if marker in text:
-        if not media_flag:
-            set_ingest_media_appended(conn, ingest_id)
+    sibling_ids = _ordered_sibling_ids_for_ingest(conn, ingest_id)
+    if marker in text and media_flag:
         return True
+    if marker in text and not media_flag:
+        text = _strip_sibling_media_block(text, ingest_id, sibling_ids)
     if media_flag:
         section_present = f"## {section}" in text and safe_body in text
         if section_present:

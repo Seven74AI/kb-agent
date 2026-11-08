@@ -44,14 +44,13 @@ def step_see_also(task: dict, config: Config) -> str:
     content_type = task.get("content_type", "web")
 
     folder = _get_folder(content_type)
-    note_path = config.vault_path / "Knowledge base" / folder / f"{slug}.md"
-
-    # Threads and instagram pipelines sanitize their slugs with _slug_path
+    # Match synthesis / MinIO / IG+Threads vault writes: filesystem-safe slug first.
+    safe_slug = _slug_path(slug)
+    note_path = config.vault_path / "Knowledge base" / folder / f"{safe_slug}.md"
     if not note_path.exists():
-        safe_slug = _slug_path(slug)
-        alt_path = config.vault_path / "Knowledge base" / folder / f"{safe_slug}.md"
-        if alt_path.exists():
-            note_path = alt_path
+        legacy_path = config.vault_path / "Knowledge base" / folder / f"{slug}.md"
+        if legacy_path.exists():
+            note_path = legacy_path
         else:
             return f"No note to add See Also to: {note_path}"
 

@@ -2,6 +2,7 @@
 chapter-level synthesis, quality gates, MinIO, Git."""
 
 import json
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
@@ -14,9 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.config import Config
 from agent.detection import _classify_mega_filenames
 from agent.db import AGENT_SCHEMA, create_task, init_db
+from agent.exceptions import ErrorType, StepError
 from agent.pipelines.books import (
     CLASSIFY_BOOK_PIPELINES,
     _book_child_slug,
+    _chunked_book_synthesis,
+    _detect_boundaries_llm,
     _resolve_local_book_path,
     _vault_frontmatter_source_url,
     _pdf_preflight,
@@ -40,6 +44,7 @@ from agent.pipelines.books import (
     PDF_QUALITY_SCORE_THRESHOLD,
     CHARS_PER_TOKEN,
 )
+from agent.quality import quality_gate_book
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -756,6 +761,74 @@ class TestBookQualityGate:
             step_book_quality_gate(book_task, config)
         assert "Too few fact checks" in str(excinfo.value)
 
+    def _minimal_passing_book_note_lines(self, chapter_headers: list[str]) -> list[str]:
+        """Book note body that passes size/quote/line/fact-check gates in tests."""
+        chapters = []
+        for hdr in chapter_headers:
+            chapters.extend([hdr, "Summary " * 30])
+        return [
+            "## Summary",
+            "Central thesis " * 20,
+            "",
+            "## Key Claims",
+            '> "Quote one" — Ch 1',
+            '> "Quote two" — Ch 2',
+            "",
+            "## Chapter Summaries",
+            *chapters,
+            "",
+            "## Critical Analysis",
+            "### Factual Issues",
+            "- Issue one.",
+            "- Issue two.",
+            "",
+            "## Sources",
+            "Author. *Title* (2024)",
+        ]
+
+    def test_quality_gate_chapter_coverage_uses_temp_dir_not_tmp(
+        self, config, book_task, tmp_path,
+    ):
+        """Chapter coverage must read full text from config.temp_dir, not /tmp."""
+        slug = book_task["slug"]
+        note_dir = config.vault_path / "Knowledge base" / "books"
+        note_dir.mkdir(parents=True, exist_ok=True)
+        note_path = note_dir / f"{slug}.md"
+        note_path.write_text("\n".join(self._minimal_passing_book_note_lines(["### Chapter 1"])))
+
+        source_chapters = "\n".join(
+            f"\n=== CHAPTER {i} ===\n" + ("x" * 200) for i in range(1, 9)
+        )
+        full_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(source_chapters, encoding="utf-8")
+        # Stale path under /tmp must not drive coverage when temp_dir differs
+        stale = tmp_path / "book_stale_full.txt"
+        assert not stale.exists()
+
+        passed, failures = quality_gate_book(
+            note_path, config, vault_path=config.vault_path,
+        )
+        assert not passed
+        assert any("Chapter coverage" in f for f in failures)
+
+    def test_step_quality_gate_enforces_chapter_coverage(self, config, book_task):
+        """step_book_quality_gate passes vault_path so coverage is enforced."""
+        slug = book_task["slug"]
+        note_dir = config.vault_path / "Knowledge base" / "books"
+        note_dir.mkdir(parents=True, exist_ok=True)
+        note_path = note_dir / f"{slug}.md"
+        note_path.write_text("\n".join(self._minimal_passing_book_note_lines(["### Chapter 1"])))
+
+        source = "\n".join(f"=== CHAPTER {i} ===\n" + ("y" * 100) for i in range(1, 7))
+        full_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(source, encoding="utf-8")
+
+        with pytest.raises(StepError) as excinfo:
+            step_book_quality_gate(book_task, config)
+        assert "Chapter coverage" in str(excinfo.value)
+
 
 # ── Synthesis Prompt Tests ────────────────────────────────────────────────────
 
@@ -781,6 +854,40 @@ class TestBookSynthesis:
         result = _today()
         import re
         assert re.match(r'^\d{4}-\d{2}-\d{2}$', result)
+
+    @patch("agent.pipelines.books._detect_boundaries_llm")
+    def test_chunked_synthesis_surfaces_llm_failure(self, mock_boundaries, config):
+        """A failed progressive chunk must RETRY, not emit placeholder text."""
+        mock_boundaries.return_value = [0, 50_000, 100_000]
+        full_text = "word " * 120_000
+        llm = MagicMock()
+        llm.call.side_effect = RuntimeError("LLM unavailable")
+
+        with pytest.raises(StepError) as excinfo:
+            _chunked_book_synthesis(
+                full_text,
+                Path(config.temp_dir) / "book_x_full.txt",
+                "Title",
+                "Author",
+                llm,
+                config,
+            )
+        assert excinfo.value.error_type == ErrorType.RETRY
+        assert "Progressive book synthesis failed" in str(excinfo.value)
+
+    def test_detect_boundaries_llm_logs_json_parse_error(self, caplog):
+        """Boundary JSON parse errors are logged, not silently discarded."""
+        llm = MagicMock()
+        llm.call.return_value = MagicMock(content="[1000, 50000]")
+
+        with caplog.at_level(logging.WARNING, logger="agent.pipelines.books"):
+            with patch(
+                "agent.pipelines.books.json.loads",
+                side_effect=json.JSONDecodeError("err", "doc", 0),
+            ):
+                _detect_boundaries_llm("A" * 250_000, llm)
+
+        assert any("boundary JSON parse failed" in rec.message for rec in caplog.records)
 
 
 # ── Content Classification Tests ──────────────────────────────────────────────

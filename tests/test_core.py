@@ -204,6 +204,60 @@ def test_plan_submission_and_submit_ingest_agree_on_slug(core_config, agent_conn
     assert ingest["content_type"] == plan["content_type"]
 
 
+def test_submit_ingest_returns_actual_status_for_exhausted_failed_duplicate(
+    core_config, agent_conn,
+):
+    """INVARIANT: embed-success accounting must not treat dead URL duplicates as queued."""
+    from agent.db import INGEST_MAX_MEDIA_ATTEMPTS, queue_ingest
+
+    url = "https://substack-post-media.s3.amazonaws.com/public/images/dead_dup.webp"
+    parent = "parent_dead_dup"
+    queue_ingest(
+        agent_conn, url, "substack_image", "img_dead",
+        parent_slug=parent, media_kind="image",
+    )
+    agent_conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='gave up', attempts=? WHERE url=?",
+        (INGEST_MAX_MEDIA_ATTEMPTS, url),
+    )
+    agent_conn.commit()
+
+    out = submit_ingest(
+        url, core_config, agent_conn, content_type="substack_image",
+        parent_slug=parent, media_kind="image",
+    )
+    assert out["status"] == "failed"
+    assert out["duplicate"] is True
+    assert out["created_new"] is False
+    assert out["ingest_id"]
+
+
+def test_submit_ingest_revived_failed_duplicate_reports_queued(core_config, agent_conn):
+    from agent.db import queue_ingest
+    from agent.pipelines.web import _submit_embed_succeeded
+
+    url = "https://substack-post-media.s3.amazonaws.com/public/images/revive_dup.webp"
+    parent = "parent_revive_dup"
+    queue_ingest(
+        agent_conn, url, "substack_image", "img_revive",
+        parent_slug=parent, media_kind="image",
+    )
+    agent_conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='ocr failed', attempts=1 WHERE url=?",
+        (url,),
+    )
+    agent_conn.commit()
+
+    out = submit_ingest(
+        url, core_config, agent_conn, content_type="substack_image",
+        parent_slug=parent, media_kind="image",
+    )
+    assert out["status"] == "queued"
+    assert out["duplicate"] is True
+    assert out["created_new"] is False
+    assert _submit_embed_succeeded(out) is True
+
+
 def test_plan_submission_normalizes_url_before_dedup(core_config, monkeypatch):
     """Dedup greps the display-safe source_url persisted in vault frontmatter."""
     from agent.redact import url_for_display

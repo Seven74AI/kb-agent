@@ -267,9 +267,16 @@ def test_enqueue_embedded_media_logs_redact_rumble_url_query(config, caplog):
         ({}, False),
         ({"status": "weird"}, False),
         ({"status": "error"}, False),
-        ({"status": "queued"}, True),
-        ({"status": "pending"}, True),
-        ({"ingest_id": "ingest-1"}, True),
+        ({"status": "failed", "ingest_id": "dead-1"}, False),
+        ({"ingest_id": "ingest-1"}, False),
+        ({"status": "queued", "ingest_id": "ingest-1"}, True),
+        ({"status": "pending", "ingest_id": "ingest-1"}, True),
+        ({"status": "queued", "ingest_id": "ingest-1", "created_new": True}, True),
+        (
+            {"status": "queued", "ingest_id": "ingest-1", "created_new": False, "duplicate": True},
+            True,
+        ),
+        ({"status": "dispatched", "ingest_id": "ingest-1", "created_new": False}, True),
     ],
 )
 def test_submit_embed_succeeded_explicit_positive_only(result, expected):
@@ -321,7 +328,11 @@ def test_enqueue_embedded_media_counts_queued_submit_result(config):
 
     with patch(
         "agent.core.submit.submit_ingest",
-        return_value={"status": "queued", "ingest_id": "ingest-1"},
+        return_value={
+            "status": "queued",
+            "ingest_id": "ingest-1",
+            "created_new": True,
+        },
     ):
         with patch("agent.db.init_db") as mock_init:
             conn = MagicMock()
@@ -339,6 +350,46 @@ def test_enqueue_embedded_media_counts_queued_submit_result(config):
             )
 
     assert stats.success_count == 1
+
+
+def test_enqueue_embedded_media_dead_failed_duplicate_not_counted(tmp_path):
+    """Re-extract must not treat a permanently failed URL sibling as enqueue success."""
+    from agent.core.submit import submit_ingest
+    from agent.db import AGENT_SCHEMA, INGEST_MAX_MEDIA_ATTEMPTS, init_db, queue_ingest
+    from agent.pipelines.web import _enqueue_embedded_media, _submit_embed_succeeded
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Knowledge base" / "articles").mkdir(parents=True)
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=vault)
+    (cfg.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+
+    conn = init_db(cfg.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    parent = "parent_dead_embed"
+    img = "https://substack-post-media.s3.amazonaws.com/public/images/dead_embed.webp"
+    queue_ingest(
+        conn, img, "substack_image", "dead_embed",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='failed', error='gave up', attempts=? WHERE url=?",
+        (INGEST_MAX_MEDIA_ATTEMPTS, img),
+    )
+    conn.commit()
+    conn.close()
+
+    dead = submit_ingest(
+        img, cfg, init_db(cfg.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA),
+        content_type="substack_image", parent_slug=parent, media_kind="image",
+    )
+    assert dead["status"] == "failed"
+    assert _submit_embed_succeeded(dead) is False
+
+    stats = _enqueue_embedded_media(
+        parent, [img], [], [], [],
+        "https://example.com/post", cfg, None,
+    )
+    assert stats.success_count == 0
 
 
 # ── _estimate_tokens tests ────────────────────────────────────────────────────

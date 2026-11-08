@@ -43,6 +43,7 @@ from agent.pipelines.see_also import step_see_also
 logger = logging.getLogger(__name__)
 
 from agent.pipelines.video_common import (
+    _artifact_stem,
     _slug_path,
     ensure_h264,
     format_transcript_for_llm,
@@ -325,10 +326,9 @@ def step_ig_reel_merge(task: dict, config: Config) -> str:
     Returns:
         JSON string summarizing merge result (includes music_only flag).
     """
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
-    diar_path = Path(config.temp_dir) / f"{safe_slug}_diarization.json"
-    trans_path = Path(config.temp_dir) / f"{safe_slug}_transcript.json"
+    stem = _artifact_stem(task)
+    diar_path = Path(config.temp_dir) / f"{stem}_diarization.json"
+    trans_path = Path(config.temp_dir) / f"{stem}_transcript.json"
 
     if not diar_path.exists():
         raise FileNotFoundError(f"Diarization not found: {diar_path}")
@@ -351,7 +351,7 @@ def step_ig_reel_merge(task: dict, config: Config) -> str:
     trans["music_only"] = music_only
 
     # Write merged
-    merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     write_merged_transcript_json(merged_path, trans)
 
     return json.dumps({
@@ -377,10 +377,11 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     """
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
+    stem = _artifact_stem(task)
     source_url = task.get("source_url", "")
     display_source_url = url_for_display(source_url)
 
-    merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     if not merged_path.exists():
         raise FileNotFoundError(f"Merged transcript not found: {merged_path}")
 

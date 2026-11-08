@@ -31,6 +31,7 @@ from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
     VIDEO_DENSITY_MIN,
     _artifact_stem,
+    _find_video_file,
     check_density as _check_density,
     ensure_h264,
     format_transcript_for_llm as _format_transcript_for_llm,
@@ -216,8 +217,8 @@ def step_extract_metadata(task: dict, config: Config) -> str:
         )
 
     metadata = {
-        "title": parts[0],
-        "uploader": parts[1],
+        "title": redact_http_urls_in_text(parts[0]),
+        "uploader": redact_http_urls_in_text(parts[1]),
         "duration": float(parts[2]) if parts[2] not in ("NA", "None", "") else 0.0,
         "view_count": int(parts[3]) if parts[3] not in ("NA", "None", "") else 0,
         "upload_date": parts[4],
@@ -249,7 +250,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
                     {
                         "start_time": c.get("start_time", 0),
                         "end_time": c.get("end_time", 0),
-                        "title": c.get("title", ""),
+                        "title": redact_http_urls_in_text(c.get("title", "")),
                     }
                     for c in chapters_raw
                     if c.get("title")  # Skip empty-title chapters
@@ -943,7 +944,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
     """
     stem = _artifact_stem(task)
     display_slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{stem}.mp4"
+    video_path = _find_video_file(config, stem)
 
     uploaded = upload_video_artifacts(stem, config, video_path)
 

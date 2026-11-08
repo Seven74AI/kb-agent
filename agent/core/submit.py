@@ -190,13 +190,20 @@ def submit_ingest(url: str, config: Config, agent_conn: sqlite3.Connection, *,
         parent_slug=parent_slug, media_kind=media_kind,
     )
 
+    row = agent_conn.execute(
+        "SELECT status FROM ingest_queue WHERE id = ?", (ingest_id,),
+    ).fetchone()
+    ingest_status = row[0] if row else "queued"
+    http_status = 202 if ingest_status == "queued" else 200
+
     return {
-        "status": "queued",
-        "http_status": 202,
+        "status": ingest_status,
+        "http_status": http_status,
         "ingest_id": ingest_id,
         "platform": platform,
         "content_type": subtype,
         "slug": slug,
+        "created_new": created,
         "duplicate": not created,
     }
 
