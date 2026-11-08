@@ -14,7 +14,7 @@ from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.config import Config
 from agent.llm import get_llm_client
 from agent.pipelines.video_common import _slug_path
-from agent.core.note import write_vault_note
+from agent.redact import write_vault_note
 
 
 def _get_folder(content_type: str) -> str:

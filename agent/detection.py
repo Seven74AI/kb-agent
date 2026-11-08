@@ -15,7 +15,6 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from agent.config import REPO_ROOT, load_config
 from agent.constants import FLARESOLVERR_URL
 from agent.fetch_guard import _assert_fetch_url_allowed
-from agent.notify import redact_credential_shapes
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
 logger = logging.getLogger(__name__)

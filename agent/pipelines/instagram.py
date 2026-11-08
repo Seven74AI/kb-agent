@@ -33,8 +33,7 @@ from agent.detection import _safe_url_for_log
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.core.note import write_vault_note
-from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json
+from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json, write_vault_note
 from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline

@@ -107,16 +107,6 @@ def task_in_deferred_media_cycle(
     return False
 
 
-def _deferred_media_resume_sql_exclusion() -> tuple[str, tuple[str, ...]]:
-    """SQL fragment and params that exclude deferred-media pauses from bulk resume."""
-    clauses = [
-        "LOWER(COALESCE(error, '')) NOT LIKE ?"
-        for _ in DEFERRED_MEDIA_PAUSE_MARKERS
-    ]
-    params = tuple(f"%{marker}%" for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
-    return " AND ".join(clauses), params
-
-
 AGENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -605,6 +595,8 @@ def create_synthesize_task(
     slug: str,
     steps: list[str],
     tags=None,
+    *,
+    temp_dir: Path | None = None,
 ) -> tuple[str, bool]:
     """Atomically ensure at most one in-flight *_synthesize owner per slug.
 
@@ -623,7 +615,9 @@ def create_synthesize_task(
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        existing_id = find_active_task(conn, slug, content_type)
+        existing_id = find_active_task(
+            conn, slug, content_type, temp_dir=temp_dir,
+        )
         if existing_id:
             conn.commit()
             return existing_id, False
@@ -636,7 +630,9 @@ def create_synthesize_task(
         return task_id, True
     except sqlite3.IntegrityError:
         conn.rollback()
-        existing_id = find_active_task(conn, slug, content_type)
+        existing_id = find_active_task(
+            conn, slug, content_type, temp_dir=temp_dir,
+        )
         if existing_id:
             return existing_id, False
         raise
@@ -1022,7 +1018,11 @@ _ACTIVE_TASK_STATUSES = (
 
 
 def find_active_task(
-    conn: sqlite3.Connection, slug: str, content_type: str,
+    conn: sqlite3.Connection,
+    slug: str,
+    content_type: str,
+    *,
+    temp_dir: Path | None = None,
 ) -> str | None:
     """Return a task id when ``dispatch_synthesize`` must not enqueue another.
 
@@ -1060,7 +1060,10 @@ def find_active_task(
             return None
         if deferral is not None:
             if status in ("done", "completed"):
-                _clear_parent_media_changed_if_satisfied(conn, slug)
+                raw_path = (temp_dir / f"{slug}_raw.md") if temp_dir is not None else None
+                _clear_parent_media_changed_if_satisfied(
+                    conn, slug, raw_path=raw_path,
+                )
                 deferral = get_parent_media_deferral(conn, slug)
                 fresh = _deferral_synthesize_terminal_fresh(conn, slug, deferral)
                 if int(deferral.get("media_changed") or 0) or not fresh:
@@ -2264,10 +2267,10 @@ def reset_task_steps_for_retry(
     :func:`resume_tasks_by_reason` so bulk and single-task resume share the
     same deferral-preserving step rewind policy.
     """
-    in_cycle = task_status == "paused" and task_in_deferred_media_cycle(
+    in_cycle = task_in_deferred_media_cycle(
         conn, task_id, slug=slug, error=error,
     )
-    if task_status == "paused" and in_cycle:
+    if in_cycle:
         embed = conn.execute(
             """
             SELECT step_order FROM task_steps

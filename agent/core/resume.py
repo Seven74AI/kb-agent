@@ -40,8 +40,10 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
     """Re-queue a failed or paused task for the consumer.
 
     Resets failed/paused/running steps to pending; leaves completed steps intact.
-    For deferred media pauses, ensures ``substack_embedded_media`` is pending so
-    the consumer cannot skip ahead to synthesis while media is still in flight.
+    In a deferred-media cycle (``task_in_deferred_media_cycle``), rewinds only
+    steps after ``substack_embedded_media`` when that step must be preserved for
+    an open deferral; otherwise the embed step is reset to pending like other
+    steps.
 
     Returns:
         True if the task was retried, False if not found or wrong status.
