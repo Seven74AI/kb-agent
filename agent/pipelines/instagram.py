@@ -519,9 +519,9 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     if result.returncode == 0 and result.stdout.strip():
         parts = result.stdout.strip().split("||")
         if len(parts) >= 1:
-            metadata["title"] = parts[0]
+            metadata["title"] = redact_http_urls_in_text(parts[0])
         if len(parts) >= 2:
-            metadata["uploader"] = parts[1]
+            metadata["uploader"] = redact_http_urls_in_text(parts[1])
         if len(parts) >= 3:
             try:
                 metadata["like_count"] = int(parts[2])

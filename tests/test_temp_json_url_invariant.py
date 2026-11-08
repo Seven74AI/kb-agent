@@ -111,7 +111,10 @@ def test_instagram_carousel_sidecars_omit_tracking_urls(
         call_n["n"] += 1
         result = MagicMock(returncode=0, stderr="")
         if call_n["n"] == 1:
-            result.stdout = "Title||user||1||2"
+            result.stdout = (
+                "See https://title.example/x?igsh=abc"
+                "||https://user.example/u?token=SECRET||1||2"
+            )
         else:
             result.stdout = "caption"
         return result

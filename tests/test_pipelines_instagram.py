@@ -401,6 +401,36 @@ class TestCarouselMetadata:
         assert "?" not in caption
         assert "https://link.example/promo" in caption
 
+    @patch("agent.pipelines.instagram._validate_ig_cookies")
+    @patch("subprocess.run")
+    def test_metadata_redacts_urls_in_title_and_uploader(
+        self, mock_run, mock_validate, config, post_task,
+    ):
+        mock_validate.return_value = None
+        title_url = "https://bio.example/name?igsh=deadbeef"
+        uploader_url = "https://profile.example/user?token=SECRET"
+        call_count = [0]
+
+        def fake_run(*args, **kwargs):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                result.stdout = f"{title_url}||{uploader_url}||1||2"
+            else:
+                result.stdout = "caption"
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        mock_run.side_effect = fake_run
+
+        result = step_ig_carousel_metadata(post_task, config)
+        data = json.loads(Path(result).read_text(encoding="utf-8"))
+        assert "?" not in data["title"]
+        assert "igsh=" not in data["title"]
+        assert "?" not in data["uploader"]
+        assert "token=" not in data["uploader"]
+
 
 class TestCarouselExtract:
     """Tests for step_ig_carousel_extract."""

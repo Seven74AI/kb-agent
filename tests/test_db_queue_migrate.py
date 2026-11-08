@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,7 @@ from agent.config import Config
 from agent.db import (
     AGENT_SCHEMA,
     INGEST_MAX_MEDIA_ATTEMPTS,
+    _ACTIVE_SYNTHESIZE_SLUG_INDEX,
     _migrate,
     claim_task,
     count_pending_media,
@@ -357,6 +359,7 @@ def test_get_next_step_does_not_skip_paused_synthesize_deferral(tmp_path, pause_
     [
         "deferred synthesis paused — sibling media still pending",
         "deferred synthesis paused — parent media not complete at execute time",
+        "deferred synthesis dispatch failed: unknown content_type",
     ],
 )
 def test_is_deferred_media_pause_execute_gate_synthesis(pause_reason):
@@ -837,6 +840,61 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
 
 
+def test_dispatch_failure_pause_appended_and_blocks_resume_retry(tmp_path):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "dispatch_fail_parent"
+    url = "https://blog.substack.com/p/dispatch-fail"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    prior_pause = "awaiting media: 1 images enqueued"
+    task_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    defer_step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    embed_output = "awaiting media: 1 images + 0 videos"
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (prior_pause, task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (embed_output, defer_step_id),
+    )
+    conn.commit()
+
+    batch_ingest._record_parent_deferral_dispatch_failure(
+        conn, slug, "unknown content_type: substack_text_synthesize",
+    )
+    conn.commit()
+
+    row = conn.execute("SELECT error FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    error = row[0] or ""
+    assert prior_pause in error
+    assert "deferred synthesis dispatch failed" in error
+    assert is_deferred_media_pause(error)
+    assert resume_tasks_by_reason(conn, "%deferred synthesis%") == 0
+
+    assert retry_task(conn, task_id) is True
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (defer_step_id,),
+    ).fetchone()
+    assert embed[0] == "paused"
+    assert embed[1] == embed_output
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+
+
 def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -1197,6 +1255,8 @@ def test_find_active_task_prefers_oldest_row_when_duplicates_exist(tmp_path):
         ["synthesize_note"],
         status="pending",
     )
+    # Legacy DBs could hold duplicate in-flight owners; simulate for ORDER BY semantics.
+    conn.execute(f"DROP INDEX IF EXISTS {_ACTIVE_SYNTHESIZE_SLUG_INDEX}")
     newer_id = create_task(
         conn,
         "https://blog.substack.com/p/x",
@@ -3373,3 +3433,56 @@ def test_bootstrap_parent_media_deferral_manifest_tie_breaks_on_id(tmp_path):
     assert row is not None
     assert row["source_url"] == "https://example.com/first"
     assert row["content_type"] == "substack_text"
+
+
+def test_dispatch_synthesize_concurrent_single_active_owner(tmp_path):
+    """Two concurrent dispatch_synthesize calls yield exactly one in-flight owner."""
+    db_path = tmp_path / "agent.db"
+    init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/concurrent"
+    slug = "concurrent_parent"
+    config = _batch_test_config(tmp_path)
+    barrier = threading.Barrier(2, timeout=10)
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    def worker():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            barrier.wait()
+            with lock:
+                result = dispatch_synthesize(
+                    url,
+                    config,
+                    conn,
+                    content_type="substack_text_synthesize",
+                    slug=slug,
+                )
+            results.append(result)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive()
+
+    assert len(results) == 2
+    task_ids = {r["task_id"] for r in results}
+    assert len(task_ids) == 1
+    dup_flags = [r.get("duplicate") for r in results]
+    assert dup_flags.count(True) == 1
+    assert dup_flags.count(None) + dup_flags.count(False) == 1
+
+    verify = sqlite3.connect(str(db_path))
+    in_flight = verify.execute(
+        "SELECT COUNT(*) FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "AND status IN ('pending', 'in_progress', 'paused')",
+        (slug,),
+    ).fetchone()[0]
+    assert in_flight == 1
+    verify.close()

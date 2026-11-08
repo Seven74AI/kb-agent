@@ -78,6 +78,7 @@ def test_compare_url_pair_reports_quality_metrics(benchmark_config):
     assert result["kb_agent"]["passed"] is True
     assert result["hermes"]["passed"] is False
     assert any("Too few quotes" in f for f in result["hermes"]["failures"])
+    assert result["url"] == "https://example.com/benchmark-article-a"
 
 
 def test_write_comparison_report_json_and_html(benchmark_config, tmp_path):
@@ -106,6 +107,35 @@ def test_write_comparison_report_json_and_html(benchmark_config, tmp_path):
     assert "kb-agent" in html.lower() or "KB Agent" in html
     assert "Hermes" in html
     assert "example.com/benchmark-article-a" in html
+
+
+def test_build_review_html_redacts_tracking_query_on_url():
+    tracked = "https://example.com/article?utm_source=track&sig=deadbeef"
+    html = build_review_html(
+        [
+            {
+                "url": tracked,
+                "content_type": "web",
+                "kb_agent": {
+                    "note_path": "kb.md",
+                    "passed": True,
+                    "failures": [],
+                    "metrics": {},
+                    "content": "---\nsource_url: " + tracked + "\n---\n",
+                },
+                "hermes": {
+                    "note_path": "hermes.md",
+                    "passed": True,
+                    "failures": [],
+                    "metrics": {},
+                    "content": "(missing)",
+                },
+            }
+        ]
+    )
+    assert "utm_source" not in html
+    assert "sig=deadbeef" not in html
+    assert "https://example.com/article" in html
 
 
 def test_build_review_html_side_by_side_content():

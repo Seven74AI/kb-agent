@@ -3,9 +3,10 @@
 import sqlite3
 
 from agent.db import (
+    get_parent_media_deferral,
     has_active_synthesize_task,
-    is_deferred_media_pause,
     resume_tasks_by_reason,
+    task_in_deferred_media_cycle,
 )
 
 
@@ -36,10 +37,6 @@ def resume_tasks(agent_conn: sqlite3.Connection, reason: str) -> int:
     return resume_tasks_by_reason(agent_conn, pattern)
 
 
-def _is_awaiting_media_pause(error: str | None) -> bool:
-    return is_deferred_media_pause(error)
-
-
 def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
     """Re-queue a failed or paused task for the consumer.
 
@@ -60,7 +57,11 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
         return False
 
     with agent_conn:
-        if row[0] == "paused" and _is_awaiting_media_pause(row[1]):
+        slug = row[2]
+        in_cycle = task_in_deferred_media_cycle(
+            agent_conn, task_id, slug=slug, error=row[1],
+        )
+        if row[0] == "paused" and in_cycle:
             embed = agent_conn.execute(
                 """
                 SELECT step_order FROM task_steps
@@ -70,11 +71,16 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
                 (task_id,),
             ).fetchone()
             if embed is not None:
+                preserve_embed = slug and get_parent_media_deferral(agent_conn, slug) is not None
+                if preserve_embed:
+                    step_filter = "step_order > ?"
+                else:
+                    step_filter = "step_order >= ?"
                 agent_conn.execute(
-                    """
+                    f"""
                     UPDATE task_steps
                     SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-                    WHERE task_id = ? AND step_order >= ?
+                    WHERE task_id = ? AND {step_filter}
                     AND status IN ('failed', 'paused', 'running')
                     """,
                     (task_id, embed[0]),

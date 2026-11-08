@@ -61,6 +61,7 @@ from agent.core.submit import (  # noqa: E402
     submit_plan,
 )
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
+from agent.redact import ensure_merged_transcript_file_redacted  # noqa: E402
 
 # Reject staging huge images to Modal (GPU OOM / pixel bombs).
 MAX_STAGED_IMAGE_BYTES = 25 * 1024 * 1024
@@ -295,6 +296,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                     vdest,
                     f"{config.minio_bucket}/videos/{storage_slug}{vdest.suffix.lower()}",
                 )
+                ensure_merged_transcript_file_redacted(merged)
                 upload_file_to_minio(
                     merged,
                     f"{config.minio_bucket}/transcripts/{storage_slug}.json",
@@ -385,9 +387,25 @@ def _record_parent_deferral_dispatch_failure(
     parent_slug: str,
     err: str,
 ) -> None:
-    """Persist a scrubbed deferred-synthesis dispatch error on the paused parent task."""
-    reason = f"deferred synthesis dispatch failed: {_scrub_for_log(err)}"
+    """Append a scrubbed deferred-synthesis dispatch error on the paused parent task."""
+    dispatch_note = f"deferred synthesis dispatch failed: {_scrub_for_log(err)}"
     with conn:
+        row = conn.execute(
+            """
+            SELECT error FROM tasks
+            WHERE slug = ? AND content_type NOT GLOB '*_synthesize'
+            AND status IN ('paused', 'pending', 'in_progress')
+            LIMIT 1
+            """,
+            (parent_slug,),
+        ).fetchone()
+        prior = (row[0] if row else None) or ""
+        if dispatch_note in prior:
+            reason = prior
+        elif prior:
+            reason = f"{prior}; {dispatch_note}"
+        else:
+            reason = dispatch_note
         conn.execute(
             """
             UPDATE tasks SET error = ?, updated_at = datetime('now')
