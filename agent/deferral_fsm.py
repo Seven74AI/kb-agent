@@ -72,7 +72,8 @@ ALLOWED_TRANSITIONS: dict[DeferralState, tuple[DeferralState, ...]] = {
         DeferralState.AWAITING_MEDIA,
         DeferralState.IDLE,
     ),
-    DeferralState.FAILED: (),
+    # FAILED recovers to IDLE via retry/requeue (requeue_task_for_retry_cas, retry_task).
+    DeferralState.FAILED: (DeferralState.IDLE,),
     DeferralState.SUPERSEDED: (),
     DeferralState.DONE: (),
 }

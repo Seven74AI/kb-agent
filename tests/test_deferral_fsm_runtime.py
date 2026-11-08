@@ -54,21 +54,6 @@ RUNTIME_CAS_OPS = (
     "_clear_parent_media_changed_if_satisfied",
 )
 
-# Transitions that occur in production but are absent from ALLOWED_TRANSITIONS.
-# Tests for these scenarios assert DB behavior then skip the FSM edge check.
-_KNOWN_FSM_GAP: dict[str, str] = {
-    "requeue_failed_parent": (
-        "requeue_task_for_retry_cas moves failed → pending; classify is "
-        "FAILED → IDLE, but ALLOWED_TRANSITIONS[FAILED] is empty (table may "
-        "need FAILED→IDLE for retry, or classifier should treat re-queue differently)."
-    ),
-    "retry_failed_parent": (
-        "retry_task wraps requeue_task_for_retry_cas on failed rows — same "
-        "FAILED → IDLE gap as requeue_failed_parent."
-    ),
-}
-
-
 def _open_conn(tmp_path) -> sqlite3.Connection:
     db_path = tmp_path / "agent.db"
     return init_db(db_path, AGENT_SCHEMA)
@@ -99,14 +84,11 @@ def _assert_fsm_edge(
     after: DeferralState,
     *,
     op: str,
-    gap_key: str | None = None,
 ) -> None:
     if before == after:
         return
     if after in ALLOWED_TRANSITIONS[before]:
         return
-    if gap_key and gap_key in _KNOWN_FSM_GAP:
-        pytest.skip(f"{op}: {_KNOWN_FSM_GAP[gap_key]}")
     pytest.fail(
         f"{op}: illegal deferral transition {before.value} → {after.value} "
         f"(not in ALLOWED_TRANSITIONS[{before.name}])",
@@ -197,9 +179,7 @@ def test_requeue_task_for_retry_cas_failed_parent_fsm(tmp_path):
     before = _classify_parent_row(conn, parent_id)
     assert requeue_task_for_retry_cas(conn, parent_id)
     after = _classify_parent_row(conn, parent_id)
-    _assert_fsm_edge(
-        before, after, op="requeue_task_for_retry_cas", gap_key="requeue_failed_parent",
-    )
+    _assert_fsm_edge(before, after, op="requeue_task_for_retry_cas")
 
 
 def test_fail_task_parent_fsm(tmp_path):
@@ -282,7 +262,7 @@ def test_retry_task_failed_parent_fsm(tmp_path):
     before = _classify_parent_row(conn, parent_id)
     assert retry_task(conn, parent_id) is True
     after = _classify_parent_row(conn, parent_id)
-    _assert_fsm_edge(before, after, op="retry_task", gap_key="retry_failed_parent")
+    _assert_fsm_edge(before, after, op="retry_task")
 
 
 def test_resume_tasks_by_reason_non_deferral_fsm(tmp_path):
