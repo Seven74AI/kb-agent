@@ -727,8 +727,9 @@ def _parent_media_was_deferred(conn, task_id: str, slug: str) -> bool:
             (task_id,),
         ).fetchone()
         if row and row[0]:
-            out = row[0].lower()
-            if "awaiting media" in out or MEDIA_DEFERRED_MARKER_PREFIX in out:
+            from agent.deferral_fsm import is_deferred_media_pause
+
+            if is_deferred_media_pause(row[0]):
                 return True
     return False
 

@@ -494,6 +494,68 @@ def test_persist_parent_media_deferral_scrubs_output(tmp_path):
     assert f"media_deferred:{slug}" in row[0]
 
 
+@pytest.mark.parametrize(
+    "embed_output,expected",
+    [
+        ("awaiting media: 1 images + 0 videos enqueued", True),
+        ("unsupported embed: foreign-widget", True),
+        ("media gate: unenqueued handled embed (orphan-id)", True),
+        ("deferred synthesis dispatch failed", True),
+        ("no embedded media", False),
+        ("firecrawl extracted body", False),
+    ],
+)
+def test_parent_media_was_deferred_embed_pause_predicate(tmp_path, embed_output, expected):
+    """`_parent_media_was_deferred` must use is_deferred_media_pause for embed output."""
+    from agent.db import AGENT_SCHEMA, create_task, init_db
+    from agent.pipelines.web import _parent_media_was_deferred
+
+    cfg = Config(kb_agent_dir=tmp_path / "kb", vault_path=tmp_path / "vault")
+    (cfg.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+    conn = init_db(cfg.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    slug = "defer-pause-predicate"
+    task_id = create_task(
+        conn,
+        "https://example.com/p",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media"],
+    )
+    conn.execute(
+        "UPDATE task_steps SET output = ?, status = 'paused' "
+        "WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (embed_output, task_id),
+    )
+    conn.commit()
+    assert _parent_media_was_deferred(conn, task_id, slug) is expected
+    conn.close()
+
+
+def test_parent_media_was_deferred_cleanup_slug_marker(tmp_path):
+    from agent.db import AGENT_SCHEMA, create_task, init_db
+    from agent.pipelines.web import _parent_media_was_deferred
+
+    cfg = Config(kb_agent_dir=tmp_path / "kb", vault_path=tmp_path / "vault")
+    (cfg.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+    conn = init_db(cfg.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    slug = "defer-cleanup-marker"
+    task_id = create_task(
+        conn,
+        "https://example.com/p",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media"],
+    )
+    conn.execute(
+        "UPDATE task_steps SET output = ?, status = 'done' "
+        "WHERE task_id = ? AND name = 'substack_cleanup'",
+        (f"cleaned\nmedia_deferred:{slug}", task_id),
+    )
+    conn.commit()
+    assert _parent_media_was_deferred(conn, task_id, slug) is True
+    conn.close()
+
+
 # ── _estimate_tokens tests ────────────────────────────────────────────────────
 
 def test_estimate_tokens_empty():

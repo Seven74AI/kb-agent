@@ -27,11 +27,21 @@ def scrub_durable_text(text: str, *, policy: PersistPolicy) -> str:
     raise ValueError(f"unknown persist policy: {policy!r}")
 
 
-def persist_durable_text(path: Path | str, text: str, *, policy: PersistPolicy) -> Path:
-    """Write *text* to *path* atomically after applying *policy*."""
+def persist_durable_text(
+    path: Path | str,
+    text: str,
+    *,
+    policy: PersistPolicy,
+    append: bool = False,
+) -> Path:
+    """Write *text* to *path* after applying *policy* (atomic replace, or append)."""
     path = Path(path)
     payload = scrub_durable_text(text, policy=policy)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if append:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(payload)
+        return path
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent,
         prefix=f".{path.name}.",

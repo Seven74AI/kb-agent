@@ -32,6 +32,7 @@ from agent.core.batch_lock import is_locked
 from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
 from agent.notify import scrub_outbound_visible_message
+from agent.persist import persist_durable_text
 from agent.mcp.db import open_agent_conn, open_logs_conn
 from agent.webhook import (
     _TOKEN_NOT_CONFIGURED_MSG,
@@ -280,8 +281,13 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
         script = Path(cfg.kb_agent_dir) / "scripts" / "batch_ingest.py"
         log_path = Path(cfg.kb_agent_dir) / "data" / "batch_manual.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        persist_durable_text(
+            log_path,
+            f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n",
+            policy="machine_local",
+            append=True,
+        )
         with open(log_path, "a") as log:
-            log.write(f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n")
             subprocess.Popen(
                 [sys.executable, str(script)],
                 stdout=log,
