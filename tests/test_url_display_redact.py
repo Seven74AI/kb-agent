@@ -58,7 +58,7 @@ def test_plan_submission_error_plan_redacts_url(monkeypatch, tmp_path):
 
     vault = tmp_path / "vault"
     vault.mkdir()
-    monkeypatch.setenv("VAULT_PATH", str(vault))
+    monkeypatch.setenv("KB_VAULT_PATH", str(vault))
     core_config = load_config()
     monkeypatch.setattr(
         "agent.core.submit.detect_content_subtype",
