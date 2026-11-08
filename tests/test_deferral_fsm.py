@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from agent.core.resume import retry_task
 from agent.db import (
@@ -352,12 +353,21 @@ def test_task_in_deferred_media_cycle_honors_error_marker(tmp_path):
 
 
 def test_import_leaf_has_no_db_dependency():
-    import importlib
+    # Run the isolation check in a FRESH subprocess so this test never mutates the
+    # process-wide ``sys.modules`` (deleting ``agent.*`` here would re-import them
+    # as new objects and break every later test's monkeypatch/module references).
+    import subprocess
     import sys
 
-    mods = {k: v for k, v in sys.modules.items() if k.startswith("agent.")}
-    for name in list(mods):
-        if name != "agent.deferral_fsm":
-            del sys.modules[name]
-    importlib.import_module("agent.deferral_fsm")
-    assert "agent.db" not in sys.modules
+    code = (
+        "import sys\n"
+        "import agent.deferral_fsm\n"
+        "assert 'agent.db' not in sys.modules, 'leaf must not import agent.db'\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert proc.returncode == 0, proc.stderr
