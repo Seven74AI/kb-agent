@@ -117,6 +117,11 @@ def _yaml_scalar_unquote(value: str) -> str:
     return value
 
 
+def prepare_ocr_reading_for_write(text: str) -> str:
+    """Scrub OCR ``reading`` fields before persisting ``*.ocr.json`` (URLs + credential shapes)."""
+    return redact_credential_shapes(redact_http_urls_in_text(text))
+
+
 def prepare_vault_note_for_write(content: str) -> str:
     """Apply body URL redaction and frontmatter scrub before persisting a vault note."""
     return scrub_vault_note_content(redact_http_urls_in_text(content))

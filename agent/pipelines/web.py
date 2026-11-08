@@ -219,19 +219,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     finally:
         _unlink_curl_netscape_sidecar(conf_path)
 
-    fragment_id = urlparse(url).fragment
-    if fragment_id and re.fullmatch(r"[a-f0-9-]+", fragment_id, re.IGNORECASE):
-        vid_from_frag = fragment_id
-    else:
-        vid_from_frag = None
-
-    vid = re.search(r'"videoUpload"\s*:\s*\{\s*"id"\s*:\s*"([a-f0-9-]+)"', html)
-    if vid_from_frag:
-        video_id = vid_from_frag
-    elif vid:
-        video_id = vid.group(1)
-    else:
-        video_id = None
+    video_id = _resolve_native_video_id(html, url)
 
     if not video_id:
         raise StepError(
@@ -373,6 +361,15 @@ def _extract_native_video_ids(html: str) -> list[str]:
         if vid and vid not in out:
             out.append(vid)
     return out
+
+
+def _resolve_native_video_id(html: str, source_url: str) -> str | None:
+    """One native Substack video id: URL ``#fragment`` wins, then extracted HTML ids."""
+    fragment_id = urlparse(source_url).fragment
+    if fragment_id and re.fullmatch(r"[a-f0-9-]+", fragment_id, re.IGNORECASE):
+        return fragment_id
+    ids = _extract_native_video_ids(html)
+    return ids[0] if ids else None
 
 
 def _fetch_substack_html(url: str, config: Config | None = None) -> str:
@@ -1028,41 +1025,55 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
         task_id = task.get("id", "")
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
-        pending = 0
-        prior_deferral = False
-        batch_finished = False
         try:
+            conn.execute("BEGIN IMMEDIATE")
             pending = count_pending_media(conn, slug)
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+                (slug,),
+            ).fetchone()
+            # Ingest sibling row count (re-read atomically with pending before success).
+            int(row["n"] if hasattr(row, "keys") else row[0])
             prior_deferral = _parent_media_was_deferred(conn, task_id, slug)
             batch_finished = _deferred_media_batch_finished(conn, config, slug)
             if (had_manifest or pending > 0) and not batch_finished:
                 _persist_parent_media_deferral(conn, task_id, slug)
+            if pending > 0:
+                conn.rollback()
+                raise StepError(
+                    "awaiting media — re-fetch found no embeds but siblings pending",
+                    error_type=ErrorType.PAUSE,
+                    step_name="substack_embedded_media",
+                )
+            if had_manifest and not batch_finished:
+                conn.rollback()
+                raise StepError(
+                    "awaiting media — re-fetch found no embeds but siblings pending",
+                    error_type=ErrorType.PAUSE,
+                    step_name="substack_embedded_media",
+                )
+            if prior_deferral and not batch_finished:
+                conn.rollback()
+                raise StepError(
+                    "awaiting media — re-fetch found no embeds; prior deferral with no batch completion",
+                    error_type=ErrorType.PAUSE,
+                    step_name="substack_embedded_media",
+                )
+            if batch_finished:
+                conn.rollback()
+                raise StepError(
+                    "batch synthesis dispatched or completed — parent must not re-enter synthesis",
+                    error_type=ErrorType.PAUSE,
+                    step_name="substack_embedded_media",
+                )
+            conn.commit()
+        except StepError:
+            raise
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
-        if pending > 0:
-            raise StepError(
-                "awaiting media — re-fetch found no embeds but siblings pending",
-                error_type=ErrorType.PAUSE,
-                step_name="substack_embedded_media",
-            )
-        if had_manifest and not batch_finished:
-            raise StepError(
-                "awaiting media — re-fetch found no embeds but siblings pending",
-                error_type=ErrorType.PAUSE,
-                step_name="substack_embedded_media",
-            )
-        if prior_deferral and not batch_finished:
-            raise StepError(
-                "awaiting media — re-fetch found no embeds; prior deferral with no batch completion",
-                error_type=ErrorType.PAUSE,
-                step_name="substack_embedded_media",
-            )
-        if batch_finished:
-            raise StepError(
-                "batch synthesis dispatched or completed — parent must not re-enter synthesis",
-                error_type=ErrorType.PAUSE,
-                step_name="substack_embedded_media",
-            )
         return "no embedded media"
 
     manifest_path = Path(config.temp_dir, f"{slug}_media.json")
@@ -1115,23 +1126,13 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         AGENT_SCHEMA,
         count_pending_media,
         ensure_parent_media_deferral,
-        get_parent_media_deferral,
         init_db,
         parent_media_complete,
     )
     from agent.notify import sanitize_visible_message
 
-    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-            (slug,),
-        ).fetchone()
-        queue_count = int(row["n"] if hasattr(row, "keys") else row[0])
-    finally:
-        conn.close()
-
     if enqueued_success < extracted_total:
+        _pause_on_unsupported_foreign_embed(html)
         shortfall = sanitize_visible_message(
             f"media gate: enqueue shortfall — extracted {extracted_total}, "
             f"enqueued {enqueued_success}",
@@ -1142,24 +1143,32 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             step_name="substack_embedded_media",
         )
 
-    if queue_count != extracted_total:
-        raise StepError(
-            _message_with_enqueue_failures(
-                f"media gate: ingest rows {queue_count} != extracted total {extracted_total}",
-                enqueue_stats,
-            ),
-            error_type=ErrorType.PAUSE,
-            step_name="substack_embedded_media",
-        )
-
     n_videos = (
         len(youtube_ids) + len(rumble_urls) + len(native_video_ids) + len(bunny_urls)
     )
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    media_ready = False
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (slug,),
+        ).fetchone()
+        queue_count = int(row["n"] if hasattr(row, "keys") else row[0])
+        if queue_count != extracted_total:
+            conn.rollback()
+            raise StepError(
+                _message_with_enqueue_failures(
+                    f"media gate: ingest rows {queue_count} != extracted total {extracted_total}",
+                    enqueue_stats,
+                ),
+                error_type=ErrorType.PAUSE,
+                step_name="substack_embedded_media",
+            )
+
         deferral_kw: dict = {}
-        if get_parent_media_deferral(conn, slug) is None and prior_manifest_media_changed:
+        if prior_manifest_media_changed:
             deferral_kw["media_changed"] = 1
         ensure_parent_media_deferral(
             conn,
@@ -1172,10 +1181,20 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         from scripts.batch_ingest import refresh_parent_media_manifest
 
         refresh_parent_media_manifest(conn, config, slug)
+        try:
+            refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            refreshed = {}
+        if refreshed.get("media_changed"):
+            from agent.db import mark_parent_media_changed
+
+            mark_parent_media_changed(conn, slug)
+
         pending = count_pending_media(conn, slug)
 
         if pending == 0:
             if gate_total != queue_count:
+                conn.rollback()
                 raise StepError(
                     f"media gate: ingest rows {queue_count} != manifest total {gate_total}",
                     error_type=ErrorType.PAUSE,
@@ -1183,19 +1202,29 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                 )
             raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
             if not parent_media_complete(conn, slug, raw_path=raw_path):
+                conn.rollback()
                 raise StepError(
                     "media gate: parent media not complete — raw markers or bodies missing",
                     error_type=ErrorType.PAUSE,
                     step_name="substack_embedded_media",
                 )
-            _pause_on_unsupported_foreign_embed(html)
-            return _message_with_enqueue_failures(
-                "media ready — deferred to batch", enqueue_stats,
-            )
-
-        _persist_parent_media_deferral(conn, task.get("id", ""), slug)
+            media_ready = True
+        else:
+            _persist_parent_media_deferral(conn, task.get("id", ""), slug)
+        conn.commit()
+    except StepError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
+
+    if media_ready:
+        _pause_on_unsupported_foreign_embed(html)
+        return _message_with_enqueue_failures(
+            "media ready — deferred to batch", enqueue_stats,
+        )
 
     _pause_on_unsupported_foreign_embed(html)
     raise StepError(

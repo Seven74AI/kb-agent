@@ -306,6 +306,28 @@ class TestAppendToParent:
         assert body.count("OCR text") == 1
         assert media_append_marker(ingest_id) in body
 
+    def test_append_parent_media_atomic_redacts_credential_shapes_in_body(self, config, conn):
+        from agent.db import append_parent_media_atomic, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "cred_scrub_parent"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img_cred",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+
+        body = "Slide text api_key=SECRET123 in screenshot"
+        assert append_parent_media_atomic(conn, ingest_id, raw, "Image", body) is True
+        written = raw.read_text(encoding="utf-8")
+        assert "SECRET123" not in written
+        assert "[credential redacted]" in written
+
     def test_append_parent_media_atomic_redacts_urls_in_transcript_body(self, config, conn):
         from agent.db import append_parent_media_atomic, queue_ingest
 
@@ -836,9 +858,9 @@ class TestKbOcrSizeCap:
         assert 'r.get("error")' in text
         assert "ocr_error_json" in text
 
-    def test_main_redacts_reading_urls_before_write(self):
+    def test_main_scrubs_reading_credentials_and_urls_before_write(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
-        assert "redact_http_urls_in_text" in text
+        assert "prepare_ocr_reading_for_write" in text
         assert 'r["reading"]' in text or "r['reading']" in text
 
     def test_batch_ingest_rejects_truncated_ocr_flag(self, config, conn, monkeypatch):

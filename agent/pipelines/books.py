@@ -93,6 +93,36 @@ def _mega_download_dir(task: dict, config: Config) -> Path:
     return Path(config.temp_dir) / f"mega_{_artifact_stem(task)}"
 
 
+def _book_classify_manifest_path(config: Config, task: dict) -> Path:
+    """Scrub-exempt machine-readable classify output (book file paths)."""
+    return Path(config.temp_dir) / f"{_artifact_stem(task)}_book_classify.json"
+
+
+def _write_book_classify_manifest(config: Config, task: dict, payload: dict) -> Path:
+    path = _book_classify_manifest_path(config, task)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _read_book_classify_manifest(config: Config, task: dict) -> dict:
+    path = _book_classify_manifest_path(config, task)
+    if not path.is_file():
+        raise StepError(
+            "classify_content manifest not found — cannot delegate",
+            error_type=ErrorType.FAIL,
+            step_name="delegate",
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise StepError(
+            f"Invalid classify_content manifest JSON: {e}",
+            error_type=ErrorType.FAIL,
+            step_name="delegate",
+        ) from e
+
+
 def _sanitize_subprocess_failure(text: str, *, max_len: int = 200) -> str:
     """Scrub tool stdout/stderr before it is embedded in StepError messages."""
     cleaned = sanitize_visible_message(redact_http_urls_in_text(text.strip()))
@@ -328,13 +358,15 @@ def step_classify_content(task: dict, config: Config) -> str:
     degraded = [c for c in classified if c.get("classification") == "degraded"]
     clean = [c for c in classified if c.get("classification") == "text"]
 
-    return json.dumps({
+    payload = {
         "total_files": len(classified),
         "scanned": len(scanned),
         "degraded": len(degraded),
         "clean_text": len(clean),
         "books": classified,
-    })
+    }
+    _write_book_classify_manifest(config, task, payload)
+    return json.dumps(payload)
 
 
 def _book_child_slug(parent_slug: str, file_path: str) -> str:
@@ -392,8 +424,8 @@ def _resolve_delegate_child_task(
 def step_delegate_books(task: dict, config: Config) -> str:
     """Create one child task per classified book using its registered pipeline.
 
-    Reads the classify_content step output from agent.db and enqueues pending
-    tasks for each book whose pipeline is registered (e.g. book_epub, book_pdf).
+    Reads scrub-exempt classify manifest on disk (not ``task_steps.output``) and
+    enqueues pending tasks for each book whose pipeline is registered.
     """
     from agent.db import AGENT_SCHEMA, init_db
     from agent.pipelines import PIPELINES, get_pipeline_names, import_all_pipelines
@@ -405,7 +437,7 @@ def step_delegate_books(task: dict, config: Config) -> str:
     conn = init_db(db_path, AGENT_SCHEMA)
     try:
         row = conn.execute(
-            "SELECT output FROM task_steps "
+            "SELECT 1 FROM task_steps "
             "WHERE task_id = ? AND name = 'classify_content' AND status = 'done' "
             "ORDER BY step_order LIMIT 1",
             (task_id,),
@@ -413,21 +445,14 @@ def step_delegate_books(task: dict, config: Config) -> str:
     finally:
         conn.close()
 
-    if not row or not row[0]:
+    if not row:
         raise StepError(
-            "classify_content output not found — cannot delegate",
+            "classify_content step not complete — cannot delegate",
             error_type=ErrorType.FAIL,
             step_name="delegate",
         )
 
-    try:
-        classification = json.loads(row[0])
-    except json.JSONDecodeError as e:
-        raise StepError(
-            f"Invalid classify_content JSON: {e}",
-            error_type=ErrorType.FAIL,
-            step_name="delegate",
-        ) from e
+    classification = _read_book_classify_manifest(config, task)
 
     books = classification.get("books") or []
     parent_slug = task.get("slug", task["id"][:8])

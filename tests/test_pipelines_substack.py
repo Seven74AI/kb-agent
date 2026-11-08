@@ -24,6 +24,7 @@ from agent.pipelines.web import (
     _assert_substack_video_cdn_url_allowed,
     _extract_body_images,
     _extract_native_video_ids,
+    _resolve_native_video_id,
     _ingest_download_stem,
     step_substack_video_download,
     _extract_rumble_urls,
@@ -562,6 +563,36 @@ class TestSubstackVideoMetadata:
         with pytest.raises(Exception) as exc:
             step_substack_video_extract_metadata(task_dict, config)
         assert "videoUpload.id" in str(exc.value) or "video id" in str(exc.value)
+
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_metadata_api_path_only_html(
+        self, mock_run, config, task_dict,
+    ):
+        """Standalone substack_video: API upload path alone must resolve id (no metadata PAUSE)."""
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        vid = "deadbeef-1111-2222-3333-444455556666"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                f'<title>Native</title><body>'
+                f'<a href="/api/v1/video/upload/{vid}/src">watch</a>'
+                "</body></html>"
+            ),
+        )
+        result = step_substack_video_extract_metadata(task_dict, config)
+        assert vid in result
+        meta = json.loads(
+            (config.temp_dir / f"{task_dict['slug']}_metadata.json").read_text(encoding="utf-8")
+        )
+        assert meta["video_id"] == vid
+
+    def test_resolve_native_video_id_fragment_precedence(self):
+        html = (
+            '{"videoUpload":{"id":"aaaa1111-1111-1111-1111-111111111111"}}'
+            "/api/v1/video/upload/bbbb2222-2222-2222-2222-222222222222/"
+        )
+        url = "https://author.substack.com/p/post#cccc3333-3333-3333-3333-333333333333"
+        assert _resolve_native_video_id(html, url) == "cccc3333-3333-3333-3333-333333333333"
 
     @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._enqueue_embedded_media")
@@ -1935,6 +1966,116 @@ class TestSubstackVideoMetadata:
         assert exc.value.error_type == ErrorType.PAUSE
         assert "media gate" in str(exc.value)
         assert "ingest rows 1 != manifest total 2" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_embed_gate_atomic_begin_immediate_before_success(
+        self, mock_fetch, config, task_dict, tmp_path, monkeypatch,
+    ):
+        import agent.db as db_mod
+        from agent.pipelines.web import EmbeddedMediaEnqueueStats
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        img = "https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"
+        mock_fetch.return_value = (
+            f'<div data-attrs="{{&quot;src&quot;:&quot;{img}&quot;}}"></div>'
+        )
+
+        begin_calls: list[str] = []
+        _real_init_db = db_mod.init_db
+
+        class TrackingConnection:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *args, **kwargs):
+                if isinstance(sql, str) and sql.strip().upper() == "BEGIN IMMEDIATE":
+                    begin_calls.append("BEGIN IMMEDIATE")
+                return self._inner.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def tracking_init(*a, **k):
+            return TrackingConnection(_real_init_db(*a, **k))
+
+        monkeypatch.setattr(db_mod, "init_db", tracking_init)
+
+        with patch(
+            "agent.pipelines.web._enqueue_embedded_media",
+            return_value=EmbeddedMediaEnqueueStats(1, 1),
+        ):
+            with pytest.raises(StepError):
+                step_substack_embedded_media(task_dict, config)
+        assert begin_calls, "embed gate must BEGIN IMMEDIATE before final PAUSE/success"
+
+    @patch("agent.core.submit.submit_ingest")
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_enqueue_shortfall_surfaces_unsupported_foreign_embed(
+        self, mock_fetch, mock_submit, config, task_dict, tmp_path,
+    ):
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        img_a = "https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"
+        img_b = "https://substack-post-media.s3.amazonaws.com/public/images/img2_1200x800.webp"
+        mock_fetch.return_value = (
+            f'<div data-attrs="{{&quot;src&quot;:&quot;{img_a}&quot;}}"></div>'
+            f'<div data-attrs="{{&quot;src&quot;:&quot;{img_b}&quot;}}"></div>'
+            '<iframe src="https://platform.twitter.com/embed/Tweet.html?id=1"></iframe>'
+        )
+
+        def submit_side_effect(url, *args, **kwargs):
+            if "img1" in url:
+                return {"status": "queued", "http_status": 202, "ingest_id": "one"}
+            return {"status": "error", "http_status": 400, "error": "validation failed"}
+
+        mock_submit.side_effect = submit_side_effect
+
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        msg = str(exc.value).lower()
+        assert "unsupported embed" in msg
+        assert "twitter" in msg
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_manifest_media_changed_upgrades_existing_deferral_row(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, get_parent_media_deferral, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "e1759be2-c46b-4876-b0b7-996813ef9629"
+        (config.temp_dir / f"{slug}_media.json").write_text(
+            json.dumps({"content_type": "substack_text", "total": 1, "media_changed": True}),
+            encoding="utf-8",
+        )
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ensure_parent_media_deferral(
+            conn, slug, post, "substack_text", 1, media_changed=0,
+        )
+        conn.commit()
+        conn.close()
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe></body></html>"
+        )
+        with pytest.raises(StepError):
+            step_substack_embedded_media(task_dict, config)
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            deferral = get_parent_media_deferral(conn, slug)
+            assert deferral is not None
+            assert int(deferral["media_changed"]) == 1
+        finally:
+            conn.close()
 
     @patch("agent.core.submit.submit_ingest")
     @patch("agent.pipelines.web._fetch_substack_html")

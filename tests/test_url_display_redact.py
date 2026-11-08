@@ -10,6 +10,7 @@ from agent.core.bulk import ingest_playlist
 from agent.core.redact import url_for_display
 from agent.redact import (
     failure_text_for_display,
+    prepare_ocr_reading_for_write,
     redact_http_urls_in_text,
     scrub_vault_note_content,
     write_vault_note,
@@ -92,6 +93,23 @@ def test_failure_text_for_display_redacts_url_and_absolute_path():
     assert "x.md" in safe
     assert "token=secret" not in safe
     assert "https://cdn.example.com/v.mp4" in safe
+
+
+def test_prepare_ocr_reading_for_write_scrubs_credentials_and_urls():
+    raw = (
+        "Slide title\n"
+        "api_key=supersecretdeadbeef\n"
+        "sessionid=abc123sessionvalue\n"
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.leak\n"
+        f"Ref {TOKENIZED}\n"
+    )
+    scrubbed = prepare_ocr_reading_for_write(raw)
+    assert "supersecret" not in scrubbed
+    assert "[credential redacted]" in scrubbed
+    assert "sessionid=[REDACTED]" in scrubbed
+    assert "Bearer [redacted]" in scrubbed
+    assert "token=secret" not in scrubbed
+    assert "https://cdn.example.com/video.mp4" in scrubbed
 
 
 def test_prepare_vault_note_for_write_redacts_body_and_frontmatter(tmp_path):

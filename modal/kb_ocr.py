@@ -191,10 +191,10 @@ def main(image_dir: str = None, out_dir: str = "."):
             if r.get("error"):
                 json.dump(ocr_error_json(r["error"]), f, ensure_ascii=False, indent=2)
             else:
-                from agent.redact import redact_http_urls_in_text
+                from agent.redact import prepare_ocr_reading_for_write
 
                 json.dump(
-                    {"reading": redact_http_urls_in_text(r["reading"])},
+                    {"reading": prepare_ocr_reading_for_write(r["reading"])},
                     f,
                     ensure_ascii=False,
                     indent=2,

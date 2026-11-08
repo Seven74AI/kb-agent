@@ -32,6 +32,11 @@ _EMBEDDED_MEDIA_AWAITING_RE = re.compile(
     re.IGNORECASE,
 )
 
+_EMBED_STEP_TERMINAL_SUCCESS_HEADS = (
+    "no embedded media",
+    "media ready — deferred to batch",
+)
+
 
 def is_deferred_media_pause(reason: str | None) -> bool:
     """True when a pause reason signals the parent must not pass ``synthesize_note``."""
@@ -39,6 +44,16 @@ def is_deferred_media_pause(reason: str | None) -> bool:
         return False
     low = reason.lower()
     return any(marker in low for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
+
+
+def _embed_step_output_terminal_success(output: str | None) -> bool:
+    """True when ``substack_embedded_media`` finished with a non-pause terminal message."""
+    if not output:
+        return False
+    head = output.split("\n", 1)[0].strip()
+    if head == _EMBED_STEP_TERMINAL_SUCCESS_HEADS[0]:
+        return True
+    return head.startswith(_EMBED_STEP_TERMINAL_SUCCESS_HEADS[1])
 
 
 def _substack_cleanup_output_signals_deferred_media(
@@ -72,10 +87,37 @@ def task_deferred_retry_preserves_embed_step(
 ) -> bool:
     """True when ``retry_task`` must not rewind ``substack_embedded_media``.
 
-    Matches :func:`task_in_deferred_media_cycle` exactly (deferral row, cleanup
-    marker, ``tasks.error``, or ``substack_embedded_media`` step output).
+    Unlike :func:`task_in_deferred_media_cycle`, stale deferral rows and terminal-
+    success embed output do not preserve the embed step — only open embed pause
+    states (failed/paused step, or embed output matching a deferral pause marker).
     """
-    return task_in_deferred_media_cycle(conn, task_id, slug=slug, error=error)
+    if slug:
+        deferral = get_parent_media_deferral(conn, slug)
+        if deferral is not None and int(deferral.get("media_changed") or 0):
+            return False
+        if count_pending_media(conn, slug) > 0:
+            return False
+
+    row = conn.execute(
+        """
+        SELECT status, output FROM task_steps
+        WHERE task_id = ? AND name = 'substack_embedded_media'
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    status, output = row[0], row[1]
+
+    if _embed_step_output_terminal_success(output):
+        return False
+
+    if status in ("failed", "paused"):
+        return True
+    if output and is_deferred_media_pause(output):
+        return True
+    return False
 
 
 def task_in_deferred_media_cycle(
@@ -1738,6 +1780,7 @@ def parent_media_complete(
     parent_slug: str,
     *,
     raw_path: Path | None = None,
+    allow_db_only: bool = False,
 ) -> bool:
     """True when every deferred sibling is dispatched and its append marker is on disk."""
     if not parent_slug:
@@ -1768,6 +1811,8 @@ def parent_media_complete(
         ):
             return False
     if raw_path is None:
+        if expected > 0 and not allow_db_only:
+            return False
         return True
     if not raw_path.is_file():
         return False
@@ -1838,7 +1883,9 @@ def append_parent_media_atomic(
         return False
     if not raw_path.exists():
         return False
-    safe_body = redact_http_urls_in_text(body).strip()
+    from agent.notify import redact_credential_shapes
+
+    safe_body = redact_credential_shapes(redact_http_urls_in_text(body)).strip()
     text = raw_path.read_text(encoding="utf-8")
     media_flag = bool(row["media_appended"] if hasattr(row, "keys") else row[0])
     sibling_ids = _ordered_sibling_ids_for_ingest(conn, ingest_id)
@@ -2412,12 +2459,19 @@ def reset_task_steps_for_retry(
                 conn, task_id, slug, error=error,
             )
             step_filter = "step_order > ?" if preserve_embed else "step_order >= ?"
+            if preserve_embed:
+                status_clause = "status IN ('failed', 'paused', 'running')"
+            else:
+                status_clause = (
+                    "(status IN ('failed', 'paused', 'running') "
+                    "OR (name = 'substack_embedded_media' AND status = 'done'))"
+                )
             conn.execute(
                 f"""
                 UPDATE task_steps
                 SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
                 WHERE task_id = ? AND {step_filter}
-                AND status IN ('failed', 'paused', 'running')
+                AND {status_clause}
                 """,
                 (task_id, embed[0]),
             )
