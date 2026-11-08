@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 from agent.core.resume import retry_task
@@ -12,7 +10,6 @@ from agent.db import (
     complete_task,
     create_task,
     ensure_parent_media_deferral,
-    get_task_steps,
     init_db,
     may_reset_parent_task,
     requeue_task_for_retry_cas,
