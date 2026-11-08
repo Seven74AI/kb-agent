@@ -67,7 +67,14 @@ def _finalize_visible_message(text: str) -> str:
 
 def ocr_error_json(error: str) -> dict:
     """Artifact-safe OCR failure payload for ``*.ocr.json`` writers."""
-    return {"error": sanitize_visible_message(error)}
+    return {"error": scrub_outbound_visible_message(error)}
+
+
+def scrub_outbound_visible_message(message: str) -> str:
+    """Scrub user-facing text at emission: display-safe URLs plus visible-message policy."""
+    from agent.db import _persist_visible_error
+
+    return _persist_visible_error(message)
 
 
 def sanitize_visible_message(message: str) -> str:
@@ -116,7 +123,7 @@ def notify_task(config: Config, slug: str, content_type: str, status: str, reaso
         head = f"⏸ Task PAUSED: <code>{slug}</code> ({content_type})"
     lines = [head]
     if reason:
-        lines.append(f"reason: {sanitize_visible_message(reason)}")
+        lines.append(f"reason: {scrub_outbound_visible_message(reason)}")
     send_message(config, "\n".join(lines))
 
 
@@ -128,6 +135,6 @@ def notify_batch(config: Config, failed: int, total: int, dispatched: int, cause
         head = f"⚠️ Batch run: {failed}/{total} failed · {dispatched} dispatched"
     lines = [head]
     if causes:
-        scrubbed = [sanitize_visible_message(c) for c in dict.fromkeys(causes[:3])]
+        scrubbed = [scrub_outbound_visible_message(c) for c in dict.fromkeys(causes[:3])]
         lines.append("cause: " + "; ".join(scrubbed))
     send_message(config, "\n".join(lines))

@@ -12,7 +12,7 @@ sys.path.insert(0, "/root/kb-agent")
 from agent.config import load_config  # noqa: E402
 from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
-from agent.notify import sanitize_visible_message  # noqa: E402
+from agent.db import _persist_visible_error  # noqa: E402
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
 from agent.redact import ensure_merged_transcript_file_redacted, write_merged_transcript_json  # noqa: E402
 from agent.transcription import merge_speakers_from_paths  # noqa: E402
@@ -83,7 +83,7 @@ def _finalize_video_dispatch(page_url, config, conn, slug):
     )
     if rr.get("status") == "error":
         err = rr.get("error") or "dispatch_synthesize failed"
-        print(f"  [warn] {slug}: dispatch failed ({sanitize_visible_message(err)})")
+        print(f"  [warn] {slug}: dispatch failed ({_persist_visible_error(err)})")
         return None
     print(f"  {slug}: uploaded + task {rr.get('task_id', '?')}")
     return rr.get("task_id", "?")
@@ -141,7 +141,7 @@ def main():
             "--language", LANG, "--initial-prompt", INITIAL_PROMPT, "--hotwords", HOTWORDS],
             cwd=MODAL, timeout=3600)
     tail = (r.stdout or r.stderr)[-1500:]
-    print("Modal output tail:\n" + sanitize_visible_message(tail))
+    print("Modal output tail:\n" + _persist_visible_error(tail))
 
     # 5. merge + upload + dispatch
     made = []

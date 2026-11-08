@@ -26,10 +26,15 @@ from agent.core import (
 )
 from agent.redact import redact_outward_url_field, url_for_display
 from agent.core.resume import ResumeReasonError, normalize_reason_pattern
-from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
+from agent.db import (
+    AGENT_SCHEMA,
+    LOGS_SCHEMA,
+    _persist_visible_error,
+    get_last_batch_run,
+    list_ingest_queue,
+    remove_ingest,
+)
 from scripts.batch_ingest import refresh_parent_media_manifest
-from agent.notify import sanitize_visible_message
-
 app = Flask(__name__)
 config: Config = load_config()
 
@@ -609,14 +614,14 @@ def dashboard():
 
     for q in ingest:
         if q.get("error"):
-            q["error"] = sanitize_visible_message(q["error"])
+            q["error"] = _persist_visible_error(q["error"])
         if q.get("url"):
             q["url"] = url_for_display(q["url"])
     if last_run and last_run.get("summary"):
-        last_run = {**last_run, "summary": sanitize_visible_message(last_run["summary"])}
+        last_run = {**last_run, "summary": _persist_visible_error(last_run["summary"])}
     for task in tasks:
         if task.get("error"):
-            task["error"] = sanitize_visible_message(task["error"])
+            task["error"] = _persist_visible_error(task["error"])
 
     # Failure-first ordering + a single failure count for the banner/tab title.
     bad = {"failed", "paused"}

@@ -21,7 +21,6 @@ from agent.detection import (
     preflight_health,
 )
 from agent.redact import redact_outward_url_field, url_for_display
-from agent.notify import sanitize_visible_message
 
 
 def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> dict:
@@ -56,7 +55,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
             return {
                 "status": "error",
                 "http_status": 500,
-                "error": sanitize_visible_message(f"dedup check failed: {exc}"),
+                "error": _persist_visible_error(f"dedup check failed: {exc}"),
                 "platform": platform,
             }
         if in_vault:
@@ -93,7 +92,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
         ok = False
         reason = reason or "Threads subtype fetch failed — retry when cookies or network recover"
     slug = slugify(url, content_type=subtype)
-    pause_reason = sanitize_visible_message(reason) if (not ok and reason) else None
+    pause_reason = _persist_visible_error(reason) if (not ok and reason) else None
 
     return {
         "status": "paused" if not ok else "pending",

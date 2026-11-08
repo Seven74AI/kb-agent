@@ -440,6 +440,49 @@ async def test_execute_task_unexpected_exception_uses_on_error(consumer, agent_d
 
 
 @pytest.mark.asyncio
+async def test_execute_task_stops_when_task_superseded_mid_loop(consumer, agent_db):
+    """Consumer must not complete_task over a batch-superseded parent terminal row."""
+    task_id = create_task(
+        agent_db,
+        "https://example.com",
+        "web",
+        "supersede_parent",
+        ["mark_superseded", "step_after"],
+        status="in_progress",
+    )
+
+    async def mark_superseded(task, cfg):
+        consumer.agent_conn.execute(
+            "UPDATE tasks SET status = 'completed', error = ? WHERE id = ?",
+            ("deferred synthesis dispatched; parent ingestion superseded", task["id"]),
+        )
+        consumer.agent_conn.commit()
+        return "marked"
+
+    def step_after(task, cfg):
+        return "should_not_run"
+
+    register_step("mark_superseded", mark_superseded, "retry")
+    register_step("step_after", step_after, "retry")
+
+    await consumer._execute_task({"id": task_id, "content_type": "web"})
+
+    row = agent_db.execute(
+        "SELECT status, error FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert "superseded" in (row["error"] or "").lower()
+
+    steps = get_task_steps(agent_db, task_id)
+    by_name = {s["name"]: s["status"] for s in steps}
+    assert by_name["mark_superseded"] == "done"
+    assert by_name["step_after"] == "pending"
+
+    for name in ("mark_superseded", "step_after"):
+        del STEP_REGISTRY[name]
+
+
+@pytest.mark.asyncio
 async def test_execute_task_successful(consumer, agent_db):
     """Test that a task with all steps passes through to completion."""
     task_id = create_task(agent_db, "https://example.com", "web", "test_slug",

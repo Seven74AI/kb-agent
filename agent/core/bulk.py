@@ -11,7 +11,7 @@ import sqlite3
 
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
-from agent.notify import sanitize_visible_message
+from agent.db import _persist_visible_error
 from agent.redact import url_for_display
 
 # yt-dlp lives in the py3.11 hermes-agent venv; the MCP server runs in a separate
@@ -126,7 +126,7 @@ def ingest_playlist(
     except PlaylistExpandError as exc:
         return {
             "status": "error",
-            "error": sanitize_visible_message(str(exc)),
+            "error": _persist_visible_error(str(exc)),
             "playlist_url": url_for_display(playlist_url),
             "count": 0,
             "results": [],

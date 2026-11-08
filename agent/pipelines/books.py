@@ -345,30 +345,6 @@ def _vault_frontmatter_source_url(source_url: str) -> str:
     return redacted
 
 
-def _reset_delegate_child_task(
-    conn, task_id: str, file_path: str,
-) -> None:
-    """Re-queue a delegate child for ingestion (failed terminal or source generation change)."""
-    with conn:
-        conn.execute(
-            """
-            UPDATE task_steps
-            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-            WHERE task_id = ?
-            """,
-            (task_id,),
-        )
-        conn.execute(
-            """
-            UPDATE tasks
-            SET source_url = ?, status = 'pending', error = NULL, retries = 0,
-                updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (file_path, task_id),
-        )
-
-
 def _resolve_delegate_child_task(
     conn,
     child_slug: str,
@@ -377,40 +353,9 @@ def _resolve_delegate_child_task(
     steps: list[str],
     tags,
 ) -> str:
-    from agent.db import create_task, find_active_task
+    from agent.db import create_delegate_task
 
-    existing_id = find_active_task(conn, child_slug, pipeline)
-    if existing_id:
-        row = conn.execute(
-            "SELECT status, source_url FROM tasks WHERE id = ?",
-            (existing_id,),
-        ).fetchone()
-        status = row[0]
-        src = row[1]
-        same_source = Path(src or "").resolve() == Path(file_path).resolve()
-        if status in ("done", "completed"):
-            if same_source:
-                return existing_id
-            _reset_delegate_child_task(conn, existing_id, file_path)
-            return existing_id
-        if not same_source:
-            conn.execute(
-                "UPDATE tasks SET source_url = ?, updated_at = datetime('now') WHERE id = ?",
-                (file_path, existing_id),
-            )
-        return existing_id
-
-    failed_row = conn.execute(
-        "SELECT id FROM tasks WHERE slug = ? AND content_type = ? AND status = 'failed' "
-        "ORDER BY created_at ASC, id ASC LIMIT 1",
-        (child_slug, pipeline),
-    ).fetchone()
-    if failed_row:
-        task_id = failed_row[0]
-        _reset_delegate_child_task(conn, task_id, file_path)
-        return task_id
-
-    return create_task(
+    return create_delegate_task(
         conn,
         file_path,
         pipeline,

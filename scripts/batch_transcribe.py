@@ -22,7 +22,7 @@ os.environ.pop("PYTHONPATH", None)
 _bootstrap_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_bootstrap_root))
 sys.path.insert(0, "/root/kb-agent")
-from agent.notify import sanitize_visible_message  # noqa: E402
+from agent.db import _persist_visible_error  # noqa: E402
 from agent.redact import write_merged_transcript_json  # noqa: E402
 from agent.transcription import merge_speakers_from_paths  # noqa: E402
 
@@ -50,7 +50,7 @@ def _print_scrubbed_child_tail(
     raw = _child_captured_output(result)
     if not raw:
         return
-    print(sanitize_visible_message(raw[-tail_chars:]))
+    print(_persist_visible_error(raw[-tail_chars:]))
 
 
 def extract_wav(video_path: str, wav_path: str) -> subprocess.CompletedProcess:
@@ -101,7 +101,7 @@ def main():
                 continue
             if r.returncode != 0:
                 err = (r.stderr or r.stdout or "").strip()
-                detail = sanitize_visible_message(err) if err else str(r.returncode)
+                detail = _persist_visible_error(err) if err else str(r.returncode)
                 print(f"[error] {f}: ffmpeg failed ({detail})")
                 continue
             names.append(base)
@@ -109,7 +109,7 @@ def main():
             shutil.copy(p, os.path.join(wav_dir, f))
             names.append(base)
     if not names:
-        print("no videos or .wav files found in", sanitize_visible_message(in_dir))
+        print("no videos or .wav files found in", _persist_visible_error(in_dir))
         return 1
     print(f"batch: {len(names)} input(s) -> one Modal run")
 
