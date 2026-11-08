@@ -1016,7 +1016,8 @@ def test_resume_awaiting_media_does_not_skip_embedded_step(tmp_path):
     assert steps["synthesize_note"] == "pending"
 
 
-def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
+def test_retry_awaiting_media_preserves_embed_step(tmp_path):
+    """Enqueue shortfall pause (no parent_media_deferral row) still preserves embed on retry."""
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
     task_id = create_task(
@@ -1031,6 +1032,7 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
         "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
         (task_id,),
     ).fetchone()[0]
+    embed_output = "defer"
     conn.execute(
         "UPDATE tasks SET error = ? WHERE id = ?",
         ("awaiting media: 1 images enqueued", task_id),
@@ -1040,17 +1042,67 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
         (task_id,),
     )
     conn.execute(
-        "UPDATE task_steps SET status = 'paused', output = 'defer' WHERE id = ?",
-        (defer_step_id,),
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (embed_output, defer_step_id),
     )
     conn.commit()
 
     assert retry_task(conn, task_id) is True
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (defer_step_id,),
+    ).fetchone()
+    assert embed[0] == "paused"
+    assert embed[1] == embed_output
     steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
     assert steps["substack_cleanup"] == "running"
-    assert steps["substack_embedded_media"] == "pending"
     assert steps["synthesize_note"] == "pending"
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+
+
+def test_retry_media_gate_preserves_embed_without_deferral_row(tmp_path):
+    """``media gate`` in ``tasks.error`` with no deferral row preserves embed on retry."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "media_gate_no_row"
+    pause_reason = "media gate: ingest rows 1 != manifest total 2"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/gate",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    embed_output = "manifest partial"
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (embed_output, embed_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    )
+    conn.commit()
+    assert task_in_deferred_media_cycle(conn, task_id, slug=slug, error=pause_reason)
+
+    assert retry_task(conn, task_id) is True
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (embed_id,),
+    ).fetchone()
+    assert embed[0] == "paused"
+    assert embed[1] == embed_output
+    steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["synthesize_note"] == "pending"
 
 
 def test_retry_failed_deferral_cycle_preserves_embed_step(tmp_path):

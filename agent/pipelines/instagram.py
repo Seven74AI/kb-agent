@@ -996,7 +996,14 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
         storage_slug = _resolve_slug(task)
         video_path = resolve_instagram_reel_video(config, task)
         dest_ext = video_path.suffix.lower().lstrip(".") or "mp4"
-        uploaded = upload_video_source(storage_slug, config, video_path, dest_ext, note_path)
+        uploaded = upload_video_source(
+            storage_slug,
+            config,
+            video_path,
+            dest_ext,
+            note_path,
+            artifact_stem=_artifact_stem(task),
+        )
         return f"Uploaded: {', '.join(uploaded)}"
 
     # Note-archival: post/carousel.

@@ -63,7 +63,6 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
             task_id,
             slug=row[2],
             error=row[1],
-            task_status=row[0],
         )
         agent_conn.execute(
             """

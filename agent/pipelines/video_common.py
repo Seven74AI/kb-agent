@@ -644,23 +644,32 @@ def upload_video_artifacts(slug: str, config: Config, video_path: Path) -> list[
     return uploaded
 
 
-def upload_video_source(slug: str, config: Config, video_path: Path,
-                        dest_ext: str, note_path: Path) -> list[str]:
-    """Upload a video source + merged transcript, then rewrite note source_files."""
+def upload_video_source(storage_slug: str, config: Config, video_path: Path,
+                        dest_ext: str, note_path: Path, *,
+                        artifact_stem: str) -> list[str]:
+    """Upload a video source + merged transcript, then rewrite note source_files.
+
+    ``artifact_stem`` names local temp artifacts; ``storage_slug`` keys MinIO objects
+    (see ``step_fetch_transcript`` for the same split).
+    """
     from agent.archival import upload_file_to_minio, write_source_files_block
 
     bucket = config.minio_bucket
     uploaded = []
 
     if video_path.exists():
-        upload_file_to_minio(video_path, f"{bucket}/videos/{slug}.{dest_ext}", timeout=120)
-        uploaded.append(f"videos/{slug}.{dest_ext}")
+        upload_file_to_minio(
+            video_path, f"{bucket}/videos/{storage_slug}.{dest_ext}", timeout=120,
+        )
+        uploaded.append(f"videos/{storage_slug}.{dest_ext}")
 
-    merged = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged = Path(config.temp_dir) / f"{artifact_stem}_merged.json"
     if merged.exists():
         ensure_merged_transcript_file_redacted(merged)
-        upload_file_to_minio(merged, f"{bucket}/transcripts/{slug}.json", timeout=120)
-        uploaded.append(f"transcripts/{slug}.json")
+        upload_file_to_minio(
+            merged, f"{bucket}/transcripts/{storage_slug}.json", timeout=120,
+        )
+        uploaded.append(f"transcripts/{storage_slug}.json")
 
     write_source_files_block(note_path, uploaded, config)
     return uploaded

@@ -225,11 +225,12 @@ def test_ig_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
         encoding="utf-8",
     )
     (config.temp_dir / f"{task_id}.mp4").write_bytes(b"video-bytes")
-    (config.temp_dir / f"{slug}_merged.json").write_text("{}", encoding="utf-8")
+    (config.temp_dir / f"{task_id}_merged.json").write_text("{}", encoding="utf-8")
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     result = step_ig_minio_upload(task, config)
     assert result.startswith("Uploaded:")
     assert f"videos/{slug}.mp4" in result
+    assert f"transcripts/{slug}.json" in result
 
 
 def test_ig_cleanup_batch_removes_id_keyed_reel_mp4(config):
@@ -265,10 +266,12 @@ def test_threads_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
         encoding="utf-8",
     )
     (config.temp_dir / f"{task_id}.mp4").write_bytes(b"video")
+    (config.temp_dir / f"{task_id}_merged.json").write_text("{}", encoding="utf-8")
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     result = step_threads_minio_upload(task, config)
     assert result.startswith("Uploaded:")
     assert f"videos/{slug}.mp4" in result
+    assert f"transcripts/{slug}.json" in result
 
 
 def test_threads_cleanup_batch_removes_plain_mp4(config):
