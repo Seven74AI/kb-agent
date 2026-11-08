@@ -8,6 +8,8 @@ Max 3 retry rounds.
 from pathlib import Path
 import re
 
+from agent.notify import redact_credential_shapes
+
 
 def count_quotes(lines: list[str]) -> int:
     """Count blockquote lines, tolerating a leading bullet marker.
@@ -468,5 +470,5 @@ def _structural_review(note_content: str, llm) -> str:
         response = llm.call(system_prompt=prompt, user_prompt="Review this note.", role="review")
         return response.content.strip()
     except Exception as e:
-        # If LLM review fails, pass through (don't block on infra)
-        return f"pass  # Review skipped (LLM error: {e})"
+        safe_err = redact_credential_shapes(str(e))[:200]
+        return f"review_error: LLM call failed ({safe_err})"

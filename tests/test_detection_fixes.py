@@ -284,6 +284,34 @@ def test_fetch_content_substack_logs_on_failure(monkeypatch, caplog):
     assert any("Substack content fetch failed" in rec.message for rec in caplog.records)
 
 
+def test_fetch_content_mega_logs_on_failure(monkeypatch, caplog):
+    def boom(cmd, **kwargs):
+        raise OSError("megadl unavailable")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    caplog.set_level(logging.WARNING)
+    assert _fetch_content("https://mega.nz/file/abc#key", "mega") is None
+    assert any("Mega content fetch failed" in rec.message for rec in caplog.records)
+
+
+_SENSITIVE_THREADS = (
+    "https://threads.net/@u/post/1?token=sekrit123&sig=abcdef"
+)
+
+
+def test_fetch_content_failure_logs_redact_url_query(monkeypatch, caplog):
+    def boom(cmd, **kwargs):
+        raise OSError("curl vanished")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    caplog.set_level(logging.WARNING)
+    _fetch_content(_SENSITIVE_THREADS, "threads")
+    combined = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "sekrit123" not in combined
+    assert "sig=abcdef" not in combined
+    assert "threads.net" in combined
+
+
 def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):
     def boom(url, content):
         raise RuntimeError("jev down")
@@ -294,8 +322,9 @@ def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):
         "agent.detection._detect_substack_subtype", lambda url: "substack_text",
     )
     caplog.set_level(logging.WARNING)
-    assert (
-        detect_content_subtype("https://example.substack.com/p/x", "substack")
-        == "substack_text"
-    )
+    sensitive = "https://example.substack.com/p/x?token=jevleak&download=1"
+    assert detect_content_subtype(sensitive, "substack") == "substack_text"
+    combined = " ".join(rec.getMessage() for rec in caplog.records)
     assert any("Jev routing failed" in rec.message for rec in caplog.records)
+    assert "jevleak" not in combined
+    assert "token=" not in combined

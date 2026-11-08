@@ -64,7 +64,14 @@ def _recover_orphans(config: Config):
         ).fetchone()
 
         if not step:
-            print(f"[run] Orphan task {task_id[:8]} — no running step, resuming")
+            print(
+                f"[run] Orphan task {task_id[:8]} — "
+                f"no running step, resetting to pending"
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'pending' WHERE id = ?",
+                (task_id,),
+            )
             continue
 
         step_id, step_order, step_name, step_output = step

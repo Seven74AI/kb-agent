@@ -671,10 +671,17 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     )
 
     n_videos = len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
-    from agent.db import AGENT_SCHEMA, count_pending_media, init_db
+    from agent.db import AGENT_SCHEMA, count_pending_media, ensure_parent_media_deferral, init_db
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
+        ensure_parent_media_deferral(
+            conn,
+            slug,
+            url,
+            task.get("content_type", "substack_text"),
+            gate_total,
+        )
         pending = count_pending_media(conn, slug)
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",

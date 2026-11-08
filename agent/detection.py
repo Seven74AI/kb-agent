@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from agent.config import REPO_ROOT, load_config
 from agent.constants import FLARESOLVERR_URL
 from agent.fetch_guard import _assert_fetch_url_allowed
+from agent.notify import redact_credential_shapes
 from agent.router import SIMPLE_PLATFORMS, route_jev
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,15 @@ def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
     return ["--config", str(conf_path)]
 
 
+def _safe_url_for_log(url: str) -> str:
+    """Log-safe URL: path only (no query) with credential-shaped segments redacted."""
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        path_only = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        return redact_credential_shapes(path_only)
+    return redact_credential_shapes(url)
+
+
 def _fetch_content(url: str, platform: str) -> str | None:
     """Fetch the raw content signal Jev needs for subtype resolution.
 
@@ -138,7 +148,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
         except (subprocess.TimeoutExpired, Exception) as exc:
             logger.warning(
                 "Threads content fetch failed for %s: %s",
-                url,
+                _safe_url_for_log(url),
                 exc,
                 exc_info=True,
             )
@@ -156,7 +166,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
         except (subprocess.TimeoutExpired, Exception) as exc:
             logger.warning(
                 "Substack content fetch failed for %s: %s",
-                url,
+                _safe_url_for_log(url),
                 exc,
                 exc_info=True,
             )
@@ -170,7 +180,13 @@ def _fetch_content(url: str, platform: str) -> str | None:
             if result.returncode != 0:
                 return None
             return result.stdout or None
-        except (subprocess.TimeoutExpired, Exception):
+        except (subprocess.TimeoutExpired, Exception) as exc:
+            logger.warning(
+                "Mega content fetch failed for %s: %s",
+                _safe_url_for_log(url),
+                exc,
+                exc_info=True,
+            )
             return None
     return None
 
@@ -223,7 +239,7 @@ def detect_content_subtype(url: str, platform: str) -> str:
     except Exception as exc:
         logger.warning(
             "Jev routing failed for %s (platform=%s) — falling back to legacy scraper: %s",
-            url,
+            _safe_url_for_log(url),
             platform,
             exc,
             exc_info=True,
