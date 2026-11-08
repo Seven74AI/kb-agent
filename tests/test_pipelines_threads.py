@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
+from agent import detection
+from tests.test_regression_real_cases import NULL_THEN_REAL, NULL_VIDEO_JSON
 from agent.pipelines.threads import (
     _assert_threads_video_cdn_url_allowed,
     _curl_threads,
@@ -337,6 +339,7 @@ class TestDetection:
     def test_detect_video_post(self, mock_curl, config, task_dict):
         html = '{"video_versions":[{"url":"x","height":720}],"caption":{"text":"video!"}}<div class="_ab6c">x</div>'
         mock_curl.return_value = html
+        task_dict = {**task_dict, "content_type": "threads_video"}
 
         result = step_threads_detect(task_dict, config)
         data = json.loads(result)
@@ -375,6 +378,37 @@ class TestDetection:
             step_threads_detect(task_dict, config)
         assert exc.value.error_type in (ErrorType.PAUSE, ErrorType.RETRY)
         assert exc.value.step_name == "threads_detect"
+
+    @patch("agent.pipelines.threads._curl_threads")
+    def test_detect_mismatch_text_enqueued_on_video_post_pauses(
+        self, mock_curl, config, task_dict,
+    ):
+        """Mis-enqueued threads_text on a video post must PAUSE, not run text extract."""
+        html = (
+            '"code":"ABC123","video_versions":[{"url":"x","height":720}],'
+            '"caption":{"text":"video!"}}<div class="_ab6c">x</div>'
+        )
+        mock_curl.return_value = html
+        assert task_dict["content_type"] == "threads_text"
+
+        with pytest.raises(StepError) as exc:
+            step_threads_detect(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert exc.value.step_name == "threads_detect"
+        assert "mismatch" in str(exc.value).lower()
+
+    def test_submit_and_pipeline_share_threads_video_signal(self, monkeypatch):
+        """Submit-time and in-pipeline classification use the same post-scoped helper."""
+        url = "https://www.threads.com/@bourne_ti/post/Da3I_d0ls4E"
+        monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_THEN_REAL)
+        submit_subtype = detection.detect_content_subtype(url, "threads")
+        pipeline_subtype = detection.threads_content_subtype_from_html(NULL_THEN_REAL, url)
+        assert submit_subtype == pipeline_subtype == "threads_video"
+
+        monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_VIDEO_JSON)
+        submit_text = detection.detect_content_subtype(url, "threads")
+        pipeline_text = detection.threads_content_subtype_from_html(NULL_VIDEO_JSON, url)
+        assert submit_text == pipeline_text == "threads_text"
 
 
 # ── Step Tests: Text Extraction ──────────────────────────────────────────────

@@ -279,6 +279,42 @@ def test_get_next_step_blocks_synthesize_on_substack_paywall_pause(tmp_path):
     assert nxt["status"] == "paused"
 
 
+def test_get_next_step_blocks_on_failed_embed_before_pending_synthesize(tmp_path):
+    """Failed media-gate steps are barriers, not only paused ones (deferral retry preserve_embed)."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note", "quality_gate"],
+        status="in_progress",
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'failed', output = 'embed boom' WHERE id = ?",
+        (embed_id,),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'pending' WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    )
+    conn.commit()
+
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "substack_embedded_media"
+    assert nxt["status"] == "failed"
+
+
 def test_get_next_step_blocks_pending_synthesize_when_embedded_media_paused(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -3714,6 +3750,40 @@ def test_deferral_growth_supersedes_pending_synthesize(tmp_path):
     assert find_active_task(conn, slug, "substack_text_synthesize") is None
 
 
+def test_retry_task_refuses_superseded_failed_synthesize(tmp_path):
+    """INVARIANT: retry_task must not resurrect terminal superseded *_synthesize rows."""
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/no-retry-syn"
+    slug = "no_retry_syn"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    deferral = get_parent_media_deferral(conn, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="in_progress",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (deferral["updated_at"], syn_id),
+    )
+    conn.commit()
+    supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
+    conn.commit()
+
+    before = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?", (syn_id,),
+    ).fetchone()
+    assert before["status"] == "failed"
+    assert "superseded" in (before["error"] or "").lower()
+
+    assert retry_task(conn, syn_id) is False
+    after = conn.execute("SELECT status, error FROM tasks WHERE id = ?", (syn_id,)).fetchone()
+    assert after["status"] == "failed"
+    assert after["error"] == before["error"]
+
+
 def test_complete_task_leaves_superseded_failed_synthesize_terminal(tmp_path):
     """Superseded *_synthesize rows must not be revived to done by stale consumers."""
     from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
@@ -4445,6 +4515,51 @@ def test_create_delegate_task_concurrent_single_active_child(tmp_path):
     ).fetchone()[0]
     assert in_flight == 1
     verify.close()
+
+
+def test_has_stale_deferral_synthesize_terminal_ignores_superseded_rows(tmp_path):
+    """INVARIANT: stale synthesize probe shares _TERMINAL_SUPERSEDE_FILTER with sibling probes."""
+    from agent.db import (
+        _has_stale_deferral_synthesize_terminal,
+        ensure_parent_media_deferral,
+        get_parent_media_deferral,
+    )
+    from agent.redact import url_for_display
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = url_for_display("https://blog.substack.com/p/stale-sup")
+    slug = "stale_sup_syn"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    deferral = get_parent_media_deferral(conn, slug)
+    anchor = deferral["updated_at"]
+    conn.execute(
+        "UPDATE parent_media_deferral SET updated_at = '2024-06-01 00:00:00' WHERE parent_slug = ?",
+        (slug,),
+    )
+    anchor = "2024-06-02 00:00:00"
+
+    syn_sup = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ?, updated_at = '2024-06-01 12:00:00' WHERE id = ?",
+        ("superseded by deferral media cycle", syn_sup),
+    )
+    conn.commit()
+
+    assert _has_stale_deferral_synthesize_terminal(conn, slug, anchor) is False
+
+    syn_valid = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = NULL, updated_at = '2024-06-01 11:00:00' WHERE id = ?",
+        (syn_valid,),
+    )
+    conn.commit()
+
+    assert _has_stale_deferral_synthesize_terminal(conn, slug, anchor) is True
 
 
 def test_terminal_probes_return_valid_when_superseded_row_is_older(tmp_path):

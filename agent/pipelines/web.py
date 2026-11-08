@@ -508,6 +508,13 @@ _HANDLED_EMBED_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Embed-carrier shapes for handled hosts (subset of what the extractors can enqueue).
+_HANDLED_EMBED_CARRIER_URL_RE = re.compile(
+    r"(?:youtube(?:-nocookie)?\.com/embed/|youtu\.be/|rumble\.com/embed/|"
+    r"(?:player\.)?mediadelivery\.net/embed/|substack\.com/api/v1/video)",
+    re.IGNORECASE,
+)
+
 _FOREIGN_EMBED_URL_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"instagram\.com", re.IGNORECASE), "instagram"),
     (re.compile(r"threads\.(?:net|com)/", re.IGNORECASE), "threads"),
@@ -569,6 +576,80 @@ def _foreign_platform_from_url(url: str) -> str | None:
     return None
 
 
+def _collect_embed_carrier_urls(html: str) -> list[str]:
+    """Iframe src, oEmbed provider, and embed-path anchor hrefs — order preserved, deduped."""
+    decoded = _html_unescape(html)
+    out: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_IFRAME_SRC_RE, _OEMBED_PROVIDER_RE):
+        for m in pattern.finditer(decoded):
+            url = m.group(1)
+            if url not in seen:
+                seen.add(url)
+                out.append(url)
+    for m in _LINK_HREF_RE.finditer(decoded):
+        url = m.group(1)
+        if _EMBED_CARRIER_URL_RE.search(url) and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def _handled_embed_covered_by_extraction(
+    url: str,
+    youtube_ids: list[str],
+    rumble_urls: list[str],
+    bunny_urls: list[str],
+) -> bool:
+    """True when a handled embed-carrier URL has a matching canonical ingest candidate."""
+    lower = url.lower()
+    if re.search(r"youtube(?:-nocookie)?\.com/embed/", lower) or "youtu.be/" in lower:
+        return any(vid in url for vid in youtube_ids)
+    if "rumble.com/embed/" in lower:
+        for canonical in rumble_urls:
+            slug = canonical.rsplit("/", 1)[-1]
+            if slug and slug in url:
+                return True
+        return False
+    if "mediadelivery.net/embed/" in lower:
+        norm = url.rstrip("/")
+        return any(norm == b.rstrip("/") or norm.startswith(b.rstrip("/") + "/") for b in bunny_urls)
+    if "substack.com/api/v1/video" in lower:
+        return True
+    return True
+
+
+def _detect_unenqueued_handled_embed(
+    html: str,
+    youtube_ids: list[str],
+    rumble_urls: list[str],
+    bunny_urls: list[str],
+) -> str | None:
+    """First handled embed-carrier URL visible in DOM that extractors did not enqueue."""
+    for url in _collect_embed_carrier_urls(html):
+        if not _HANDLED_EMBED_CARRIER_URL_RE.search(url):
+            continue
+        if not _handled_embed_covered_by_extraction(url, youtube_ids, rumble_urls, bunny_urls):
+            return url
+    return None
+
+
+def _pause_on_unenqueued_handled_embed(
+    html: str,
+    youtube_ids: list[str],
+    rumble_urls: list[str],
+    bunny_urls: list[str],
+) -> None:
+    """PAUSE when a handled embed carrier is exempt from foreign-embed PAUSE but not enqueued."""
+    orphan = _detect_unenqueued_handled_embed(html, youtube_ids, rumble_urls, bunny_urls)
+    if orphan:
+        raise StepError(
+            f"media gate: unenqueued handled embed ({orphan})",
+            error_type=ErrorType.PAUSE,
+            step_name="substack_embedded_media",
+        )
+
+
 def _embed_carrier_pause_label(url: str) -> str | None:
     """PAUSE label for an embed-carrier URL the deferral gate cannot enqueue.
 
@@ -609,14 +690,7 @@ def _detect_unsupported_foreign_embed(html: str) -> str | None:
         decoded
     ):
         return "twitter"
-    candidates: list[str] = []
-    for pattern in (_IFRAME_SRC_RE, _OEMBED_PROVIDER_RE):
-        candidates.extend(m.group(1) for m in pattern.finditer(decoded))
-    for m in _LINK_HREF_RE.finditer(decoded):
-        url = m.group(1)
-        if _EMBED_CARRIER_URL_RE.search(url):
-            candidates.append(url)
-    for url in candidates:
+    for url in _collect_embed_carrier_urls(html):
         label = _embed_carrier_pause_label(url)
         if label:
             return label
@@ -931,6 +1005,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         + len(bunny_urls)
     )
     if extracted_total == 0:
+        _pause_on_unenqueued_handled_embed(html, youtube_ids, rumble_urls, bunny_urls)
         _pause_on_unsupported_foreign_embed(html)
         if not _substack_cookie_configured(config) and _is_substack_unauth_paywall_shell(html):
             raise StepError(
@@ -995,6 +1070,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         config,
         task.get("tags"),
     )
+    _pause_on_unenqueued_handled_embed(html, youtube_ids, rumble_urls, bunny_urls)
     enqueued_success = enqueue_stats.success_count
 
     prior_manifest_total = 0

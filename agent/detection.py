@@ -120,6 +120,103 @@ def detect_platform(url: str) -> str:
     return "web"
 
 
+# ── Threads video signal (shared submit-time + in-pipeline detect) ───────────
+
+def _threads_post_code_from_url(source_url: str) -> str | None:
+    """Post/share/t short code from a Threads task URL."""
+    m = re.search(r"/(?:post|share|t)/([^/?#]+)", source_url, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _main_post_anchor_pos(html: str, post_code: str | None) -> int | None:
+    """Document position anchoring the task post (code or canonical permalink)."""
+    if post_code:
+        code_pat = re.compile(rf'"code"\s*:\s*"{re.escape(post_code)}"')
+        m = code_pat.search(html)
+        if m:
+            return m.start()
+        if post_code in html:
+            return html.find(post_code)
+    m = re.search(r'"permalink"\s*:\s*"', html)
+    return m.start() if m else None
+
+
+def _extract_json_array_after_key(
+    html: str, key: str, *, anchor_pos: int | None = None
+) -> str | None:
+    """Return a NON-NULL balanced JSON array for ``key``, scoped to ``anchor_pos``.
+
+    Collects every non-null array for ``key`` and picks the one closest to
+    ``anchor_pos`` (task post neighborhood). Skips ``null`` values. When
+    ``anchor_pos`` is omitted, uses the first permalink in the payload as anchor.
+    """
+    if anchor_pos is None:
+        anchor_pos = _main_post_anchor_pos(html, None)
+
+    marker = f'"{key}"'
+    search_from = 0
+    candidates: list[tuple[int, str]] = []
+    while True:
+        pos = html.find(marker, search_from)
+        if pos < 0:
+            break
+        i = pos + len(marker)
+        while i < len(html) and html[i] in " \t\n":
+            i += 1
+        if i < len(html) and html[i] == ":":
+            i += 1
+            while i < len(html) and html[i] in " \t\n":
+                i += 1
+        if i < len(html) and html[i] == "[":
+            depth = 0
+            in_string = False
+            escape = False
+            j = i
+            while j < len(html):
+                ch = html[j]
+                if escape:
+                    escape = False
+                elif ch == "\\" and in_string:
+                    escape = True
+                elif ch == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            candidates.append((pos, html[i : j + 1]))
+                            break
+                j += 1
+            search_from = j + 1 if j < len(html) else i + 1
+            continue
+        search_from = i
+
+    if not candidates:
+        return None
+    if anchor_pos is None:
+        return candidates[0][1]
+    return min(candidates, key=lambda item: abs(item[0] - anchor_pos))[1]
+
+
+def threads_video_signal(html: str, source_url: str | None = None) -> bool:
+    """True when the task post has a non-null ``video_versions`` array (post-scoped).
+
+    Invariant: one implementation for submit-time subtype detection and
+    ``step_threads_detect`` — not a document-wide regex that can disagree with
+    post-anchored selection when suggested/related posts carry their own media.
+    """
+    post_code = _threads_post_code_from_url(source_url) if source_url else None
+    anchor = _main_post_anchor_pos(html, post_code)
+    return _extract_json_array_after_key(html, "video_versions", anchor_pos=anchor) is not None
+
+
+def threads_content_subtype_from_html(html: str, source_url: str) -> str:
+    """Map page HTML + task URL to ``threads_text`` or ``threads_video``."""
+    return "threads_video" if threads_video_signal(html, source_url) else "threads_text"
+
+
 # ── Content Subtype Detection ────────────────────────────────────────────────
 
 def _resolve_threads_cookie_path() -> Path:
@@ -275,8 +372,7 @@ def detect_content_subtype_with_signals(
     # and a 900KB payload would waste a full-content call for nothing.
     if platform == "threads":
         if content is not None:
-            has_video = re.search(r'"video_versions"\s*:\s*\[', content) is not None
-            subtype = "threads_video" if has_video else "threads_text"
+            subtype = threads_content_subtype_from_html(content, url)
             return ContentSubtypeDetection(subtype)
         subtype, threads_subtype_fetch_failed = _detect_threads_subtype(url)
         return ContentSubtypeDetection(
@@ -330,9 +426,8 @@ def _detect_threads_subtype(url: str) -> tuple[str, bool]:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=20,
         )
-        if re.search(r'"video_versions"\s*:\s*\[', result.stdout):
-            return "threads_video", False
-        return "threads_text", False
+        subtype = threads_content_subtype_from_html(result.stdout, url)
+        return subtype, False
     except subprocess.TimeoutExpired:
         logger.warning(
             "Threads subtype fetch timed out for %s — defaulting to threads_text",

@@ -25,8 +25,13 @@ from agent.archival import append_note_tags
 from agent.config import Config
 from agent.detection import (
     _curl_netscape_cookie_config,
+    _extract_json_array_after_key,
+    _main_post_anchor_pos,
     _safe_url_for_log,
+    _threads_post_code_from_url,
     _unlink_curl_netscape_sidecar,
+    threads_content_subtype_from_html,
+    threads_video_signal,
 )
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
@@ -191,94 +196,9 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
         _unlink_curl_netscape_sidecar(conf_path)
 
 
-def _threads_post_code_from_url(source_url: str) -> str | None:
-    """Post/share/t short code from a Threads task URL."""
-    m = re.search(r"/(?:post|share|t)/([^/?#]+)", source_url, re.IGNORECASE)
-    return m.group(1) if m else None
-
-
-def _main_post_anchor_pos(html: str, post_code: str | None) -> int | None:
-    """Document position anchoring the task post (code or canonical permalink)."""
-    if post_code:
-        code_pat = re.compile(rf'"code"\s*:\s*"{re.escape(post_code)}"')
-        m = code_pat.search(html)
-        if m:
-            return m.start()
-        if post_code in html:
-            return html.find(post_code)
-    m = re.search(r'"permalink"\s*:\s*"', html)
-    return m.start() if m else None
-
-
 def _has_video_versions(html: str, source_url: str | None = None) -> bool:
-    """True if the task post's payload has a NON-NULL video_versions array.
-
-    Invariant: scoped to the task permalink/post id — not the first array in the
-    document (suggested/related posts may carry their own ``video_versions``).
-    """
-    post_code = _threads_post_code_from_url(source_url) if source_url else None
-    anchor = _main_post_anchor_pos(html, post_code)
-    return _extract_json_array_after_key(html, "video_versions", anchor_pos=anchor) is not None
-
-
-def _extract_json_array_after_key(
-    html: str, key: str, *, anchor_pos: int | None = None
-) -> str | None:
-    """Return a NON-NULL balanced JSON array for ``key``, scoped to ``anchor_pos``.
-
-    Collects every non-null array for ``key`` and picks the one closest to
-    ``anchor_pos`` (task post neighborhood). Skips ``null`` values. When
-    ``anchor_pos`` is omitted, uses the first permalink in the payload as anchor.
-    """
-    if anchor_pos is None:
-        anchor_pos = _main_post_anchor_pos(html, None)
-
-    marker = f'"{key}"'
-    search_from = 0
-    candidates: list[tuple[int, str]] = []
-    while True:
-        pos = html.find(marker, search_from)
-        if pos < 0:
-            break
-        i = pos + len(marker)
-        while i < len(html) and html[i] in " \t\n":
-            i += 1
-        if i < len(html) and html[i] == ":":
-            i += 1
-            while i < len(html) and html[i] in " \t\n":
-                i += 1
-        if i < len(html) and html[i] == "[":
-            depth = 0
-            in_string = False
-            escape = False
-            j = i
-            while j < len(html):
-                ch = html[j]
-                if escape:
-                    escape = False
-                elif ch == "\\" and in_string:
-                    escape = True
-                elif ch == '"':
-                    in_string = not in_string
-                elif not in_string:
-                    if ch == "[":
-                        depth += 1
-                    elif ch == "]":
-                        depth -= 1
-                        if depth == 0:
-                            candidates.append((pos, html[i : j + 1]))
-                            break
-                j += 1
-            search_from = j + 1 if j < len(html) else i + 1
-            continue
-        # null or other value — skip to the next occurrence
-        search_from = i
-
-    if not candidates:
-        return None
-    if anchor_pos is None:
-        return candidates[0][1]
-    return min(candidates, key=lambda item: abs(item[0] - anchor_pos))[1]
+    """Thin wrapper — shared signal lives in :func:`agent.detection.threads_video_signal`."""
+    return threads_video_signal(html, source_url)
 
 
 def _extract_video_url(html: str, source_url: str | None = None) -> str | None:
@@ -524,8 +444,21 @@ def step_threads_detect(task: dict, config: Config) -> str:
             details="Re-export cookies from Chrome to threads_cookies.txt",
         )
 
-    has_video = _has_video_versions(html, url)
-    content_type = "threads_video" if has_video else "threads_text"
+    content_type = threads_content_subtype_from_html(html, url)
+    has_video = content_type == "threads_video"
+
+    enqueued_type = task.get("content_type")
+    if enqueued_type in ("threads_text", "threads_video") and enqueued_type != content_type:
+        raise StepError(
+            f"Threads content_type mismatch: task enqueued as {enqueued_type} "
+            f"but live page signals {content_type}",
+            error_type=ErrorType.PAUSE,
+            step_name="threads_detect",
+            details=(
+                f"Re-submit with correct subtype or fix routing; "
+                f"source_url={url_for_display(url)}"
+            ),
+        )
 
     # Reply/parent context: a comment is the reply + its parent. Extract both so
     # the video pipeline (and synthesis) keeps them instead of dropping the
