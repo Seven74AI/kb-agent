@@ -615,12 +615,9 @@ async def main():
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
         )
         page = await context.new_page()
-        
-        try:
-            await page.goto({json.dumps(display_nav_url)}, wait_until="networkidle", timeout=30000)
-        except Exception:
-            pass
-        
+
+        await page.goto({json.dumps(display_nav_url)}, wait_until="networkidle", timeout=30000)
+
         await page.wait_for_timeout(3000)
         
         slides = []

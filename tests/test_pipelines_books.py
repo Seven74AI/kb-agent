@@ -182,16 +182,45 @@ class TestQualityScore:
         assert 0 <= score <= 100
 
     def test_quality_score_handles_missing_file(self):
-        """quality_score handles missing file gracefully."""
+        """Unreadable/missing PDF must not score as perfect quality."""
         score = quality_score("/tmp/definitely_not_a_real_file_12345.pdf")
         assert isinstance(score, int)
         assert 0 <= score <= 100
+        assert score != 100
+        assert score < PDF_QUALITY_SCORE_THRESHOLD
 
     def test_quality_score_handles_non_pdf(self):
-        """quality_score handles non-PDF files gracefully."""
+        """Non-PDF paths must not score as perfect quality."""
         score = quality_score("/tmp/not_a_pdf.txt")
         assert isinstance(score, int)
         assert 0 <= score <= 100
+        assert score != 100
+        assert score < PDF_QUALITY_SCORE_THRESHOLD
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_quality_score_open_error_not_perfect(self, mock_pymupdf):
+        """Corrupt/unopenable PDFs must not score as perfect quality."""
+        mock_pymupdf.open.side_effect = RuntimeError("cannot open document")
+        score = quality_score("/fake/bad.pdf")
+        assert score != 100
+        assert score < PDF_QUALITY_SCORE_THRESHOLD
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_quality_score_clean_pdf_still_scores_high(self, mock_pymupdf):
+        """Valid PDFs still get normal quality scores."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 20
+        clean_text = (
+            "The quick brown fox jumps over the lazy dog. "
+            "This is a perfectly normal sentence with standard "
+            "English text and common punctuation marks. "
+            * 5
+        )
+        mock_doc.__getitem__.return_value.get_text.return_value = clean_text
+        mock_pymupdf.open.return_value = mock_doc
+
+        score = quality_score("/fake/clean.pdf")
+        assert score >= PDF_QUALITY_SCORE_THRESHOLD
 
     @patch("agent.pipelines.books.pymupdf")
     def test_pdf_preflight_scanned_detection(self, mock_pymupdf):

@@ -591,7 +591,7 @@ def quality_score(pdf_path: str | Path) -> int:
         doc.close()
         return score
     except Exception:
-        return 100
+        return 0
 
 
 def _quality_score(doc, page_count: int) -> int:
