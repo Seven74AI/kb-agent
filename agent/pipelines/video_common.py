@@ -31,6 +31,7 @@ from agent.redact import (
 )
 from agent.llm import get_llm_client
 from agent.quality import quality_gate_retry_loop, quality_gate_threads_video, quality_gate_youtube
+from agent.core.slugify import slug_path
 from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
 
 # Density target for video notes (chars/min)
@@ -42,9 +43,7 @@ MAX_QUALITY_RETRIES = 3
 
 # ── Slugs ────────────────────────────────────────────────────────────────────
 
-def _slug_path(slug: str) -> str:
-    """Convert a slug to a filesystem-safe path segment."""
-    return re.sub(r'[<>:"/\\|?*=&]', '_', slug)
+_slug_path = slug_path  # backward-compatible alias for pipeline imports
 
 
 def _resolve_slug(task: dict) -> str:
@@ -58,11 +57,14 @@ def _resolve_slug(task: dict) -> str:
     return _slug_path(task.get("slug", task["id"][:8]))
 
 
-def _artifact_stem(task: dict) -> str:
+def resolve_artifact_stem(task: dict) -> str:
     """Temp-dir artifact stem: ingest id in batch runs, else filesystem-safe slug."""
     if task.get("_batch_ingest"):
         return task["id"]
     return _resolve_slug(task)
+
+
+_artifact_stem = resolve_artifact_stem
 
 
 def ensure_h264(video_path: Path) -> Path:

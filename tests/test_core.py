@@ -1,5 +1,6 @@
 """Tests for agent.core — pure domain layer (no Flask)."""
 
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from agent.config import Config
-from agent.core.slugify import batch_standalone_video_storage_slug
+from agent.core.slugify import SLUG_MAX_LEN, batch_standalone_video_storage_slug, slug_path
+from agent.pipelines.video_common import resolve_artifact_stem
 from agent.core import (
     bulk_import,
     compute_staleness,
@@ -95,6 +97,22 @@ def test_batch_standalone_video_storage_slug_substack_uses_ingest_id():
         content_type="youtube",
         parent_slug="",
     ) == "youtube.com_watch_v_abc"
+
+
+def test_resolve_artifact_stem_batch_uses_ingest_id_else_filesystem_slug():
+    tid = "ingest-batch-uuid"
+    task_batch = {"id": tid, "slug": "foo/bar", "_batch_ingest": True}
+    assert resolve_artifact_stem(task_batch) == tid
+    task = {"id": tid, "slug": "foo/bar?"}
+    assert resolve_artifact_stem(task) == "foo_bar_"
+
+
+def test_slug_path_sanitizes_and_caps_at_slug_max_len():
+    assert slug_path("test?query=1") == "test_query_1"
+    long_raw = "a" * 200 + "?x=1"
+    assert len(slug_path(long_raw)) == SLUG_MAX_LEN
+    expected = re.sub(r'[<>:"/\\|?*=&]', "_", long_raw)[:SLUG_MAX_LEN]
+    assert slug_path(long_raw) == expected
 
 
 def test_slugify_basic():

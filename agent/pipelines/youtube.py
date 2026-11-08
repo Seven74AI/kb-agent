@@ -32,6 +32,7 @@ from agent.pipelines.video_common import (
     VIDEO_DENSITY_MIN,
     _artifact_stem,
     _find_video_file,
+    resolve_artifact_stem,
     check_density as _check_density,
     ensure_h264,
     format_transcript_for_llm as _format_transcript_for_llm,
@@ -97,11 +98,6 @@ def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
     env = os.environ.copy()
     env["XDG_CONFIG_HOME"] = str(xdg_root)
     return env
-
-
-def _download_artifact_stem(task: dict) -> str:
-    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    return _artifact_stem(task)
 
 
 # ── Cookie Pre-flight ─────────────────────────────────────────────────────────
@@ -171,7 +167,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     _validate_cookies(config)
 
     url = task["source_url"]
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     _assert_fetch_url_allowed(url)
     ytdlp_env = _ytdlp_subprocess_env(config)
 
@@ -307,7 +303,7 @@ def step_download_video(task: dict, config: Config) -> str:
         StepError(RETRY): On download failure.
     """
     url = task["source_url"]
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     output_path = Path(config.temp_dir) / f"{stem}.mp4"
     try:
         _assert_fetch_url_allowed(url)
@@ -403,7 +399,7 @@ def step_merge_and_identify(task: dict, config: Config) -> str:
     Returns:
         JSON string summarizing merge result.
     """
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     diar_path = Path(config.temp_dir) / f"{stem}_diarization.json"
     trans_path = Path(config.temp_dir) / f"{stem}_transcript.json"
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"

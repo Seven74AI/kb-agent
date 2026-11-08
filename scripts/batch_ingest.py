@@ -173,7 +173,8 @@ def _ingest_download_stem(task: dict) -> str:
 
 def copy_threads_raw_for_synthesize(config, q: dict, storage_slug: str) -> None:
     """Align batch id-keyed threads detect JSON with synthesize slug-keyed reads."""
-    from agent.pipelines.video_common import _slug_path, threads_raw_path
+    from agent.core.slugify import slug_path
+    from agent.pipelines.video_common import threads_raw_path
 
     src = threads_raw_path(
         config,
@@ -185,7 +186,7 @@ def copy_threads_raw_for_synthesize(config, q: dict, storage_slug: str) -> None:
     )
     if not src.is_file():
         return
-    dest = Path(config.temp_dir) / f"{_slug_path(storage_slug)}_threads_raw.json"
+    dest = Path(config.temp_dir) / f"{slug_path(storage_slug)}_threads_raw.json"
     if dest.resolve() != src.resolve():
         shutil.copy2(src, dest)
 
