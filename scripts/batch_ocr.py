@@ -19,7 +19,7 @@ os.environ.pop("PYTHONPATH", None)
 _bootstrap_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_bootstrap_root))
 sys.path.insert(0, "/root/kb-agent")
-from agent.notify import sanitize_visible_message  # noqa: E402
+from agent.db import _persist_visible_error  # noqa: E402
 
 MODAL = "/root/modal"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".avif")
@@ -39,7 +39,7 @@ def _print_scrubbed_child_tail(
     raw = stdout or stderr
     if not raw:
         return
-    print(sanitize_visible_message(raw[-tail_chars:]))
+    print(_persist_visible_error(raw[-tail_chars:]))
 
 
 def main():
@@ -63,7 +63,7 @@ def main():
         if f.lower().endswith(IMAGE_EXTS)
     ]
     if not names:
-        print("no images found in", sanitize_visible_message(in_dir))
+        print("no images found in", _persist_visible_error(in_dir))
         return 1
     print(f"batch: {len(names)} image(s) -> one Modal run")
 

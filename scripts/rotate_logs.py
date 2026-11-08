@@ -22,6 +22,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent.db import _persist_visible_error
 from agent.notify import sanitize_visible_message
 
 _OBVIOUS_SECRET_RE = re.compile(
@@ -55,7 +56,7 @@ def sanitize_archive_record(record: dict) -> dict:
     out = dict(record)
     table = out.get("_table")
     if table == "step_logs" and out.get("content"):
-        out["content"] = sanitize_visible_message(out["content"])
+        out["content"] = _persist_visible_error(out["content"])
     elif table == "llm_archives":
         for key in ("prompt", "response"):
             if out.get(key):

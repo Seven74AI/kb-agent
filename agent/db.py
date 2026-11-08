@@ -41,6 +41,39 @@ def is_deferred_media_pause(reason: str | None) -> bool:
     return any(marker in low for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
 
 
+def _substack_cleanup_output_signals_deferred_media(
+    conn: sqlite3.Connection,
+    task_id: str,
+    slug: str | None = None,
+) -> bool:
+    """True when ``substack_cleanup`` output carries a durable media-deferral marker."""
+    row = conn.execute(
+        """
+        SELECT output FROM task_steps
+        WHERE task_id = ? AND name = 'substack_cleanup'
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    output = row[0]
+    if slug and f"media_deferred:{slug}" in output:
+        return True
+    return is_deferred_media_pause(output)
+
+
+def task_deferred_retry_preserves_embed_step(
+    conn: sqlite3.Connection,
+    task_id: str,
+    slug: str | None,
+) -> bool:
+    """True when ``retry_task`` must not rewind ``substack_embedded_media``."""
+    if slug and get_parent_media_deferral(conn, slug) is not None:
+        return True
+    return _substack_cleanup_output_signals_deferred_media(conn, task_id, slug)
+
+
 def task_in_deferred_media_cycle(
     conn: sqlite3.Connection,
     task_id: str,
@@ -50,8 +83,10 @@ def task_in_deferred_media_cycle(
 ) -> bool:
     """True when the parent task must stay in the deferred-media gate (retry/resume).
 
-    Uses ``tasks.error``, ``parent_media_deferral``, and ``substack_embedded_media``
-    step output so a scrubbed dispatch-failure note cannot drop the deferral signal.
+    Every durable deferral signal must be visible here: ``tasks.error``,
+    ``parent_media_deferral``, ``substack_embedded_media`` step output, and the
+    ``substack_cleanup`` ``media_deferred:`` marker from
+    :func:`agent.pipelines.web._persist_parent_media_deferral`.
     """
     if is_deferred_media_pause(error):
         return True
@@ -66,6 +101,8 @@ def task_in_deferred_media_cycle(
         (task_id,),
     ).fetchone()
     if row and is_deferred_media_pause(row[0]):
+        return True
+    if _substack_cleanup_output_signals_deferred_media(conn, task_id, slug):
         return True
     return False
 
@@ -307,7 +344,16 @@ def _migrate_ingest_queue_url_parent_unique(conn: sqlite3.Connection) -> None:
 
 
 _ACTIVE_SYNTHESIZE_SLUG_INDEX = "idx_tasks_one_active_synthesize_per_slug"
+_ACTIVE_DELEGATE_SLUG_CONTENT_TYPE_INDEX = "idx_tasks_one_active_delegate_per_slug_ct"
 _SYNTHESIZE_IN_FLIGHT_SQL_STATUSES = "'pending', 'in_progress', 'paused'"
+_DELEGATE_IN_FLIGHT_SQL_STATUSES = _SYNTHESIZE_IN_FLIGHT_SQL_STATUSES
+_DELEGATE_CHILD_CONTENT_TYPES = frozenset({
+    "book_epub",
+    "book_mobi",
+    "book_pdf",
+    "book_scanned",
+    "book_degraded",
+})
 
 
 def _migrate_dedupe_in_flight_synthesize_owners(conn: sqlite3.Connection) -> None:
@@ -350,6 +396,83 @@ def _migrate_dedupe_in_flight_synthesize_owners(conn: sqlite3.Connection) -> Non
             """,
             (supersede_error, slug, keep[0]),
         )
+
+
+def is_delegate_content_type(content_type: str) -> bool:
+    """True for mega/batch delegate child pipelines (one in-flight owner per slug+type)."""
+    return (content_type or "") in _DELEGATE_CHILD_CONTENT_TYPES
+
+
+def _delegate_content_type_sql_in() -> str:
+    quoted = ", ".join(f"'{ct}'" for ct in sorted(_DELEGATE_CHILD_CONTENT_TYPES))
+    return quoted
+
+
+def _migrate_dedupe_in_flight_delegate_owners(conn: sqlite3.Connection) -> None:
+    """Fail duplicate in-flight delegate child rows per (slug, content_type) before the index."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "tasks" not in tables:
+        return
+    ct_in = _delegate_content_type_sql_in()
+    pairs = conn.execute(
+        f"""
+        SELECT slug, content_type FROM tasks
+        WHERE content_type IN ({ct_in})
+          AND status IN ({_DELEGATE_IN_FLIGHT_SQL_STATUSES})
+        GROUP BY slug, content_type HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    supersede_error = "superseded: duplicate active delegate child"
+    for slug, content_type in pairs:
+        keep = conn.execute(
+            f"""
+            SELECT id FROM tasks
+            WHERE slug = ? AND content_type = ?
+              AND status IN ({_DELEGATE_IN_FLIGHT_SQL_STATUSES})
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            (slug, content_type),
+        ).fetchone()
+        if keep is None:
+            continue
+        conn.execute(
+            f"""
+            UPDATE tasks
+            SET status = 'failed', error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type = ?
+              AND status IN ({_DELEGATE_IN_FLIGHT_SQL_STATUSES})
+              AND id != ?
+            """,
+            (supersede_error, slug, content_type, keep[0]),
+        )
+
+
+def _migrate_active_delegate_slug_content_type_unique(conn: sqlite3.Connection) -> None:
+    """Enforce exactly one in-flight delegate child per (slug, content_type)."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "tasks" not in tables:
+        return
+    existing = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?",
+        (_ACTIVE_DELEGATE_SLUG_CONTENT_TYPE_INDEX,),
+    ).fetchone()
+    if existing:
+        return
+    _migrate_dedupe_in_flight_delegate_owners(conn)
+    ct_in = _delegate_content_type_sql_in()
+    conn.execute(
+        f"""
+        CREATE UNIQUE INDEX {_ACTIVE_DELEGATE_SLUG_CONTENT_TYPE_INDEX}
+        ON tasks(slug, content_type)
+        WHERE content_type IN ({ct_in})
+          AND status IN ({_DELEGATE_IN_FLIGHT_SQL_STATUSES})
+        """
+    )
 
 
 def _migrate_active_synthesize_slug_unique(conn: sqlite3.Connection) -> None:
@@ -395,6 +518,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
     _migrate_ingest_queue_url_parent_unique(conn)
     _migrate_active_synthesize_slug_unique(conn)
+    _migrate_active_delegate_slug_content_type_unique(conn)
     conn.commit()
 
 
@@ -515,6 +639,106 @@ def create_synthesize_task(
         existing_id = find_active_task(conn, slug, content_type)
         if existing_id:
             return existing_id, False
+        raise
+
+
+def _reset_delegate_child_task(
+    conn: sqlite3.Connection, task_id: str, file_path: str,
+) -> None:
+    """Re-queue a delegate child for ingestion (failed terminal or source generation change)."""
+    conn.execute(
+        """
+        UPDATE task_steps
+        SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    )
+    conn.execute(
+        """
+        UPDATE tasks
+        SET source_url = ?, status = 'pending', error = NULL, retries = 0,
+            updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (file_path, task_id),
+    )
+
+
+def _delegate_existing_or_reset(
+    conn: sqlite3.Connection,
+    existing_id: str,
+    file_path: str,
+) -> str:
+    row = conn.execute(
+        "SELECT status, source_url FROM tasks WHERE id = ?",
+        (existing_id,),
+    ).fetchone()
+    status = row[0]
+    src = row[1]
+    same_source = Path(src or "").resolve() == Path(file_path).resolve()
+    if status in ("done", "completed"):
+        if same_source:
+            return existing_id
+        _reset_delegate_child_task(conn, existing_id, file_path)
+        return existing_id
+    if not same_source:
+        conn.execute(
+            "UPDATE tasks SET source_url = ?, updated_at = datetime('now') WHERE id = ?",
+            (file_path, existing_id),
+        )
+    return existing_id
+
+
+def create_delegate_task(
+    conn: sqlite3.Connection,
+    file_path: str,
+    content_type: str,
+    slug: str,
+    steps: list[str],
+    tags=None,
+) -> str:
+    """Atomically resolve a delegate child task with at most one in-flight owner.
+
+    Uses ``BEGIN IMMEDIATE`` and a partial unique index on in-flight delegate
+    child rows for ``(slug, content_type)``. Preserves failed reuse and source
+    generation change handling for book pipeline delegates.
+    """
+    import uuid
+
+    if not is_delegate_content_type(content_type):
+        return create_task(conn, file_path, content_type, slug, steps, tags=tags)
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing_id = find_active_task(conn, slug, content_type)
+        if existing_id:
+            task_id = _delegate_existing_or_reset(conn, existing_id, file_path)
+            conn.commit()
+            return task_id
+
+        failed_row = conn.execute(
+            "SELECT id FROM tasks WHERE slug = ? AND content_type = ? AND status = 'failed' "
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
+            (slug, content_type),
+        ).fetchone()
+        if failed_row:
+            task_id = failed_row[0]
+            _reset_delegate_child_task(conn, task_id, file_path)
+            conn.commit()
+            return task_id
+
+        task_id = str(uuid.uuid4())
+        _insert_task_with_steps(
+            conn, task_id, file_path, content_type, slug, steps, status="pending", tags=tags,
+        )
+        conn.commit()
+        return task_id
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        existing_id = find_active_task(conn, slug, content_type)
+        if existing_id:
+            return _delegate_existing_or_reset(conn, existing_id, file_path)
         raise
 
 
@@ -877,12 +1101,15 @@ def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
         return _deferral_synthesize_terminal_fresh(conn, slug, deferral)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "SELECT error FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') "
         "LIMIT 1",
         (slug,),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    err = row["error"] if hasattr(row, "keys") else row[0]
+    return not _is_superseded_parent_error(err)
 
 
 def _is_superseded_parent_error(error: str | None) -> bool:
@@ -922,12 +1149,15 @@ def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, def
     anchor = deferral["updated_at"]
     op = _deferral_cycle_cmp(deferral)
     row = conn.execute(
-        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"SELECT error FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    err = row["error"] if hasattr(row, "keys") else row[0]
+    return not _is_superseded_parent_error(err)
 
 
 def _deferral_synthesize_task_fresh(
@@ -983,12 +1213,15 @@ def _parent_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: s
 def _synthesize_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "SELECT error FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    err = row["error"] if hasattr(row, "keys") else row[0]
+    return not _is_superseded_parent_error(err)
 
 
 def _has_stale_deferral_synthesize_terminal(
@@ -1834,18 +2067,46 @@ def update_step(conn: sqlite3.Connection, step_id: int, status: str, output: str
             )
 
 
-def complete_task(conn: sqlite3.Connection, task_id: str):
-    """Mark a task as done.
+def task_execution_aborted(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when a superseded or terminal task must not run further consumer steps."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    status = row["status"] if hasattr(row, "keys") else row[0]
+    err = row["error"] if hasattr(row, "keys") else row[1]
+    if _is_superseded_parent_error(err):
+        return True
+    return status in ("failed", "completed", "done")
+
+
+def complete_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Mark a task as done when it is still runnable (compare-and-swap).
+
+    Superseded or already-terminal rows are left unchanged so stale consumers
+    cannot mint generation-fresh owners via ``updated_at``.
 
     Args:
         conn: Agent database connection.
         task_id: The task UUID.
+
+    Returns:
+        True when the row transitioned to ``done``, else False.
     """
     with conn:
-        conn.execute(
-            "UPDATE tasks SET status = 'done', updated_at = datetime('now') WHERE id = ?",
+        cur = conn.execute(
+            """
+            UPDATE tasks SET status = 'done', updated_at = datetime('now')
+            WHERE id = ?
+              AND status IN ('pending', 'in_progress')
+              AND (error IS NULL OR LOWER(error) NOT LIKE '%superseded%')
+            """,
             (task_id,),
         )
+        return cur.rowcount == 1
 
 
 def fail_task(conn: sqlite3.Connection, task_id: str, error: str):

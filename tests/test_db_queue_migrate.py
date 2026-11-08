@@ -34,8 +34,10 @@ from agent.db import (
     recover_stale_ingest,
     resume_tasks_by_reason,
     serialize_tags,
+    complete_task,
     fail_task,
     pause_task,
+    supersede_stale_deferral_synthesize_tasks,
     update_step,
 )
 
@@ -387,6 +389,93 @@ def test_task_in_deferred_media_cycle_unsupported_embed(tmp_path):
     )
     conn.commit()
     assert task_in_deferred_media_cycle(conn, task_id, error=pause_reason)
+
+
+def test_task_in_deferred_media_cycle_substack_cleanup_marker_only(tmp_path):
+    """Durable deferral on ``substack_cleanup`` without row/error/embed output still in-cycle."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "cleanup_marker_only"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/marker-only",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute("UPDATE tasks SET error = NULL WHERE id = ?", (task_id,))
+    conn.execute(
+        """
+        UPDATE task_steps SET status = 'completed', output = 'enqueued prior'
+        WHERE task_id = ? AND name = 'substack_cleanup'
+        """,
+        (task_id,),
+    )
+    conn.execute(
+        """
+        UPDATE task_steps SET output = ?
+        WHERE task_id = ? AND name = 'substack_cleanup'
+        """,
+        (f"cleaned\nmedia_deferred:{slug}", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'clean' WHERE id = ?",
+        (embed_id,),
+    )
+    conn.commit()
+
+    assert task_in_deferred_media_cycle(conn, task_id, slug=slug, error=None)
+
+
+def test_retry_task_preserves_embed_when_only_cleanup_deferral_marker(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "retry_cleanup_marker_parent"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/retry-marker",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    embed_output = "prior enqueue complete"
+    conn.execute("UPDATE tasks SET error = NULL WHERE id = ?", (task_id,))
+    conn.execute(
+        """
+        UPDATE task_steps SET status = 'completed', output = ?
+        WHERE task_id = ? AND name = 'substack_cleanup'
+        """,
+        (f"cleaned\nmedia_deferred:{slug}", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (embed_output, embed_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'running' WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    )
+    conn.commit()
+
+    assert retry_task(conn, task_id) is True
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (embed_id,),
+    ).fetchone()
+    assert embed[0] == "paused"
+    assert embed[1] == embed_output
+    steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["synthesize_note"] == "pending"
 
 
 def test_resume_unsupported_embed_denies_bulk_resume(tmp_path):
@@ -3192,6 +3281,60 @@ def test_deferral_growth_supersedes_pending_synthesize(tmp_path):
     assert find_active_task(conn, slug, "substack_text_synthesize") is None
 
 
+def test_complete_task_leaves_superseded_failed_synthesize_terminal(tmp_path):
+    """Superseded *_synthesize rows must not be revived to done by stale consumers."""
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/zombie-syn"
+    slug = "zombie_syn"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    deferral = get_parent_media_deferral(conn, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="in_progress",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (deferral["updated_at"], syn_id),
+    )
+    conn.commit()
+    supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
+    conn.commit()
+
+    assert complete_task(conn, syn_id) is False
+    row = conn.execute("SELECT status, error FROM tasks WHERE id = ?", (syn_id,)).fetchone()
+    assert row["status"] == "failed"
+    assert "superseded" in (row["error"] or "").lower()
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+    assert has_completed_synthesize_task(conn, slug) is False
+
+
+def test_has_completed_synthesize_task_ignores_superseded_terminal_done_row(tmp_path):
+    """Terminal freshness queries must filter superseded errors on *_synthesize rows."""
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/syn-sup-done"
+    slug = "syn_sup_done"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    deferral = get_parent_media_deferral(conn, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="done",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ?, updated_at = datetime('now') WHERE id = ?",
+        ("superseded by deferral media cycle", syn_id),
+    )
+    conn.commit()
+
+    assert has_completed_synthesize_task(conn, slug) is False
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+
+
 def test_find_active_task_supersedes_stale_pending_synthesize_after_media_changed(tmp_path):
     from agent.db import (
         ensure_parent_media_deferral,
@@ -3728,6 +3871,55 @@ def test_dispatch_synthesize_concurrent_single_active_owner(tmp_path):
         "SELECT COUNT(*) FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         "AND status IN ('pending', 'in_progress', 'paused')",
         (slug,),
+    ).fetchone()[0]
+    assert in_flight == 1
+    verify.close()
+
+
+def test_create_delegate_task_concurrent_single_active_child(tmp_path):
+    """Concurrent delegate child resolution yields one in-flight row per (slug, content_type)."""
+    from agent.db import create_delegate_task
+
+    db_path = tmp_path / "agent.db"
+    init_db(db_path, AGENT_SCHEMA)
+    slug = "batch_parent_alpha"
+    pipeline = "book_epub"
+    file_path = str(tmp_path / "alpha.epub")
+    Path(file_path).write_text("epub-bytes", encoding="utf-8")
+    steps = ["extract_text", "synthesize_note"]
+    barrier = threading.Barrier(2, timeout=10)
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def worker():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            barrier.wait()
+            task_id = create_delegate_task(conn, file_path, pipeline, slug, steps)
+            results.append(task_id)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive()
+
+    assert not errors
+    assert len(results) == 2
+    assert len(set(results)) == 1
+
+    verify = sqlite3.connect(str(db_path))
+    in_flight = verify.execute(
+        "SELECT COUNT(*) FROM tasks WHERE slug = ? AND content_type = ? "
+        "AND status IN ('pending', 'in_progress', 'paused')",
+        (slug, pipeline),
     ).fetchone()[0]
     assert in_flight == 1
     verify.close()

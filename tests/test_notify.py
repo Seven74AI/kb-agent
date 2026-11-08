@@ -81,6 +81,42 @@ def test_notify_batch_sanitizes_causes():
         assert "cause:" in text
 
 
+def test_notify_task_redacts_url_query_in_reason():
+    cfg = Config(
+        kb_agent_dir=Path("/tmp/k"),
+        vault_path=Path("/tmp/v"),
+        temp_dir=Path("/tmp/t"),
+        cookie_dir=Path("/tmp/c"),
+        telegram_bot_token="tok",
+        telegram_chat_id="123",
+    )
+    reason = "download failed: https://cdn.example.com/v/1?token=SECRET&expires=99"
+    with patch("agent.notify.send_message") as send:
+        notify_task(cfg, "slug-y", "youtube", "failed", reason)
+        text = send.call_args[0][1]
+        assert "SECRET" not in text
+        assert "expires=99" not in text
+        assert "?" not in text.split("reason:")[-1]
+        assert "download failed" in text
+
+
+def test_notify_batch_redacts_url_query_in_causes():
+    cfg = Config(
+        kb_agent_dir=Path("/tmp/k"),
+        vault_path=Path("/tmp/v"),
+        temp_dir=Path("/tmp/t"),
+        cookie_dir=Path("/tmp/c"),
+        telegram_bot_token="tok",
+        telegram_chat_id="123",
+    )
+    causes = ["https://signed.cdn.test/file?token=LEAKED"]
+    with patch("agent.notify.send_message") as send:
+        notify_batch(cfg, failed=1, total=1, dispatched=0, causes=causes)
+        text = send.call_args[0][1]
+        assert "LEAKED" not in text
+        assert "token=" not in text
+
+
 def test_notify_task_sanitizes_reason():
     cfg = Config(
         kb_agent_dir=Path("/tmp/k"),

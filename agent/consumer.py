@@ -35,12 +35,13 @@ from agent.db import (
     complete_task,
     fail_task,
     get_next_step,
+    task_execution_aborted,
     init_db,
     pause_task,
     update_step,
 )
 from agent.exceptions import ErrorType, StepError
-from agent.notify import notify_task, sanitize_visible_message
+from agent.notify import notify_task
 from agent.streaming import log_progress
 
 # ── Pipeline step registry ───────────────────────────────────────────────────
@@ -62,7 +63,7 @@ def _format_stdout_traceback(exc: BaseException, *, limit: int = 5) -> str:
         stripped = line.rstrip()
         if not stripped or stripped.startswith("Traceback"):
             continue
-        clean = sanitize_visible_message(stripped)
+        clean = _persist_visible_error(stripped)
         if clean:
             lines.append(clean)
     return "\n".join(lines)
@@ -368,10 +369,13 @@ class Consumer:
         retries = 0
 
         while True:
+            if task_execution_aborted(self.agent_conn, task_id):
+                return
             step = get_next_step(self.agent_conn, task_id)
             if step is None:
                 # All steps done
-                complete_task(self.agent_conn, task_id)
+                if not task_execution_aborted(self.agent_conn, task_id):
+                    complete_task(self.agent_conn, task_id)
                 return
 
             step_id = step["id"]
@@ -388,7 +392,7 @@ class Consumer:
 
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
-                error_msg = sanitize_visible_message(str(e))
+                error_msg = _persist_visible_error(str(e))
                 logger.error(
                     "[consumer] Step '%s' StepError (%s): %s",
                     step_name,
@@ -433,7 +437,7 @@ class Consumer:
                             f"[consumer] Step '{step_name}' exhausted retries "
                             f"({retries}/{self.config.max_retries}) → PAUSING"
                         )
-                        pause_msg = sanitize_visible_message(
+                        pause_msg = _persist_visible_error(
                             f"Exhausted {retries} retries: {error_msg}"
                         )
                         pause_task(self.agent_conn, task_id, pause_msg)
@@ -452,7 +456,7 @@ class Consumer:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                error_msg = sanitize_visible_message(f"{type(e).__name__}: {e}")
+                error_msg = _persist_visible_error(f"{type(e).__name__}: {e}")
                 logger.error(
                     "[consumer] Step '%s' unhandled exception: %s",
                     step_name,
@@ -497,7 +501,7 @@ class Consumer:
                             f"[consumer] Step '{step_name}' exhausted retries "
                             f"({retries}/{self.config.max_retries}) → PAUSING"
                         )
-                        pause_msg = sanitize_visible_message(
+                        pause_msg = _persist_visible_error(
                             f"Exhausted {retries} retries: {error_msg}"
                         )
                         pause_task(self.agent_conn, task_id, pause_msg)

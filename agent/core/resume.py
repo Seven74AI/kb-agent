@@ -3,9 +3,9 @@
 import sqlite3
 
 from agent.db import (
-    get_parent_media_deferral,
     has_active_synthesize_task,
     resume_tasks_by_reason,
+    task_deferred_retry_preserves_embed_step,
     task_in_deferred_media_cycle,
 )
 
@@ -71,7 +71,9 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
                 (task_id,),
             ).fetchone()
             if embed is not None:
-                preserve_embed = slug and get_parent_media_deferral(agent_conn, slug) is not None
+                preserve_embed = task_deferred_retry_preserves_embed_step(
+                    agent_conn, task_id, slug,
+                )
                 if preserve_embed:
                     step_filter = "step_order > ?"
                 else:

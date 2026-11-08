@@ -53,7 +53,6 @@ from agent.db import (  # noqa: E402
     recover_stale_ingest,
     update_ingest_status,
 )
-from agent.notify import sanitize_visible_message  # noqa: E402
 from agent.core.batch_lock import acquire, release  # noqa: E402
 from agent.core.slugify import batch_standalone_video_storage_slug  # noqa: E402
 from agent.core.submit import (  # noqa: E402
@@ -87,12 +86,12 @@ def _print_scrubbed_child_tail(
     raw = _child_captured_output(result)
     if not raw:
         return
-    print(sanitize_visible_message(raw[-tail_chars:]))
+    print(_persist_visible_error(raw[-tail_chars:]))
 
 
 def _scrub_for_log(fragment: object) -> str:
     """Scrub exception/subprocess fragments before writing batch cron stdout."""
-    return sanitize_visible_message(str(fragment) if fragment is not None else "")
+    return _persist_visible_error(str(fragment) if fragment is not None else "")
 
 
 def _persist_cause(fragment: object) -> str:
@@ -412,6 +411,7 @@ def _record_parent_deferral_dispatch_failure(
             reason = f"{prior}; {dispatch_note}"
         else:
             reason = dispatch_note
+        reason = _persist_visible_error(reason)
         conn.execute(
             """
             UPDATE tasks SET error = ?, updated_at = datetime('now')
@@ -820,14 +820,14 @@ def main() -> None:
         _reconcile_deferred_parent_syntheses(conn, config)
 
         summary_raw = "; ".join(dict.fromkeys(causes[:5])) or None
-        summary = sanitize_visible_message(summary_raw) if summary_raw else None
+        summary = _persist_visible_error(summary_raw) if summary_raw else None
         finish_batch_run(conn, run_id, "failed" if failed else "ok", total, failed, dispatched, summary)
         print(f"DONE: {total} processed ({failed} failed, {dispatched} dispatched)")
     except Exception as exc:  # noqa: BLE001 — record the crash, then re-raise for the cron
         if conn is not None and run_id is not None:
             finish_batch_run(
                 conn, run_id, "crashed", total, failed, dispatched,
-                sanitize_visible_message(str(exc)),
+                _persist_visible_error(str(exc)),
             )
         raise
     finally:
