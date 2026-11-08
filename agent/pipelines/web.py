@@ -109,7 +109,9 @@ def step_substack_cleanup(task: dict, config: Config) -> str:
     # Remove trailing whitespace on each line
     content = '\n'.join(line.rstrip() for line in content.splitlines())
 
-    raw_path.write_text(redact_http_urls_in_text(content), encoding="utf-8")
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(raw_path, content, policy="boundary4")
     return "cleaned"
 
 
@@ -232,8 +234,13 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
         "video_id": video_id,
         "domain": domain,
     }
-    Path(config.temp_dir, f"{stem}_metadata.json").write_text(
-        json.dumps(meta, ensure_ascii=False), encoding="utf-8",
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(
+        Path(config.temp_dir, f"{stem}_metadata.json"),
+        meta,
+        policy="boundary4",
+        indent=None,
     )
     return f"video_id={video_id}"
 
@@ -1118,9 +1125,9 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         ),
         "total": gate_total,
     }
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
-    )
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(manifest_path, manifest, policy="boundary4", indent=None)
 
     from agent.db import (
         AGENT_SCHEMA,
@@ -1133,9 +1140,12 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
     if enqueued_success < extracted_total:
         _pause_on_unsupported_foreign_embed(html)
-        shortfall = sanitize_visible_message(
+        from agent.persist import scrub_durable_text
+
+        shortfall = scrub_durable_text(
             f"media gate: enqueue shortfall — extracted {extracted_total}, "
             f"enqueued {enqueued_success}",
+            policy="boundary4",
         )
         raise StepError(
             _message_with_enqueue_failures(shortfall, enqueue_stats),
@@ -1289,10 +1299,13 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
         capture_output=True, text=True, timeout=90,
     )
 
+    from agent.persist import scrub_durable_text
+
     if result.returncode != 0:
         raise StepError(
-            sanitize_visible_message(
+            scrub_durable_text(
                 f"Firecrawl curl failed: {result.stderr.strip()[:200]}",
+                policy="boundary4",
             ),
             error_type=ErrorType.RETRY,
             step_name="firecrawl_extract",
@@ -1303,23 +1316,26 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
         markdown = data["data"]["markdown"]
     except (json.JSONDecodeError, KeyError) as e:
         raise StepError(
-            sanitize_visible_message(f"Firecrawl response parse error: {e}"),
+            scrub_durable_text(f"Firecrawl response parse error: {e}", policy="boundary4"),
             error_type=ErrorType.RETRY,
             step_name="firecrawl_extract",
         ) from e
 
     if len(markdown) < 500:
         raise StepError(
-            sanitize_visible_message(
+            scrub_durable_text(
                 f"Content too short ({len(markdown)} chars) — "
                 f"possible 404 or empty page",
+                policy="boundary4",
             ),
             error_type=ErrorType.FAIL,
             step_name="firecrawl_extract",
         )
 
     raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
-    raw_path.write_text(redact_http_urls_in_text(markdown), encoding="utf-8")
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(raw_path, markdown, policy="boundary4")
 
     return str(raw_path)
 

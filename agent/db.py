@@ -1667,10 +1667,10 @@ def record_batch_run(conn: sqlite3.Connection) -> int:
 
 
 def _persist_visible_error(message: str) -> str:
-    """Scrub ingest/batch durable error text: display-safe URLs plus visible-message policy."""
-    from agent.notify import sanitize_visible_message
+    """Scrub durable task/ingest error text (boundary4: URLs + credentials, no display path scrub)."""
+    from agent.persist import scrub_durable_text
 
-    return sanitize_visible_message(redact_http_urls_in_text(message))
+    return scrub_durable_text(message, policy="boundary4")
 
 
 def finish_batch_run(conn: sqlite3.Connection, run_id: int, status: str,
@@ -1883,9 +1883,9 @@ def append_parent_media_atomic(
         return False
     if not raw_path.exists():
         return False
-    from agent.notify import redact_credential_shapes
+    from agent.persist import scrub_durable_text
 
-    safe_body = redact_credential_shapes(redact_http_urls_in_text(body)).strip()
+    safe_body = scrub_durable_text(body, policy="boundary4").strip()
     text = raw_path.read_text(encoding="utf-8")
     media_flag = bool(row["media_appended"] if hasattr(row, "keys") else row[0])
     sibling_ids = _ordered_sibling_ids_for_ingest(conn, ingest_id)
@@ -1897,9 +1897,9 @@ def append_parent_media_atomic(
         section_present = f"## {section}" in text and safe_body in text
         if section_present:
             pending_text = text + f"\n\n{marker}\n"
-            tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
-            tmp_path.write_text(pending_text, encoding="utf-8")
-            os.replace(tmp_path, raw_path)
+            from agent.persist import persist_durable_text
+
+            persist_durable_text(raw_path, pending_text, policy="boundary4")
             return True
         with conn:
             conn.execute(
@@ -1909,9 +1909,9 @@ def append_parent_media_atomic(
         media_flag = False
     block = f"\n\n## {section}\n\n{safe_body}\n\n{marker}\n"
     pending_text = text + block
-    tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
-    tmp_path.write_text(pending_text, encoding="utf-8")
-    os.replace(tmp_path, raw_path)
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(raw_path, pending_text, policy="boundary4")
     set_ingest_media_appended(conn, ingest_id)
     parent_row = conn.execute(
         "SELECT parent_slug FROM ingest_queue WHERE id = ?", (ingest_id,),

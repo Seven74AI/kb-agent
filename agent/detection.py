@@ -231,9 +231,12 @@ def _curl_netscape_cookie_config(cookie_file: Path) -> tuple[list[str], Path | N
     if not cookie_file.is_file():
         return [], None
     conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
-    conf_path.write_text(
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(
+        conf_path,
         f"{curl_config_quoted_assignment('cookie', str(cookie_file))}\n",
-        encoding="utf-8",
+        policy="machine_local",
     )
     os.chmod(conf_path, 0o600)
     return ["--config", str(conf_path)], conf_path

@@ -35,6 +35,7 @@ from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json, write_vault_note
 from agent.notify import sanitize_visible_message
+from agent.persist import scrub_durable_text
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -78,7 +79,13 @@ def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
     os.chmod(xdg_root, 0o700)
     os.chmod(conf_dir, 0o700)
     conf_path = conf_dir / "config"
-    conf_path.write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(
+        conf_path,
+        f"--cookies\n{cookie_path}\n",
+        policy="machine_local",
+    )
     os.chmod(conf_path, 0o600)
     env = os.environ.copy()
     env["XDG_CONFIG_HOME"] = str(xdg_root)
@@ -588,7 +595,9 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
 
     # Write metadata
     meta_path = _carousel_meta_path(config, task)
-    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(meta_path, metadata, policy="boundary4")
 
     return str(meta_path)
 
@@ -667,7 +676,9 @@ asyncio.run(main())
 """
 
     script_path = _carousel_playwright_script_path(config, task)
-    script_path.write_text(playwright_script)
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(script_path, playwright_script, policy="machine_local")
 
     try:
         result = subprocess.run(
@@ -680,7 +691,7 @@ asyncio.run(main())
                 "Playwright carousel extraction failed",
                 error_type=ErrorType.RETRY,
                 step_name="ig_carousel_extract",
-                details=sanitize_visible_message(result.stderr.strip()[:500]),
+                details=scrub_durable_text(result.stderr.strip()[:500], policy="boundary4"),
             )
 
         try:
@@ -690,7 +701,7 @@ asyncio.run(main())
                 "Failed to parse Playwright output for carousel",
                 error_type=ErrorType.RETRY,
                 step_name="ig_carousel_extract",
-                details=sanitize_visible_message(result.stdout.strip()[:500]),
+                details=scrub_durable_text(result.stdout.strip()[:500], policy="boundary4"),
             )
 
         # Write extracted slides
@@ -707,7 +718,9 @@ asyncio.run(main())
             "slide_count": len(slides_persisted),
             "cap_note": f"Hard cap: {CAROUSEL_SLIDE_CAP} slides. Slides beyond {CAROUSEL_SLIDE_CAP} are not extractable.",
         }
-        slides_path.write_text(json.dumps(slides_data, indent=2, ensure_ascii=False))
+        from agent.persist import persist_durable_json
+
+        persist_durable_json(slides_path, slides_data, policy="boundary4")
 
         return str(slides_path)
     finally:
@@ -1162,7 +1175,9 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
                     curl_config_quoted_assignment("url", api_url),
                 ]
             ) + "\n"
-            conf_path.write_text(curl_cfg, encoding="utf-8")
+            from agent.persist import persist_durable_text
+
+            persist_durable_text(conf_path, curl_cfg, policy="machine_local")
             os.chmod(conf_path, 0o600)
 
             result = subprocess.run(
@@ -1242,8 +1257,12 @@ def step_ig_comment_fetch(task: dict, config: Config) -> str:
     url = task["source_url"]
     info = _fetch_ig_comment(url, config)
     raw_path = _ig_comment_sidecar_path(config, task)
-    raw_path.write_text(
-        json.dumps(_ig_comment_sidecar_for_disk(info), indent=2, ensure_ascii=False),
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(
+        raw_path,
+        _ig_comment_sidecar_for_disk(info),
+        policy="boundary4",
     )
     return str(raw_path)
 

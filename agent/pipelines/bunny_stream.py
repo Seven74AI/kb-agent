@@ -253,8 +253,10 @@ def step_extract_metadata(task: dict, config: Config) -> str:
         "chapters": [],
         "source_url": url_for_display(source_url),
     }
+    from agent.persist import persist_durable_json
+
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
-    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+    persist_durable_json(meta_path, metadata, policy="boundary4")
     return json.dumps(metadata)
 
 
@@ -325,7 +327,9 @@ def step_download_video(task: dict, config: Config) -> str:
         meta = {"title": slug, "duration": duration}
     meta["duration"] = duration
     meta["bunny_video_uuid"] = video_uuid
-    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(meta_path, meta, policy="boundary4")
 
     return str(output_path)
 

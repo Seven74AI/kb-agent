@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import _persist_visible_error
+from agent.notify import scrub_outbound_visible_message
 from agent.redact import url_for_display
 
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
@@ -271,7 +272,7 @@ def poll_watch_source(
         except Exception as exc:  # isolate per-item failures so one bad item doesn't abort the poll
             result = {
                 "status": "error",
-                "error": _persist_visible_error(f"{type(exc).__name__}: {exc}"),
+                "error": scrub_outbound_visible_message(f"{type(exc).__name__}: {exc}"),
             }
         submissions.append(result)
         # Only mark an item as seen when it was actually enqueued, paused, or
@@ -338,7 +339,7 @@ def poll_all_due_sources(
             results.append(
                 {
                     "page_url": _display_page_url(source["page_url"]),
-                    "error": _persist_visible_error(f"{type(exc).__name__}: {exc}"),
+                    "error": scrub_outbound_visible_message(f"{type(exc).__name__}: {exc}"),
                 }
             )
             continue
@@ -430,7 +431,7 @@ async def run_watch_scheduler(
             await asyncio.to_thread(_poll_due_sources_in_thread, config, fetch, submit_fn)
         except Exception as exc:
             print(
-                f"[watch_source] poll error: {_persist_visible_error(f'{type(exc).__name__}: {exc}')}",
+                f"[watch_source] poll error: {scrub_outbound_visible_message(f'{type(exc).__name__}: {exc}')}",
                 flush=True,
             )
         await asyncio.sleep(poll_interval_seconds)

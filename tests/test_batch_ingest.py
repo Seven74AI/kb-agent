@@ -230,7 +230,7 @@ class TestAppendToParent:
                 (ingest_id,),
             ).fetchone()
             assert row["media_appended"] == 0
-            assert src.read_text(encoding="utf-8") != raw.read_text(encoding="utf-8")
+            assert Path(src).read_text(encoding="utf-8") != raw.read_text(encoding="utf-8")
             return real_replace(src, dst)
 
         monkeypatch.setattr(os, "replace", tracking_replace)
@@ -860,7 +860,7 @@ class TestKbOcrSizeCap:
 
     def test_main_scrubs_reading_credentials_and_urls_before_write(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
-        assert "prepare_ocr_reading_for_write" in text
+        assert "persist_durable_json" in text
         assert 'r["reading"]' in text or "r['reading']" in text
 
     def test_batch_ingest_rejects_truncated_ocr_flag(self, config, conn, monkeypatch):

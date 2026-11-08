@@ -1199,8 +1199,8 @@ class TestDelegateBooks:
         conn.commit()
         conn.close()
 
-        assert "[path]" in scrubbed
-        assert str(epub) not in scrubbed
+        assert str(epub) in scrubbed
+        assert "[path]" not in scrubbed
 
         mega_task["id"] = parent_id
         result = json.loads(step_delegate_books(mega_task, config))

@@ -51,8 +51,15 @@ from agent.streaming import log_progress
 STEP_REGISTRY: dict[str, tuple[Any, str]] = {}
 
 def _sanitize_step_log_message(message: str) -> str:
-    """Scrub text before persisting to step_logs (URL redaction + visible-message policy)."""
+    """Scrub text before persisting to step_logs (boundary4 durable policy)."""
     return _persist_visible_error(message)
+
+
+def _display_visible_message(message: str) -> str:
+    """Scrub text for journal/stdout/notify (display boundary, not durable storage)."""
+    from agent.notify import scrub_outbound_visible_message
+
+    return scrub_outbound_visible_message(message)
 
 
 def _format_stdout_traceback(exc: BaseException, *, limit: int = 5) -> str:
@@ -63,7 +70,7 @@ def _format_stdout_traceback(exc: BaseException, *, limit: int = 5) -> str:
         stripped = line.rstrip()
         if not stripped or stripped.startswith("Traceback"):
             continue
-        clean = _persist_visible_error(stripped)
+        clean = _display_visible_message(stripped)
         if clean:
             lines.append(clean)
     return "\n".join(lines)
@@ -404,17 +411,18 @@ class Consumer:
             except StepError as e:
                 error_type = e.error_type.value  # 'retry', 'pause', 'fail'
                 error_msg = _persist_visible_error(str(e))
+                display_msg = _display_visible_message(str(e))
                 logger.error(
                     "[consumer] Step '%s' StepError (%s): %s",
                     step_name,
                     error_type,
-                    error_msg,
+                    display_msg,
                 )
                 detail_logger.error(
                     "[consumer] Step '%s' StepError (%s) (detail): %s",
                     step_name,
                     error_type,
-                    error_msg,
+                    display_msg,
                 )
                 tb_summary = _format_stdout_traceback(e)
                 print(
@@ -428,17 +436,17 @@ class Consumer:
                 )
 
                 if error_type == "fail":
-                    print(f"[consumer] Step '{step_name}' FAILED: {error_msg}")
+                    print(f"[consumer] Step '{step_name}' FAILED: {display_msg}")
                     fail_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "failed", error_msg)
-                    self._alert_failure(task, "failed", error_msg)
+                    self._alert_failure(task, "failed", display_msg)
                     return
 
                 elif error_type == "pause":
-                    print(f"[consumer] Step '{step_name}' PAUSED: {error_msg}")
+                    print(f"[consumer] Step '{step_name}' PAUSED: {display_msg}")
                     pause_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "paused", error_msg)
-                    self._alert_failure(task, "paused", error_msg)
+                    self._alert_failure(task, "paused", display_msg)
                     return
 
                 else:  # retry
@@ -453,7 +461,11 @@ class Consumer:
                         )
                         pause_task(self.agent_conn, task_id, pause_msg)
                         update_step(self.agent_conn, step_id, "paused", pause_msg)
-                        self._alert_failure(task, "paused", pause_msg)
+                        self._alert_failure(
+                            task,
+                            "paused",
+                            _display_visible_message(pause_msg),
+                        )
                         return
 
                     delay = self.config.retry_delays[
@@ -461,22 +473,23 @@ class Consumer:
                     ]
                     print(
                         f"[consumer] Step '{step_name}' RETRY "
-                        f"({retries}/{self.config.max_retries}, {delay}s): {error_msg}"
+                        f"({retries}/{self.config.max_retries}, {delay}s): {display_msg}"
                     )
                     update_step(self.agent_conn, step_id, "pending", error_msg)
                     await asyncio.sleep(delay)
 
             except Exception as e:
                 error_msg = _persist_visible_error(f"{type(e).__name__}: {e}")
+                display_msg = _display_visible_message(f"{type(e).__name__}: {e}")
                 logger.error(
                     "[consumer] Step '%s' unhandled exception: %s",
                     step_name,
-                    error_msg,
+                    display_msg,
                 )
                 detail_logger.error(
                     "[consumer] Step '%s' unhandled exception (detail): %s",
                     step_name,
-                    error_msg,
+                    display_msg,
                 )
                 tb_summary = _format_stdout_traceback(e)
                 print(
@@ -492,17 +505,17 @@ class Consumer:
                 )
 
                 if default_on_error == "fail":
-                    print(f"[consumer] Step '{step_name}' FAILED (unexpected): {error_msg}")
+                    print(f"[consumer] Step '{step_name}' FAILED (unexpected): {display_msg}")
                     fail_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "failed", error_msg)
-                    self._alert_failure(task, "failed", error_msg)
+                    self._alert_failure(task, "failed", display_msg)
                     return
 
                 elif default_on_error == "pause":
-                    print(f"[consumer] Step '{step_name}' PAUSED (unexpected): {error_msg}")
+                    print(f"[consumer] Step '{step_name}' PAUSED (unexpected): {display_msg}")
                     pause_task(self.agent_conn, task_id, error_msg)
                     update_step(self.agent_conn, step_id, "paused", error_msg)
-                    self._alert_failure(task, "paused", error_msg)
+                    self._alert_failure(task, "paused", display_msg)
                     return
 
                 else:  # default retry
@@ -517,7 +530,11 @@ class Consumer:
                         )
                         pause_task(self.agent_conn, task_id, pause_msg)
                         update_step(self.agent_conn, step_id, "paused", pause_msg)
-                        self._alert_failure(task, "paused", pause_msg)
+                        self._alert_failure(
+                            task,
+                            "paused",
+                            _display_visible_message(pause_msg),
+                        )
                         return
 
                     delay = self.config.retry_delays[
@@ -525,7 +542,7 @@ class Consumer:
                     ]
                     print(
                         f"[consumer] Step '{step_name}' RETRY "
-                        f"({retries}/{self.config.max_retries}, {delay}s): {error_msg}"
+                        f"({retries}/{self.config.max_retries}, {delay}s): {display_msg}"
                     )
                     update_step(self.agent_conn, step_id, "pending", error_msg)
                     await asyncio.sleep(delay)

@@ -531,12 +531,12 @@ def test_submit_plan_pause_reason_scrubbed_in_task_row(core_config, agent_conn, 
     )
     plan = plan_submission("https://youtube.com/watch?v=abc", core_config)
     assert plan["status"] == "paused"
-    assert "/root/" not in (plan["reason"] or "")
+    assert "/root/kb-agent/cookies/youtube.txt" in (plan["reason"] or "")
     result = submit_plan(agent_conn, plan)
     row = agent_conn.execute(
         "SELECT error FROM tasks WHERE id = ?", (result["task_id"],)
     ).fetchone()
-    assert "/root/" not in (row["error"] or "")
+    assert "/root/kb-agent/cookies/youtube.txt" in (row["error"] or "")
     assert "/root/" not in (result["reason"] or "")
 
 

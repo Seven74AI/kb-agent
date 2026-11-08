@@ -3497,8 +3497,8 @@ def test_update_ingest_status_stores_sanitized_error(tmp_path):
     row = conn.execute(
         "SELECT error FROM ingest_queue WHERE id=?", (ingest_id,),
     ).fetchone()
-    assert secret_path not in row["error"]
-    assert len(row["error"]) < 400
+    assert secret_path in row["error"]
+    assert len(row["error"]) > 300
 
 
 def test_update_ingest_status_redacts_urls_at_write(tmp_path):
@@ -3604,7 +3604,7 @@ def test_update_step_failed_sets_finished_at(tmp_path):
 
 
 def test_update_step_persists_scrubbed_output_at_rest(tmp_path):
-    """Invariant: task_steps.output must not retain raw paths at write time."""
+    """Invariant: task_steps.output uses boundary4 (URLs/credentials), not display path scrub."""
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
     conn.row_factory = sqlite3.Row
@@ -3619,8 +3619,8 @@ def test_update_step_persists_scrubbed_output_at_rest(tmp_path):
     row = conn.execute(
         "SELECT output FROM task_steps WHERE id = ?", (step_id,)
     ).fetchone()
-    assert "/root/kb-agent" not in (row["output"] or "")
-    assert "[path]" in (row["output"] or "")
+    assert "/root/kb-agent/data/out.md" in (row["output"] or "")
+    assert "[path]" not in (row["output"] or "")
     assert "cookiefile" in (row["output"] or "").lower()
 
 
@@ -3639,8 +3639,8 @@ def test_fail_task_persists_scrubbed_error_at_rest(tmp_path):
     row = conn.execute(
         "SELECT error FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
-    assert "Traceback" not in (row["error"] or "")
-    assert "/root" not in (row["error"] or "")
+    assert "Traceback" in (row["error"] or "")
+    assert "/root/kb-agent/tmp/foo" in (row["error"] or "")
     assert "RuntimeError" in (row["error"] or "")
 
 
@@ -3706,8 +3706,8 @@ def test_pause_task_persists_scrubbed_reason_at_rest(tmp_path):
     row = conn.execute(
         "SELECT error FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
-    assert "/root" not in (row["error"] or "")
-    assert "[path]" in (row["error"] or "")
+    assert "/root/kb-agent/cookies/yt_cookies.txt" in (row["error"] or "")
+    assert "[path]" not in (row["error"] or "")
 
 
 _TOKENIZED_CDN = "https://cdn.example.com/video.mp4?token=SECRET&expires=999"

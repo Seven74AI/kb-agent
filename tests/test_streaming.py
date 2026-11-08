@@ -40,7 +40,7 @@ def test_log_progress_redacts_http_url_query(logs_db):
 
 
 def test_log_progress_scrubs_sensitive_paths(logs_db):
-    """Progress lines persisted to step_logs must not contain raw filesystem paths."""
+    """Progress lines in step_logs use boundary4 (paths preserved, not display-scrubbed)."""
     raw = "yt-dlp: cookiefile /root/kb-agent/cookies/yt_cookies.txt"
     log_progress(logs_db, "task-1", "download_video", raw, stream="stderr")
 
@@ -49,8 +49,8 @@ def test_log_progress_scrubs_sensitive_paths(logs_db):
         ("task-1",),
     ).fetchone()
     assert row is not None
-    assert "/root/kb-agent" not in row["content"]
-    assert "[path]" in row["content"]
+    assert "/root/kb-agent" in row["content"]
+    assert "[path]" not in row["content"]
     assert "yt-dlp" in row["content"]
 
 
@@ -75,5 +75,5 @@ async def test_stream_to_logs_scrubs_subprocess_stdout(logs_db):
     ).fetchone()
     assert row is not None
     assert row["stream"] == "stdout"
-    assert "/root/kb-agent" not in row["content"]
-    assert "[path]" in row["content"]
+    assert "/root/kb-agent" in row["content"]
+    assert "[path]" not in row["content"]
