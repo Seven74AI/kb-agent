@@ -21,6 +21,13 @@ from agent.detection import (
 )
 from agent.core.slugify import _netloc_without_userinfo
 from agent.fetch_guard import _assert_fetch_url_allowed
+from agent.embed_carriers import (
+    ExtractedMediaIndex,
+    classify_page_embeds,
+    extract_embed_media,
+    extract_native_video_ids as _extract_native_video_ids,
+    html_unescape as _html_unescape,
+)
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
 from agent.redact import redact_http_urls_in_text, url_for_display, write_vault_note
@@ -285,21 +292,6 @@ def step_substack_video_download(task: dict, config: Config) -> str:
 # Body-image dimension below this (both sides) is an avatar/icon, not content.
 AVATAR_MAX_SIDE = 400
 
-# Embedded YouTube: iframe src OR data-attrs videoId (HTML-escaped in SSR).
-_YOUTUBE_IFRAME_RE = re.compile(r'youtube(?:-nocookie)?\.com/embed/([A-Za-z0-9_-]{6,})')
-_YOUTUBE_VIDEOID_RE = re.compile(r'"videoId":"([A-Za-z0-9_-]{6,})"')
-_YOUTUBE_WATCH_RE = re.compile(
-    r'(?:https?://)?(?:www\.)?youtube\.com/watch\?(?:[^"\s<>]*&)?v=([A-Za-z0-9_-]{6,})',
-    re.IGNORECASE,
-)
-_YOUTUBE_SHORTS_RE = re.compile(
-    r'(?:https?://)?(?:www\.)?youtube\.com/shorts/([A-Za-z0-9_-]{6,})',
-    re.IGNORECASE,
-)
-_YOUTUBE_BE_RE = re.compile(
-    r'(?:https?://)?youtu\.be/([A-Za-z0-9_-]{6,})',
-    re.IGNORECASE,
-)
 _IMAGE_KEY_RE = re.compile(
     r'substack-post-media\.s3\.amazonaws\.com(?:%2F|/)public(?:%2F|/)images(?:%2F|/)'
     r'([a-z0-9-]+_\d+x\d+\.\w+)'
@@ -309,22 +301,6 @@ _IMAGE_KEY_RE = re.compile(
 # non-image asset that Substack serves under the same `images/` prefix.
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif", "heic", "avif"}
 
-
-def _html_unescape(s: str) -> str:
-    return (
-        s.replace("&quot;", '"')
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-    )
-
-
-_NATIVE_VIDEO_ID_RE = re.compile(
-    r'"videoUpload"\s*:\s*\{\s*"id"\s*:\s*"([a-f0-9-]+)"'
-    r'|/api/v1/video/upload/([a-f0-9-]+)/?',
-    re.IGNORECASE,
-)
 
 _PAYWALL_MARKERS = (
     "subscribe to continue",
@@ -357,17 +333,6 @@ def _is_substack_unauth_paywall_shell(html: str) -> bool:
         if "article" not in lower and "post-body" not in lower:
             return True
     return False
-
-
-def _extract_native_video_ids(html: str) -> list[str]:
-    """All native Substack ``videoUpload.id`` values, deduped, order-preserved."""
-    decoded = _html_unescape(html)
-    out: list[str] = []
-    for m in _NATIVE_VIDEO_ID_RE.finditer(decoded):
-        vid = m.group(1) or m.group(2)
-        if vid and vid not in out:
-            out.append(vid)
-    return out
 
 
 def _resolve_native_video_id(html: str, source_url: str) -> str | None:
@@ -454,174 +419,30 @@ def _extract_body_images(html: str) -> list[str]:
     return out
 
 
-def _extract_youtube_ids(html: str) -> list[str]:
-    """Embedded YouTube video IDs, deduped (iframe, videoId JSON, prose links)."""
-    decoded = _html_unescape(html)
-    ids: list[str] = []
-    for pattern in (
-        _YOUTUBE_IFRAME_RE,
-        _YOUTUBE_VIDEOID_RE,
-        _YOUTUBE_WATCH_RE,
-        _YOUTUBE_SHORTS_RE,
-        _YOUTUBE_BE_RE,
-    ):
-        for m in pattern.finditer(decoded):
-            if m.group(1) not in ids:
-                ids.append(m.group(1))
-    return ids
-
-
-_RUMBLE_URL_RE = re.compile(
-    r'https?://rumble\.com/(?:embed/)?(v[a-z0-9]+(?:-[a-z0-9-]+)?)'
-)
-
-
-def _extract_rumble_urls(html: str) -> list[str]:
-    """Embedded Rumble URLs, deduped, order-preserved."""
-    decoded = _html_unescape(html)
-    out: list[str] = []
-    for m in _RUMBLE_URL_RE.finditer(decoded):
-        url = f"https://rumble.com/{m.group(1)}"
-        if url not in out:
-            out.append(url)
-    return out
-
-
-_BUNNY_EMBED_URL_RE = re.compile(
-    r"https?://(?:player\.)?mediadelivery\.net/embed/\d+/[a-f0-9]{8}-[a-f0-9]{4}-"
-    r"[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
-    re.IGNORECASE,
-)
-
-
-def _extract_bunny_embed_urls(html: str) -> list[str]:
-    """Bunny Stream player embed URLs from iframe/src carriers, deduped."""
-    decoded = _html_unescape(html)
-    out: list[str] = []
-    for m in _BUNNY_EMBED_URL_RE.finditer(decoded):
-        url = m.group(0)
-        if url not in out:
-            out.append(url)
-    return out
-
-
-# Hosts the deferred-media gate enqueues inline (native Substack / YouTube / Rumble / Bunny).
-_HANDLED_EMBED_URL_RE = re.compile(
-    r"(?:youtube(?:-nocookie)?\.com|youtu\.be|rumble\.com|substack-post-media\.|"
-    r"substack\.com/api/v1/video|(?:player\.)?mediadelivery\.net)",
-    re.IGNORECASE,
-)
-
-# Embed-carrier shapes for handled hosts (subset of what the extractors can enqueue).
-_HANDLED_EMBED_CARRIER_URL_RE = re.compile(
-    r"(?:youtube(?:-nocookie)?\.com/embed/|youtu\.be/|rumble\.com/embed/|"
-    r"(?:player\.)?mediadelivery\.net/embed/|substack\.com/api/v1/video)",
-    re.IGNORECASE,
-)
-
-_FOREIGN_EMBED_URL_RULES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"instagram\.com", re.IGNORECASE), "instagram"),
-    (re.compile(r"threads\.(?:net|com)/", re.IGNORECASE), "threads"),
-    (re.compile(r"tiktok\.com", re.IGNORECASE), "tiktok"),
-    (re.compile(r"vimeo\.com", re.IGNORECASE), "vimeo"),
-    (re.compile(r"(?:player\.)?mediadelivery\.net", re.IGNORECASE), "bunny"),
-    (re.compile(r"bunnycdn\.com", re.IGNORECASE), "bunny"),
-    (re.compile(r"(?:www\.)?bunny\.net", re.IGNORECASE), "bunny"),
-    (re.compile(r"terragrandir\.com", re.IGNORECASE), "bunny"),
-    (re.compile(r"mega\.nz", re.IGNORECASE), "mega"),
-    (re.compile(r"(?:platform\.)?(?:twitter|x)\.com", re.IGNORECASE), "twitter"),
-]
-
-_IFRAME_SRC_RE = re.compile(
-    r'<iframe[^>]+src=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-_LINK_HREF_RE = re.compile(
-    r'<a[^>]+href=["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-# Embed-carrier paths only — plain citation anchors must not match (see _detect_unsupported_foreign_embed).
-_EMBED_CARRIER_URL_RE = re.compile(
-    r"(?:/embed(?:/|$|[?#])|/video/embed|player\.|widget)",
-    re.IGNORECASE,
-)
-_OEMBED_PROVIDER_RE = re.compile(
-    r'"provider_(?:url|name)"\s*:\s*"([^"]+)"',
-    re.IGNORECASE,
-)
-
-
-def _embed_carrier_class_re(marker: str) -> re.Pattern[str]:
-    """Match *marker* only inside a ``class="..."`` attribute (embed DOM carrier)."""
-    return re.compile(
-        rf'\bclass\s*=\s*["\'][^"\']*\b{re.escape(marker)}\b',
-        re.IGNORECASE,
-    )
-
-
-_DATA_INSTGRM_PERMALINK_RE = re.compile(r"data-instgrm-permalink\s*=", re.IGNORECASE)
-_DATA_THREADS_POST_PERMALINK_RE = re.compile(
-    r"data-text-post-permalink\s*=", re.IGNORECASE
-)
-_INSTAGRAM_MEDIA_CLASS_RE = _embed_carrier_class_re("instagram-media")
-_TIKTOK_EMBED_CLASS_RE = _embed_carrier_class_re("tiktok-embed")
-_THREADS_TEXT_POST_CLASS_RE = _embed_carrier_class_re("text-post-media")
-_TWITTER_TWEET_CLASS_RE = _embed_carrier_class_re("twitter-tweet")
-_TWITTER_TIMELINE_CLASS_RE = _embed_carrier_class_re("twitter-timeline")
-
-
-def _foreign_platform_from_url(url: str) -> str | None:
-    """Return a platform label when *url* names media we do not batch from Substack parents."""
-    if not url or _HANDLED_EMBED_URL_RE.search(url):
-        return None
-    for pattern, platform in _FOREIGN_EMBED_URL_RULES:
-        if pattern.search(url):
-            return platform
-    return None
-
-
-def _collect_embed_carrier_urls(html: str) -> list[str]:
-    """Iframe src, oEmbed provider, and embed-path anchor hrefs — order preserved, deduped."""
-    decoded = _html_unescape(html)
-    out: list[str] = []
-    seen: set[str] = set()
-    for pattern in (_IFRAME_SRC_RE, _OEMBED_PROVIDER_RE):
-        for m in pattern.finditer(decoded):
-            url = m.group(1)
-            if url not in seen:
-                seen.add(url)
-                out.append(url)
-    for m in _LINK_HREF_RE.finditer(decoded):
-        url = m.group(1)
-        if _EMBED_CARRIER_URL_RE.search(url) and url not in seen:
-            seen.add(url)
-            out.append(url)
-    return out
-
-
-def _handled_embed_covered_by_extraction(
-    url: str,
+def _embedded_media_index(
     youtube_ids: list[str],
     rumble_urls: list[str],
     bunny_urls: list[str],
     native_video_ids: list[str],
-) -> bool:
-    """True when a handled embed-carrier URL has a matching canonical ingest candidate."""
-    lower = url.lower()
-    if re.search(r"youtube(?:-nocookie)?\.com/embed/", lower) or "youtu.be/" in lower:
-        return any(vid in url for vid in youtube_ids)
-    if "rumble.com/embed/" in lower:
-        for canonical in rumble_urls:
-            slug = canonical.rsplit("/", 1)[-1]
-            if slug and slug in url:
-                return True
-        return False
-    if "mediadelivery.net/embed/" in lower:
-        norm = url.rstrip("/")
-        return any(norm == b.rstrip("/") or norm.startswith(b.rstrip("/") + "/") for b in bunny_urls)
-    if "substack.com/api/v1/video" in lower:
-        return any(vid in url for vid in native_video_ids)
-    return False
+) -> ExtractedMediaIndex:
+    return ExtractedMediaIndex(
+        youtube_ids=youtube_ids,
+        rumble_urls=rumble_urls,
+        bunny_urls=bunny_urls,
+        native_video_ids=native_video_ids,
+    )
+
+
+def _extract_youtube_ids(html: str) -> list[str]:
+    return extract_embed_media(html).youtube_ids
+
+
+def _extract_rumble_urls(html: str) -> list[str]:
+    return extract_embed_media(html).rumble_urls
+
+
+def _extract_bunny_embed_urls(html: str) -> list[str]:
+    return extract_embed_media(html).bunny_urls
 
 
 def _detect_unenqueued_handled_embed(
@@ -631,15 +452,10 @@ def _detect_unenqueued_handled_embed(
     bunny_urls: list[str],
     native_video_ids: list[str],
 ) -> str | None:
-    """First handled embed-carrier URL visible in DOM that extractors did not enqueue."""
-    for url in _collect_embed_carrier_urls(html):
-        if not _HANDLED_EMBED_CARRIER_URL_RE.search(url):
-            continue
-        if not _handled_embed_covered_by_extraction(
-            url, youtube_ids, rumble_urls, bunny_urls, native_video_ids,
-        ):
-            return url
-    return None
+    extracted = _embedded_media_index(
+        youtube_ids, rumble_urls, bunny_urls, native_video_ids,
+    )
+    return classify_page_embeds(html, extracted).handled_unenqueued
 
 
 def _pause_on_unenqueued_handled_embed(
@@ -661,51 +477,9 @@ def _pause_on_unenqueued_handled_embed(
         )
 
 
-def _embed_carrier_pause_label(url: str) -> str | None:
-    """PAUSE label for an embed-carrier URL the deferral gate cannot enqueue.
-
-    Handled platforms (Substack-native / YouTube / Rumble) return None. Known foreign
-    platforms return their rule label; any other embed carrier fails closed on host
-    (or ``unknown`` when no host is present).
-    """
-    if not url or _HANDLED_EMBED_URL_RE.search(url):
-        return None
-    platform = _foreign_platform_from_url(url)
-    if platform:
-        return platform
-    host = urlparse(url).hostname
-    return host if host else "unknown"
-
-
 def _detect_unsupported_foreign_embed(html: str) -> str | None:
-    """First foreign embed platform in article HTML that the deferral gate cannot enqueue.
-
-    Invariant: any DOM embed carrier (blockquote embed class, data-*-permalink, iframe,
-    oEmbed) that is not a handled platform must fail closed (PAUSE), never fall through
-    to inline synthesis as ``no embedded media``. Plain outbound citation ``<a href>``
-    links must not trigger a pause. Substack-native, YouTube, Rumble, and Bunny Stream
-    embeds are exempt (handled by the existing extractors).
-    """
-    decoded = _html_unescape(html)
-    if _DATA_INSTGRM_PERMALINK_RE.search(decoded) or _INSTAGRAM_MEDIA_CLASS_RE.search(
-        decoded
-    ):
-        return "instagram"
-    if _TIKTOK_EMBED_CLASS_RE.search(decoded):
-        return "tiktok"
-    if _DATA_THREADS_POST_PERMALINK_RE.search(decoded) or _THREADS_TEXT_POST_CLASS_RE.search(
-        decoded
-    ):
-        return "threads"
-    if _TWITTER_TWEET_CLASS_RE.search(decoded) or _TWITTER_TIMELINE_CLASS_RE.search(
-        decoded
-    ):
-        return "twitter"
-    for url in _collect_embed_carrier_urls(html):
-        label = _embed_carrier_pause_label(url)
-        if label:
-            return label
-    return None
+    """Thin wrapper — classification lives in :mod:`agent.embed_carriers`."""
+    return classify_page_embeds(html, extract_embed_media(html)).foreign_pause
 
 
 class EmbeddedMediaEnqueueStats(NamedTuple):
