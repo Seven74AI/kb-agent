@@ -14,6 +14,7 @@ Pitfalls handled:
 """
 
 import json
+import logging
 import re
 import subprocess
 from datetime import datetime
@@ -22,13 +23,18 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
-from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_sidecar
+from agent.detection import (
+    _curl_netscape_cookie_config,
+    _safe_url_for_log,
+    _unlink_curl_netscape_sidecar,
+)
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
 from agent.core.note import write_vault_note
 from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json
 from agent.llm import get_llm_client
+from agent.notify import sanitize_visible_message
 from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -48,6 +54,8 @@ from agent.pipelines.video_common import (
     upload_note_archive,
     upload_video_source,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -326,22 +334,78 @@ def _is_reply_post(html: str) -> bool:
     return match.group(1) == "true" if match else False
 
 
-def _fetch_parent_post(parent_url: str, cookie_dir: Path | None = None) -> str | None:
+def _threads_reply_prompt_context(parent_context: str | None, is_reply: bool) -> str:
+    """Prompt line for reply vs original — never imply non-reply when ``is_reply``."""
+    if parent_context:
+        return f"Reply context (parent post): {parent_context[:500]}"
+    if is_reply:
+        return (
+            "Reply post — parent context unavailable (parent fetch failed or "
+            "caption missing); do not treat as a non-reply original post."
+        )
+    return "Original post (not a reply)"
+
+
+def _fetch_parent_post(
+    parent_url: str,
+    cookie_dir: Path | None = None,
+    *,
+    step_name: str,
+) -> str:
     """Fetch parent post content for reply context.
 
     Args:
         parent_url: The parent post URL.
         cookie_dir: Directory containing threads_cookies.txt.
+        step_name: Pipeline step name for StepError attribution.
 
     Returns:
-        Caption text of the parent post, or None if fetch fails.
+        Caption text of the parent post.
+
+    Raises:
+        StepError: If parent fetch fails or caption cannot be extracted.
     """
     try:
         html = _curl_threads(parent_url, timeout=20, cookie_dir=cookie_dir)
-        captions = _extract_all_captions(html)
-        return captions[0] if captions else None
-    except Exception:
-        return None
+    except StepError as exc:
+        detail = sanitize_visible_message(str(exc))
+        logger.warning(
+            "Threads parent fetch failed for %s: %s",
+            _safe_url_for_log(parent_url),
+            detail,
+        )
+        raise StepError(
+            f"Threads parent post fetch failed: {detail}",
+            error_type=exc.error_type,
+            step_name=step_name,
+            details=exc.details,
+        ) from exc
+    except Exception as exc:
+        detail = sanitize_visible_message(str(exc))
+        logger.warning(
+            "Threads parent fetch failed for %s: %s",
+            _safe_url_for_log(parent_url),
+            detail,
+        )
+        raise StepError(
+            f"Threads parent post fetch failed: {detail}",
+            error_type=ErrorType.PAUSE,
+            step_name=step_name,
+        ) from exc
+
+    captions = _extract_all_captions(html)
+    if not captions:
+        logger.warning(
+            "Threads parent fetch returned no caption for %s",
+            _safe_url_for_log(parent_url),
+        )
+        raise StepError(
+            "Threads parent post caption not found",
+            error_type=ErrorType.PAUSE,
+            step_name=step_name,
+            details="Parent page loaded but no caption text was extracted",
+        )
+    return captions[0]
 
 
 def _extract_og_description(html: str) -> str | None:
@@ -440,7 +504,11 @@ def step_threads_detect(task: dict, config: Config) -> str:
         )
         if parent_match:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
-            parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
+            parent_context = _fetch_parent_post(
+                parent_url,
+                cookie_dir=config.cookie_dir,
+                step_name="threads_detect",
+            )
 
     write_threads_raw_sidecar(
         config,
@@ -532,7 +600,11 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
         )
         if parent_match:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
-            parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
+            parent_context = _fetch_parent_post(
+                parent_url,
+                cookie_dir=config.cookie_dir,
+                step_name="extract_text",
+            )
 
     raw_path = write_threads_raw_sidecar(
         config,
@@ -704,11 +776,13 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     raw_path = resolve_threads_raw_path(config, task)
     author = "unknown"
     parent_context = None
+    is_reply = False
     captions: list[str] = []
     if raw_path.exists():
         raw = json.loads(raw_path.read_text())
         author = raw.get("author", "unknown")
         parent_context = raw.get("parent_context")
+        is_reply = bool(raw.get("is_reply"))
         captions = raw.get("captions", []) or []
 
     logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
@@ -720,9 +794,13 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
 
     # Build prompt
     date_str = datetime.now().strftime("%Y-%m-%d")
-    # Pre-compute reply context line
     if parent_context:
         reply_line = f"- REPLY CONTEXT: {parent_context[:500]}"
+    elif is_reply:
+        reply_line = (
+            "- REPLY POST — parent context unavailable; do not treat as an "
+            "original non-reply post"
+        )
     else:
         reply_line = "- This is an original post (not a reply)"
     # Post description (caption) — often carries substantive claims the audio omits
@@ -835,6 +913,7 @@ def step_threads_text_synthesize(task: dict, config: Config) -> str:
     captions = raw.get("captions", [])
     author = raw.get("author", "unknown")
     parent_context = raw.get("parent_context")
+    is_reply = bool(raw.get("is_reply"))
     confidence = raw.get("confidence", "plausible")
 
     if not captions:
@@ -857,7 +936,7 @@ def step_threads_text_synthesize(task: dict, config: Config) -> str:
 SOURCE: A Threads post by @{author}.
 
 CONTEXT:
-{f"Reply context (parent post): {parent_context[:500]}" if parent_context else "Original post (not a reply)"}
+{_threads_reply_prompt_context(parent_context, is_reply)}
 
 TASK: Write a concise but thorough note analyzing this Threads post.
 

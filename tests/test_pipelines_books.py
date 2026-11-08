@@ -280,6 +280,100 @@ class TestQualityScore:
         assert classification == "degraded"
         assert score == 0
 
+    @patch("agent.pipelines.books.HAS_PYMUPDF", False)
+    def test_pdf_preflight_without_pymupdf_fail_closed(self):
+        """Missing pymupdf must not assume clean text."""
+        classification, score = _pdf_preflight(Path("/fake/any.pdf"))
+        assert classification == "degraded"
+        assert score == 0
+
+    @patch("agent.pipelines.books.HAS_PYMUPDF", False)
+    def test_quality_score_without_pymupdf_returns_zero(self):
+        """Missing pymupdf must not score as perfect quality."""
+        assert quality_score("/fake/any.pdf") == 0
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_quality_score_all_page_sampling_failures_returns_zero(
+        self, mock_pymupdf,
+    ):
+        """When every sampled page fails text extraction, score is 0."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 16
+
+        def page_at(idx):
+            page = MagicMock()
+            page.get_text.side_effect = RuntimeError("corrupt page")
+            return page
+
+        mock_doc.__getitem__.side_effect = page_at
+        mock_pymupdf.open.return_value = mock_doc
+
+        assert quality_score("/fake/all-bad-pages.pdf") == 0
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_quality_score_zero_pages_after_open_returns_zero(self, mock_pymupdf):
+        """PDF with no pages must not score as perfect quality."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 0
+        mock_pymupdf.open.return_value = mock_doc
+
+        assert quality_score("/fake/empty.pdf") == 0
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_quality_score_partial_page_failures_not_high(self, mock_pymupdf):
+        """Partially corrupt PDFs must not score as good text."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 16
+        clean_text = (
+            "The quick brown fox jumps over the lazy dog. "
+            "This is a perfectly normal sentence with standard "
+            "English text and common punctuation marks. "
+            * 5
+        )
+
+        def page_at(idx):
+            page = MagicMock()
+            if idx % 2 == 0:
+                page.get_text.side_effect = RuntimeError("corrupt page")
+            else:
+                page.get_text.return_value = clean_text
+            return page
+
+        mock_doc.__getitem__.side_effect = page_at
+        mock_pymupdf.open.return_value = mock_doc
+
+        score = quality_score("/fake/partially-corrupt.pdf")
+        assert score < PDF_QUALITY_SCORE_THRESHOLD
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_pdf_preflight_partial_page_failures_not_text_tier(
+        self, mock_pymupdf,
+    ):
+        """Partially corrupt PDFs must not be classified as clean text."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 16
+        clean_text = (
+            "The quick brown fox jumps over the lazy dog. "
+            "This is a perfectly normal sentence with standard "
+            "English text and common punctuation marks. "
+            * 5
+        )
+
+        def page_at(idx):
+            page = MagicMock()
+            if idx % 2 == 0:
+                page.get_text.side_effect = RuntimeError("corrupt page")
+            else:
+                page.get_text.return_value = clean_text
+            return page
+
+        mock_doc.__getitem__.side_effect = page_at
+        mock_pymupdf.open.return_value = mock_doc
+
+        classification, score = _pdf_preflight(Path("/fake/partially-corrupt.pdf"))
+        assert classification == "degraded"
+        assert score < PDF_QUALITY_SCORE_THRESHOLD
+
 
 # ── ePub Extraction Tests ─────────────────────────────────────────────────────
 

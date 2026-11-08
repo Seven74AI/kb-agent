@@ -365,8 +365,9 @@ class TestDeferredSynthesizeTags:
             (parent_id,),
         ).fetchone()
         assert row["status"] == "completed"
-        assert "parent ingestion superseded" in row["error"]
-        assert "synth-task-1" in row["error"]
+        from agent.db import SUPERSEDE_DEFERRED_PARENT_REASON
+
+        assert row["error"] == SUPERSEDE_DEFERRED_PARENT_REASON
 
     def test_dispatch_error_leaves_parent_unsuperseded(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
@@ -494,7 +495,9 @@ class TestDeferredSynthesizeTags:
             (parent_id,),
         ).fetchone()
         assert row["status"] == "completed"
-        assert "parent ingestion superseded" in row["error"]
+        from agent.db import SUPERSEDE_DEFERRED_PARENT_REASON
+
+        assert row["error"] == SUPERSEDE_DEFERRED_PARENT_REASON
 
 
 class TestBatchLockInMain:

@@ -15,6 +15,7 @@ from agent.llm import LLMResponse
 from agent.pipelines.threads import (
     _assert_threads_video_cdn_url_allowed,
     _curl_threads,
+    _fetch_parent_post,
     _has_video_versions,
     _extract_video_url,
     _extract_all_captions,
@@ -181,6 +182,51 @@ class TestHelpers:
         html = '{"is_reply":false}'
         assert _is_reply_post(html) is False
 
+    @patch("agent.pipelines.threads._curl_threads")
+    def test_fetch_parent_post_returns_caption(self, mock_curl, config, tmp_path):
+        cookie_dir = tmp_path / "cookies"
+        cookie_dir.mkdir()
+        (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
+        parent_html = '{"caption":{"text":"Parent take on the topic."}}<div class="_ab6c">x</div>'
+        mock_curl.return_value = parent_html
+        assert _fetch_parent_post(
+            "https://www.threads.net/t/XYZ789",
+            cookie_dir=cookie_dir,
+            step_name="test_step",
+        ) == "Parent take on the topic."
+
+    @patch("agent.pipelines.threads._curl_threads")
+    def test_fetch_parent_post_curl_failure_raises(self, mock_curl, config, tmp_path):
+        cookie_dir = tmp_path / "cookies"
+        cookie_dir.mkdir()
+        (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
+        mock_curl.side_effect = StepError(
+            "Threads curl failed (exit 28): timeout",
+            error_type=ErrorType.RETRY,
+            step_name="curl_threads",
+        )
+        with pytest.raises(StepError, match="curl failed"):
+            _fetch_parent_post(
+                "https://www.threads.net/t/XYZ789",
+                cookie_dir=cookie_dir,
+                step_name="extract_text",
+            )
+
+    @patch("agent.pipelines.threads._curl_threads")
+    def test_fetch_parent_post_empty_caption_pauses(self, mock_curl, config, tmp_path):
+        cookie_dir = tmp_path / "cookies"
+        cookie_dir.mkdir()
+        (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
+        mock_curl.return_value = '<html><body>no caption json</body></html>'
+        with pytest.raises(StepError) as exc:
+            _fetch_parent_post(
+                "https://www.threads.net/t/XYZ789",
+                cookie_dir=cookie_dir,
+                step_name="threads_detect",
+            )
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert exc.value.step_name == "threads_detect"
+
     def test_is_login_wall_login_redirect(self):
         html = '<html>/login Threads</html>'
         assert _is_login_wall(html) is True
@@ -306,6 +352,30 @@ class TestDetection:
             step_threads_detect(task_dict, config)
         assert exc.value.error_type == ErrorType.PAUSE
 
+    @patch("agent.pipelines.threads._curl_threads")
+    def test_detect_reply_parent_fetch_failure_pauses(self, mock_curl, config, task_dict):
+        reply_html = (
+            '{"caption":{"text":"Reply body"},"username":"replier",'
+            '"is_reply":true,"parent_post":{"code":"XYZ789"}}'
+            '<div class="_ab6c">x</div>'
+        )
+
+        def curl_side_effect(url, **kwargs):
+            if "/t/XYZ789" in url:
+                raise StepError(
+                    "Threads curl failed (exit 28): timeout",
+                    error_type=ErrorType.RETRY,
+                    step_name="curl_threads",
+                )
+            return reply_html
+
+        mock_curl.side_effect = curl_side_effect
+
+        with pytest.raises(StepError) as exc:
+            step_threads_detect(task_dict, config)
+        assert exc.value.error_type in (ErrorType.PAUSE, ErrorType.RETRY)
+        assert exc.value.step_name == "threads_detect"
+
 
 # ── Step Tests: Text Extraction ──────────────────────────────────────────────
 
@@ -335,13 +405,52 @@ class TestTextExtraction:
 
     @patch("agent.pipelines.threads._curl_threads")
     def test_extract_text_reply_post(self, mock_curl, config, task_dict):
-        html = '{"caption":{"text":"Great point!"},"username":"replier","is_reply":true,"parent_post":{"code":"XYZ789"}}'
-        mock_curl.return_value = html
+        reply_html = (
+            '{"caption":{"text":"Great point!"},"username":"replier",'
+            '"is_reply":true,"parent_post":{"code":"XYZ789"}}'
+            '<div class="_ab6c">x</div>'
+        )
+        parent_html = (
+            '{"caption":{"text":"Original parent argument."}}'
+            '<div class="_ab6c">x</div>'
+        )
+
+        def curl_side_effect(url, **kwargs):
+            if "/t/XYZ789" in url:
+                return parent_html
+            return reply_html
+
+        mock_curl.side_effect = curl_side_effect
 
         result = step_threads_extract_text(task_dict, config)
         data = json.loads(Path(result).read_text())
         assert data["is_reply"] is True
         assert data["parent_url"] == "https://www.threads.net/t/XYZ789"
+        assert data["parent_context"] == "Original parent argument."
+
+    @patch("agent.pipelines.threads._curl_threads")
+    def test_extract_text_reply_parent_fetch_failure_pauses(self, mock_curl, config, task_dict):
+        reply_html = (
+            '{"caption":{"text":"Great point!"},"username":"replier",'
+            '"is_reply":true,"parent_post":{"code":"XYZ789"}}'
+            '<div class="_ab6c">x</div>'
+        )
+
+        def curl_side_effect(url, **kwargs):
+            if "/t/XYZ789" in url:
+                raise StepError(
+                    "Threads curl failed (exit 28): timeout",
+                    error_type=ErrorType.RETRY,
+                    step_name="curl_threads",
+                )
+            return reply_html
+
+        mock_curl.side_effect = curl_side_effect
+
+        with pytest.raises(StepError) as exc:
+            step_threads_extract_text(task_dict, config)
+        assert exc.value.error_type in (ErrorType.PAUSE, ErrorType.RETRY)
+        assert exc.value.step_name == "extract_text"
 
 
 # ── Step Tests: Video Extraction ─────────────────────────────────────────────
@@ -505,6 +614,36 @@ class TestMerge:
 
 class TestSynthesis:
     """Tests for LLM synthesis steps."""
+
+    @patch("agent.pipelines.threads.get_llm_client")
+    def test_text_synthesize_reply_without_parent_degrades_prompt(self, mock_get_llm, config, task_dict):
+        raw_path = Path(config.temp_dir) / f"{task_dict['slug']}_threads_raw.json"
+        raw_path.write_text(json.dumps({
+            "captions": ["Agree completely with this."],
+            "author": "replier",
+            "is_reply": True,
+            "parent_context": None,
+            "confidence": "plausible",
+        }))
+
+        mock_llm = MagicMock()
+        mock_llm.call.return_value = LLMResponse(content="""---
+date: 2026-01-01
+source: threads.net (@replier)
+source_url: https://test
+confidence: plausible
+tags: [threads]
+---
+
+# Reply Note
+## Summary
+Reply without parent.""")
+        mock_get_llm.return_value = mock_llm
+
+        step_threads_text_synthesize(task_dict, config)
+        system_prompt = mock_llm.call.call_args.kwargs.get("system_prompt", "")
+        assert "Original post (not a reply)" not in system_prompt
+        assert "parent context unavailable" in system_prompt.lower()
 
     @patch("agent.pipelines.threads.get_llm_client")
     def test_text_synthesize(self, mock_get_llm, config, task_dict):

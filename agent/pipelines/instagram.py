@@ -663,7 +663,7 @@ asyncio.run(main())
             raise StepError(
                 "Playwright carousel extraction failed",
                 error_type=ErrorType.RETRY,
-                step_name="carousel_extract",
+                step_name="ig_carousel_extract",
                 details=sanitize_visible_message(result.stderr.strip()[:500]),
             )
 
@@ -673,7 +673,7 @@ asyncio.run(main())
             raise StepError(
                 "Failed to parse Playwright output for carousel",
                 error_type=ErrorType.RETRY,
-                step_name="carousel_extract",
+                step_name="ig_carousel_extract",
                 details=sanitize_visible_message(result.stdout.strip()[:500]),
             )
 

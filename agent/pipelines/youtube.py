@@ -280,15 +280,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
 
-    # Save slug for later steps
-    _slug_path(config, slug).write_text(slug)
-
     return json.dumps(metadata)
-
-
-def _slug_path(config: Config, slug: str) -> Path:
-    """Path to the slug marker file."""
-    return Path(config.temp_dir) / f"{slug}_slug.txt"
 
 
 # ── Video Download ───────────────────────────────────────────────────────────

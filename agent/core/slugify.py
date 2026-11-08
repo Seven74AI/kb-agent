@@ -1,6 +1,7 @@
 """URL slug derivation for task and note naming."""
 
 import re
+from urllib.parse import urlparse, urlunparse
 
 # Single length cap for every slug-derived path segment (note filename, MinIO
 # object key, temp files). 128 chars: well under ext4's 255-byte component
@@ -23,6 +24,38 @@ def _youtube_video_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _netloc_without_userinfo(parsed) -> str:
+    """Hostname and port only — same policy as :func:`agent.redact.url_for_display`."""
+    if parsed.hostname:
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port is not None:
+            return f"{host}:{parsed.port}"
+        return host
+    netloc = parsed.netloc or ""
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[-1]
+    return netloc
+
+
+def _url_for_slug_body(url: str) -> str:
+    """Drop http(s) userinfo before slug sanitization; leave non-http URLs unchanged."""
+    parsed = urlparse(url)
+    if parsed.scheme in ("http", "https"):
+        return urlunparse(
+            (
+                parsed.scheme,
+                _netloc_without_userinfo(parsed),
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+    return url
+
+
 def slugify(url: str, *, content_type: str | None = None) -> str:
     """Derive a filesystem-safe slug from a URL.
 
@@ -36,8 +69,11 @@ def slugify(url: str, *, content_type: str | None = None) -> str:
     URL fragments (``#...``) are removed and do not affect the slug. Deferred
     media enqueued as ``post_url#<video_id>`` therefore shares the parent's
     slug; batch staging must key files by ``ingest_queue.id``, not slug.
+
+    Netloc credentials (``user:pass@``) are stripped before slug building so secrets
+    never land in ``tasks.slug``, MinIO keys, or vault note filenames.
     """
-    slug = re.sub(r"^https?://", "", url)
+    slug = re.sub(r"^https?://", "", _url_for_slug_body(url))
     identity_suffix = ""
     vid = _youtube_video_id(url)
     if vid:

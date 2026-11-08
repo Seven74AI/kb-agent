@@ -73,9 +73,6 @@ def step_mega_extract_metadata(task: dict, config: Config) -> str:
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
 
-    slug_path = Path(config.temp_dir) / f"{stem}_slug.txt"
-    slug_path.write_text(display_slug)
-
     return json.dumps(metadata)
 
 
