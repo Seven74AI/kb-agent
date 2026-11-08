@@ -1222,8 +1222,12 @@ TEXT ENDS"""
                     ))
                     if len(boundaries) >= 2:
                         return boundaries
-        except (json.JSONDecodeError, ValueError, IndexError, Exception):
-            pass
+        except (json.JSONDecodeError, ValueError, IndexError) as exc:
+            _log.warning(
+                "LLM boundary JSON parse failed (window=%s tokens): %s",
+                window_tokens,
+                exc,
+            )
 
     # Fallback per CONTEXT.md: "if still none -> boundary LLM picks
     # best boundary even if imperfect" — use regex chapter markers
@@ -1354,10 +1358,12 @@ quotes, and analysis. Maintain the full template structure."""
                 role="synthesis",
             )
             note_so_far = response.content
-        except Exception:
-            if idx == 0:
-                note_so_far = f"[Synthesis failed for {chunk_label}]\n"
-            # Continue with previous note_so_far on failure
+        except Exception as exc:
+            raise StepError(
+                f"Progressive book synthesis failed at {chunk_label}: {exc}",
+                error_type=ErrorType.RETRY,
+                step_name="synthesize_book",
+            ) from exc
 
     return note_so_far or llm.call(
         system_prompt=BOOK_SYNTHESIS_SYSTEM_PROMPT,
@@ -1394,7 +1400,9 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
 
-    passed, failures = quality_gate_book(note_path, config)
+    passed, failures = quality_gate_book(
+        note_path, config, vault_path=config.vault_path,
+    )
 
     if not passed:
         raise StepError(

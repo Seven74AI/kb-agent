@@ -113,7 +113,7 @@ class TestAppendToParent:
         assert body.count("## Image") == 1
         assert body.count("OCR text") == 1
 
-    def test_append_marker_prevents_double_write_after_crash(self, config, conn):
+    def test_append_marker_prevents_double_write_when_media_appended_set(self, config, conn):
         import scripts.batch_ingest as batch_ingest
         from agent.db import media_append_marker, queue_ingest
 
@@ -133,12 +133,70 @@ class TestAppendToParent:
             f"# Article\n\nBody.\n\n## Image\n\nOCR text\n\n{marker}\n",
             encoding="utf-8",
         )
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 1 WHERE id = ?",
+            (ingest_id,),
+        )
+        conn.commit()
         batch_ingest._append_to_parent(
             config, parent, "Image", "OCR text again", conn=conn, ingest_id=ingest_id,
         )
         body = raw.read_text(encoding="utf-8")
         assert body.count("## Image") == 1
         assert "OCR text again" not in body
+        assert "OCR text" in body
+
+    def test_append_replaces_stale_sibling_block_after_deferral_cycle_reset(
+        self, config, conn, monkeypatch,
+    ):
+        from agent.db import append_parent_media_atomic, media_append_marker, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        marker = media_append_marker(ingest_id)
+        raw.write_text(
+            f"# Article\n\nBody.\n\n## Image\n\nSTALE cycle OCR\n\n{marker}\n",
+            encoding="utf-8",
+        )
+        conn.execute(
+            "UPDATE ingest_queue SET media_appended = 0, status = 'queued' WHERE id = ?",
+            (ingest_id,),
+        )
+        conn.commit()
+
+        order: list[str] = []
+
+        real_replace = os.replace
+
+        def tracking_replace(src, dst):
+            order.append("replace")
+            row = conn.execute(
+                "SELECT media_appended FROM ingest_queue WHERE id=?",
+                (ingest_id,),
+            ).fetchone()
+            assert row["media_appended"] == 0
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", tracking_replace)
+
+        assert append_parent_media_atomic(
+            conn, ingest_id, raw, "Image", "fresh cycle OCR",
+        ) is True
+        assert order == ["replace"]
+        body = raw.read_text(encoding="utf-8")
+        assert body.count("## Image") == 1
+        assert "STALE cycle OCR" not in body
+        assert "fresh cycle OCR" in body
+        assert marker in body
         row = conn.execute(
             "SELECT media_appended FROM ingest_queue WHERE id=?",
             (ingest_id,),

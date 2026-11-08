@@ -119,6 +119,28 @@ def test_extract_video_url_all_null_is_none():
     assert _extract_video_url(NULL_VIDEO_JSON) is None
 
 
+def test_extract_video_url_scoped_to_task_post_not_first_unrelated_array():
+    """Two non-null video_versions arrays: pick the one nearest the task post id."""
+    unrelated = (
+        '"video_versions":[{"url":"https://scontent.cdninstagram.com/v/UNRELATED.mp4",'
+        '"height":720}]'
+    )
+    task_marker = (
+        '"code":"Da3I_d0ls4E",'
+        '"permalink":"https:\\/\\/www.threads.com\\/\\u0040bourne_ti\\/post\\/Da3I_d0ls4E"'
+    )
+    task_video = (
+        '"video_versions":[{"url":"https://scontent.cdninstagram.com/v/TASK.mp4",'
+        '"height":1080}]'
+    )
+    html = unrelated + ',"suggested":true,' + task_marker + "," + task_video
+    task_url = "https://www.threads.com/@bourne_ti/post/Da3I_d0ls4E"
+    url = _extract_video_url(html, task_url)
+    assert url is not None
+    assert url.endswith("TASK.mp4")
+    assert "UNRELATED" not in url
+
+
 # ── Note code-fence strip ───────────────────────────────────────────────────
 
 def test_strip_code_fence_yaml():

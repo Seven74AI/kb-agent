@@ -110,6 +110,46 @@ class TestBunnyUuidExtraction:
         uuid = extract_bunny_video_uuid(url)
         assert uuid == "abcdef12-3456-7890-abcd-ef1234567890"
 
+    def test_extract_uuid_scoped_to_source_url_on_multi_embed_page(self):
+        wrong = (
+            "https://player.mediadelivery.net/embed/1/"
+            "11111111-1111-1111-1111-111111111111"
+        )
+        right = (
+            "https://player.mediadelivery.net/embed/1/"
+            "22222222-2222-2222-2222-222222222222"
+        )
+        html = (
+            f'<section class="other-talk">{wrong}</section>'
+            f'<article><h1>Intro</h1><p>tdah-adulte-j1-intro</p>'
+            f'<iframe src="{right}"></iframe></article>'
+        )
+        source = "https://www.terragrandir.com/tdah-adulte-j1-intro/"
+        uuid = extract_bunny_video_uuid(html, source_url=source)
+        assert uuid == "22222222-2222-2222-2222-222222222222"
+
+    @patch("agent.pipelines.bunny_stream._curl_page")
+    def test_resolve_embed_url_picks_source_tied_uuid(self, mock_curl):
+        from agent.pipelines.bunny_stream import _resolve_embed_url
+
+        wrong = (
+            "https://player.mediadelivery.net/embed/1/"
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        right = (
+            "https://player.mediadelivery.net/embed/1/"
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        slug = "tdah-adulte-j2-keynote"
+        mock_curl.return_value = (
+            f'<div class="playlist">{wrong}</div>'
+            f'<main><h1>{slug}</h1><iframe src="{right}"></iframe></main>'
+        )
+        source = f"https://www.terragrandir.com/{slug}/"
+        embed_url, uuid = _resolve_embed_url(source)
+        assert uuid == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        assert uuid in embed_url.lower()
+
 
 class TestBunnyCdnAllowlist:
 

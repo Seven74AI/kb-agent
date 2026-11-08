@@ -173,10 +173,9 @@ def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -
             if in_section and (line.startswith("### ") or line.startswith("**Chapter")):
                 chapter_headers += 1
 
-        # If we can detect a source text file, compare chapter count
+        # If vault context is provided, compare note chapters to extracted full text
         if vault_path and note_path.stem:
-            source_pattern = f"/tmp/book_{note_path.stem}_full.txt"
-            source_path = Path(source_pattern)
+            source_path = Path(config.temp_dir) / f"book_{note_path.stem}_full.txt"
             if source_path.exists():
                 source_content = source_path.read_text(encoding="utf-8")
                 source_chapters = len(re.findall(

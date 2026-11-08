@@ -104,6 +104,7 @@ def send_message(config: Config, text: str) -> bool:
     if not (config.telegram_bot_token and config.telegram_chat_id):
         return False
     try:
+        # Telegram Bot API requires the token in the URL path (not a header); accepted.
         url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage"
         body = urllib.parse.urlencode(
             {"chat_id": config.telegram_chat_id, "text": text, "parse_mode": "HTML"}

@@ -11,6 +11,7 @@ import pytest
 
 from agent.config import Config
 from agent.pipelines.bunny_stream import step_extract_metadata
+from agent.pipelines.youtube import step_extract_metadata as step_youtube_extract_metadata
 from agent.pipelines.instagram import (
     step_ig_carousel_extract,
     step_ig_carousel_metadata,
@@ -55,6 +56,50 @@ def sidecar_config(tmp_path):
         temp_dir=temp,
         cookie_dir=tmp_path / "cookies",
     )
+
+
+@patch("agent.pipelines.youtube._validate_cookies")
+@patch("subprocess.run")
+def test_youtube_metadata_sidecar_redacts_title_and_chapter_urls(
+    mock_run, _mock_validate, sidecar_config,
+):
+    title = "Talk https://promo.example/v?utm=SECRET tracker"
+    uploader = "Channel https://social.example/@u?ref=LEAK"
+    mock_stdout = f"{title}||{uploader}||120||1||20260101"
+    chapters_stdout = json.dumps(
+        [
+            {
+                "start_time": 0,
+                "end_time": 60,
+                "title": "Intro https://chapter.example/c?jwt=CHAP",
+            },
+        ],
+    )
+
+    def side_effect(*args, **kwargs):
+        cmd = " ".join(args[0])
+        result = MagicMock(returncode=0)
+        if "chapters" in cmd:
+            result.stdout = chapters_stdout
+        elif "description" in cmd:
+            result.stdout = "plain description"
+        else:
+            result.stdout = mock_stdout
+        return result
+
+    mock_run.side_effect = side_effect
+    task = {
+        "id": "yt-redact-1",
+        "slug": "yt_redact_slug",
+        "source_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    }
+    step_youtube_extract_metadata(task, sidecar_config)
+    meta_path = sidecar_config.temp_dir / "yt_redact_slug_metadata.json"
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert "utm=SECRET" not in data["title"]
+    assert "ref=LEAK" not in data["uploader"]
+    assert "jwt=CHAP" not in data["chapters"][0]["title"]
 
 
 @patch("agent.pipelines.rumble.resolve_rumble")

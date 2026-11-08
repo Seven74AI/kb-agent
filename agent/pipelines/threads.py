@@ -39,6 +39,7 @@ from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
+    _artifact_stem,
     _slug_path,
     ensure_h264,
     format_transcript_for_llm,
@@ -191,29 +192,55 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
         _unlink_curl_netscape_sidecar(conf_path)
 
 
-def _has_video_versions(html: str) -> bool:
-    """True if the payload has a NON-NULL video_versions array.
+def _threads_post_code_from_url(source_url: str) -> str | None:
+    """Post/share/t short code from a Threads task URL."""
+    m = re.search(r"/(?:post|share|t)/([^/?#]+)", source_url, re.IGNORECASE)
+    return m.group(1) if m else None
 
-    A bare ``video_versions`` substring matches ``"video_versions": null`` (a
-    post with no video) — a false positive. The real signal is the key followed
-    by an array bracket.
+
+def _main_post_anchor_pos(html: str, post_code: str | None) -> int | None:
+    """Document position anchoring the task post (code or canonical permalink)."""
+    if post_code:
+        code_pat = re.compile(rf'"code"\s*:\s*"{re.escape(post_code)}"')
+        m = code_pat.search(html)
+        if m:
+            return m.start()
+        if post_code in html:
+            return html.find(post_code)
+    m = re.search(r'"permalink"\s*:\s*"', html)
+    return m.start() if m else None
+
+
+def _has_video_versions(html: str, source_url: str | None = None) -> bool:
+    """True if the task post's payload has a NON-NULL video_versions array.
+
+    Invariant: scoped to the task permalink/post id — not the first array in the
+    document (suggested/related posts may carry their own ``video_versions``).
     """
-    return re.search(r'"video_versions"\s*:\s*\[', html) is not None
+    post_code = _threads_post_code_from_url(source_url) if source_url else None
+    anchor = _main_post_anchor_pos(html, post_code)
+    return _extract_json_array_after_key(html, "video_versions", anchor_pos=anchor) is not None
 
 
-def _extract_json_array_after_key(html: str, key: str) -> str | None:
-    """Return the first NON-NULL balanced JSON array that follows ``"key":``.
+def _extract_json_array_after_key(
+    html: str, key: str, *, anchor_pos: int | None = None
+) -> str | None:
+    """Return a NON-NULL balanced JSON array for ``key``, scoped to ``anchor_pos``.
 
-    Threads payloads repeat the key many times — earlier occurrences are often
-    ``"video_versions": null`` (related/suggested posts), with the post's own
-    video appearing later. Skip ``null`` and return the first real array.
+    Collects every non-null array for ``key`` and picks the one closest to
+    ``anchor_pos`` (task post neighborhood). Skips ``null`` values. When
+    ``anchor_pos`` is omitted, uses the first permalink in the payload as anchor.
     """
+    if anchor_pos is None:
+        anchor_pos = _main_post_anchor_pos(html, None)
+
     marker = f'"{key}"'
     search_from = 0
+    candidates: list[tuple[int, str]] = []
     while True:
         pos = html.find(marker, search_from)
         if pos < 0:
-            return None
+            break
         i = pos + len(marker)
         while i < len(html) and html[i] in " \t\n":
             i += 1
@@ -240,26 +267,37 @@ def _extract_json_array_after_key(html: str, key: str) -> str | None:
                     elif ch == "]":
                         depth -= 1
                         if depth == 0:
-                            return html[i : j + 1]
+                            candidates.append((pos, html[i : j + 1]))
+                            break
                 j += 1
-            return None
+            search_from = j + 1 if j < len(html) else i + 1
+            continue
         # null or other value — skip to the next occurrence
         search_from = i
 
+    if not candidates:
+        return None
+    if anchor_pos is None:
+        return candidates[0][1]
+    return min(candidates, key=lambda item: abs(item[0] - anchor_pos))[1]
 
-def _extract_video_url(html: str) -> str | None:
+
+def _extract_video_url(html: str, source_url: str | None = None) -> str | None:
     """Extract the highest quality video URL from video_versions JSON.
 
-    Searches for video_versions array in the page JSON and picks the
-    entry with the largest 'height' value.
+    Selects the ``video_versions`` array scoped to ``source_url`` (post id /
+    permalink), then picks the entry with the largest ``height``.
 
     Args:
         html: Raw Threads page HTML/JSON.
+        source_url: Task permalink used to anchor media selection.
 
     Returns:
         Video URL string or None if not found.
     """
-    array_text = _extract_json_array_after_key(html, "video_versions")
+    post_code = _threads_post_code_from_url(source_url) if source_url else None
+    anchor = _main_post_anchor_pos(html, post_code)
+    array_text = _extract_json_array_after_key(html, "video_versions", anchor_pos=anchor)
     if not array_text:
         return None
 
@@ -487,7 +525,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
             details="Re-export cookies from Chrome to threads_cookies.txt",
         )
 
-    has_video = _has_video_versions(html)
+    has_video = _has_video_versions(html, url)
     content_type = "threads_video" if has_video else "threads_text"
 
     # Reply/parent context: a comment is the reply + its parent. Extract both so
@@ -653,7 +691,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
         )
 
     # Extract video URL from video_versions JSON
-    video_url = _extract_video_url(html)
+    video_url = _extract_video_url(html, url)
     if not video_url:
         raise StepError(
             "No video URL found in Threads post — may not contain video",
@@ -715,10 +753,9 @@ def step_threads_merge(task: dict, config: Config) -> str:
     Returns:
         JSON string summarizing merge result.
     """
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
-    diar_path = Path(config.temp_dir) / f"{safe_slug}_diarization.json"
-    trans_path = Path(config.temp_dir) / f"{safe_slug}_transcript.json"
+    stem = _artifact_stem(task)
+    diar_path = Path(config.temp_dir) / f"{stem}_diarization.json"
+    trans_path = Path(config.temp_dir) / f"{stem}_transcript.json"
 
     if not diar_path.exists():
         raise FileNotFoundError(f"Diarization not found: {diar_path}")
@@ -736,7 +773,7 @@ def step_threads_merge(task: dict, config: Config) -> str:
     )
 
     # Write merged
-    merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     write_merged_transcript_json(merged_path, trans)
 
     return json.dumps({
@@ -763,10 +800,11 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     """
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
+    stem = _artifact_stem(task)
     source_url = task.get("source_url", "")
     display_source_url = url_for_display(source_url)
 
-    merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     if not merged_path.exists():
         raise FileNotFoundError(f"Merged transcript not found: {merged_path}")
 

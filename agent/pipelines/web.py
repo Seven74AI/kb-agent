@@ -589,13 +589,17 @@ class EmbeddedMediaEnqueueStats(NamedTuple):
 
 
 def _submit_embed_succeeded(result: dict) -> bool:
-    """Enqueue success is explicit-positive only: queued/pending status or ingest_id."""
+    """Embed-success reflects actual ingest row state — never a permanently failed duplicate."""
     status = result.get("status")
+    if status in ("error", "failed"):
+        return False
+    if not result.get("ingest_id"):
+        return False
+    if result.get("created_new"):
+        return True
     if status in ("queued", "pending"):
         return True
-    if result.get("ingest_id"):
-        return True
-    return False
+    return bool(status and status != "failed")
 
 
 def _bump_embed_success_or_warn(
@@ -820,6 +824,9 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
         task_id = task.get("id", "")
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        pending = 0
+        prior_deferral = False
+        batch_finished = False
         try:
             pending = count_pending_media(conn, slug)
             prior_deferral = _parent_media_was_deferred(conn, task_id, slug)
