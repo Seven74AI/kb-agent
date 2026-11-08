@@ -293,10 +293,14 @@ Good content.""")
         }
         Path(config.temp_dir / "instagram.com_reel_ABC123_merged.json").write_text(json.dumps(merged))
 
+        tokenized = "https://www.instagram.com/reel/ABC123/?igsh=tracking-secret"
+        reel_task["source_url"] = tokenized
+
         mock_llm = MagicMock()
-        mock_llm.call.return_value = LLMResponse(content="""---
+        mock_llm.call.return_value = LLMResponse(content=f"""---
 date: 2026-01-01
 source: instagram.com
+source_url: {tokenized}
 confidence: low
 tags: [instagram, reel, music]
 ---
@@ -309,9 +313,16 @@ Music-only reel.""")
         result = step_ig_reel_synthesize(reel_task, config)
         assert result.endswith(".md")
 
+        system_prompt = mock_llm.call.call_args.kwargs.get("system_prompt", "")
+        assert "Instagram reel (https://www.instagram.com/reel/ABC123/)" in system_prompt
+        assert "igsh=" not in system_prompt
+
         # Caption must reach the LLM prompt (primary content for music-only reels)
         user_prompt = mock_llm.call.call_args.kwargs.get("user_prompt", "")
         assert "the actual claim about the herbal remedy" in user_prompt
+
+        written = Path(result).read_text(encoding="utf-8")
+        assert "igsh=" not in written.split("---")[1]
 
 
 # ── Carousel Steps ───────────────────────────────────────────────────────────

@@ -24,10 +24,14 @@ from urllib.parse import parse_qs, urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.curl_config import (
+    curl_config_header_line,
+    curl_config_quoted_assignment,
+)
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.redact import url_for_display
+from agent.redact import scrub_vault_note_content, url_for_display
 from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -212,18 +216,12 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     """
     _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
+    from agent.pipelines.video_common import instagram_reel_ytdlp_output
+
     url = task["source_url"]
     stem = _download_artifact_stem(task)
     batch = task.get("_batch_ingest")
-
-    if batch:
-        output_path = Path(config.temp_dir) / f"{stem}.mp4"
-        ytdlp_out = str(output_path.with_suffix(""))
-        glob_pattern = f"{stem}.*"
-    else:
-        output_path = Path(config.temp_dir) / f"{stem}_reel.mp4"
-        ytdlp_out = str(output_path.with_suffix(""))
-        glob_pattern = f"{stem}_reel.*"
+    output_path, ytdlp_out, glob_pattern = instagram_reel_ytdlp_output(task, config)
 
     try:
         _assert_fetch_url_allowed(url)
@@ -391,7 +389,7 @@ The transcript is provided for completeness but the primary content
 comes from the reel's caption/description, which is provided in the
 user prompt under "POST CAPTION / DESCRIPTION".
 
-SOURCE: Instagram reel ({source_url})
+SOURCE: Instagram reel ({display_source_url})
 DATE: {date_str}
 
 TASK: Write a note that:
@@ -460,7 +458,7 @@ Write a note following the template above.
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(note_content, encoding="utf-8")
+    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -778,7 +776,7 @@ Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(note_content, encoding="utf-8")
+    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -877,12 +875,34 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
     Returns:
         Status message listing removed files.
     """
+    from agent.pipelines.video_common import (
+        _artifact_stem,
+        instagram_reel_glob_pattern,
+        resolve_instagram_reel_video,
+    )
+
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
+    stem = _artifact_stem(task)
+    content_type = task.get("content_type", "instagram_post")
 
     paths_to_unlink: list[Path] = []
-    for ext in ["_reel.mp4", "_reel.webm", "_16k.wav", "_8k.wav",
-                "_playwright.py", "_carousel_slides.json", "_carousel_meta.json",
+    if content_type == "instagram_reel":
+        batch = task.get("_batch_ingest")
+        glob_pattern = instagram_reel_glob_pattern(task)
+        for p in Path(config.temp_dir).glob(glob_pattern):
+            if p.is_file() and (
+                not batch or p.suffix.lower() in (".mp4", ".webm", ".mkv", ".mov")
+            ):
+                paths_to_unlink.append(p)
+        reel_default = resolve_instagram_reel_video(config, task)
+        if reel_default not in paths_to_unlink and reel_default.exists():
+            paths_to_unlink.append(reel_default)
+        for ext in ["_16k.wav", "_8k.wav"]:
+            path = Path(config.temp_dir) / f"{stem}{ext}"
+            if path.exists():
+                paths_to_unlink.append(path)
+    for ext in ["_playwright.py", "_carousel_slides.json", "_carousel_meta.json",
                 "_ig_comment.json"]:
         path = Path(config.temp_dir) / f"{safe_slug}{ext}"
         if path.exists():
@@ -930,11 +950,15 @@ def step_ig_minio_upload(task: dict, config: Config) -> str:
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
 
     if content_type == "instagram_reel":
+        from agent.pipelines.video_common import resolve_instagram_reel_video
+
         # Source-archival: video + transcript (matches the batch collector).
-        reel_files = sorted(Path(config.temp_dir).glob(f"{safe_slug}_reel.*"))
-        video_path = reel_files[0] if reel_files else Path(config.temp_dir) / f"{safe_slug}_reel.mp4"
+        from agent.pipelines.video_common import _resolve_slug
+
+        storage_slug = _resolve_slug(task)
+        video_path = resolve_instagram_reel_video(config, task)
         dest_ext = video_path.suffix.lower().lstrip(".") or "mp4"
-        uploaded = upload_video_source(safe_slug, config, video_path, dest_ext, note_path)
+        uploaded = upload_video_source(storage_slug, config, video_path, dest_ext, note_path)
         return f"Uploaded: {', '.join(uploaded)}"
 
     # Note-archival: post/carousel.
@@ -1084,11 +1108,13 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
                 [
                     "silent",
                     "max-time = 25",
-                    f'user-agent = "{IG_APP_UA}"',
-                    f'header = "x-ig-app-id: {IG_WEB_APP_ID}"',
-                    f'header = "x-csrftoken: {csrftoken}"',
-                    f'header = "Cookie: sessionid={cookies["sessionid"]}"',
-                    f'url = "{api_url}"',
+                    curl_config_quoted_assignment("user-agent", IG_APP_UA),
+                    curl_config_header_line(f"x-ig-app-id: {IG_WEB_APP_ID}"),
+                    curl_config_header_line(f"x-csrftoken: {csrftoken}"),
+                    curl_config_header_line(
+                        f'Cookie: sessionid={cookies["sessionid"]}'
+                    ),
+                    curl_config_quoted_assignment("url", api_url),
                 ]
             ) + "\n"
             conf_path.write_text(curl_cfg, encoding="utf-8")
@@ -1218,7 +1244,7 @@ Write the note following the template."""
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(note_content, encoding="utf-8")
+    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)

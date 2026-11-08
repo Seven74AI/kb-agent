@@ -99,6 +99,59 @@ def ensure_h264(video_path: Path) -> Path:
 
 # ── Audio Extraction ─────────────────────────────────────────────────────────
 
+_VIDEO_SUFFIXES_BATCH = (".mp4", ".webm", ".mkv", ".mov")
+
+
+def instagram_reel_glob_pattern(task: dict) -> str:
+    """Glob pattern for yt-dlp Instagram reel output under the artifact stem."""
+    stem = _artifact_stem(task)
+    if task.get("_batch_ingest"):
+        return f"{stem}.*"
+    return f"{stem}_reel.*"
+
+
+def instagram_reel_ytdlp_output(task: dict, config: Config) -> tuple[Path, str, str]:
+    """Return (preferred_path, yt-dlp --output base, post-download glob) for reels."""
+    stem = _artifact_stem(task)
+    batch = task.get("_batch_ingest")
+    glob_pattern = instagram_reel_glob_pattern(task)
+    if batch:
+        output_path = Path(config.temp_dir) / f"{stem}.mp4"
+    else:
+        output_path = Path(config.temp_dir) / f"{stem}_reel.mp4"
+    return output_path, str(output_path.with_suffix("")), glob_pattern
+
+
+def resolve_instagram_reel_video(config: Config, task: dict) -> Path:
+    """Resolve the on-disk Instagram reel video using download naming rules."""
+    stem = _artifact_stem(task)
+    batch = task.get("_batch_ingest")
+    glob_pattern = instagram_reel_glob_pattern(task)
+    actual_files = [
+        p for p in Path(config.temp_dir).glob(glob_pattern)
+        if p.is_file()
+        and (not batch or p.suffix.lower() in _VIDEO_SUFFIXES_BATCH)
+    ]
+    if actual_files:
+        return sorted(actual_files)[0]
+    if batch:
+        return Path(config.temp_dir) / f"{stem}.mp4"
+    return Path(config.temp_dir) / f"{stem}_reel.mp4"
+
+
+def threads_video_filename(task: dict) -> str:
+    """Basename (under temp_dir) for a downloaded Threads video."""
+    stem = _artifact_stem(task)
+    if task.get("_batch_ingest"):
+        return f"{stem}.mp4"
+    return f"{stem}_threads_video.mp4"
+
+
+def resolve_threads_video_path(config: Config, task: dict) -> Path:
+    """Resolve the on-disk Threads video path using download naming rules."""
+    return Path(config.temp_dir) / threads_video_filename(task)
+
+
 def _find_video_file(config: Config, slug: str) -> Path:
     """Locate the downloaded video for a slug across the known naming schemes."""
     for name in (f"{slug}.webm", f"{slug}.mp4", f"{slug}_threads_video.mp4"):
@@ -446,10 +499,10 @@ def run_threads_video_quality_gate(note_path: Path, config: Config, task_id: str
     )
 
 
-def check_density(note_path: Path, config: Config) -> None:
+def check_density(note_path: Path, config: Config, task: dict | None = None) -> None:
     """Verify note density meets the minimum chars/min threshold."""
-    slug = note_path.stem
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_stem = _artifact_stem(task) if task is not None else note_path.stem
+    meta_path = Path(config.temp_dir) / f"{meta_stem}_metadata.json"
 
     if not meta_path.exists():
         return  # Can't check density without metadata

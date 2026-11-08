@@ -15,13 +15,40 @@ from agent.exceptions import StepError
 from agent.pipelines.bunny_stream import (
     BUNNY_UUID_RE,
     _assert_bunny_cdn_url_allowed,
+    _build_synthesis_prompt,
     _curl_page,
     _resolve_cdn_base,
     extract_bunny_video_uuid,
 )
 
+TOKENIZED_PAGE = "https://www.terragrandir.com/tdah-adulte-j1-intro/?utm_source=secret"
+
 
 METADATA_URL = "http://169.254.169.254/latest/meta-data/"
+
+
+class TestBunnySynthesisPrompt:
+
+    def test_build_synthesis_prompt_uses_display_safe_source_url_in_body(self, tmp_path):
+        from agent.config import Config
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        kb = Path(__file__).resolve().parents[1]
+        config = Config(kb_agent_dir=kb, vault_path=vault, temp_dir=tmp_path / "tmp")
+        prompt = _build_synthesis_prompt(TOKENIZED_PAGE, "tdah-j1", config)
+        assert "SOURCE URL: https://www.terragrandir.com/tdah-adulte-j1-intro/" in prompt
+        assert "utm_source" not in prompt
+        assert "?" not in prompt.split("SOURCE URL:")[1].split("\n")[0]
+
+    @patch("agent.pipelines.bunny_stream.subprocess.run")
+    def test_curl_page_failure_uses_display_safe_url(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="connection reset")
+        with pytest.raises(StepError, match="Failed to fetch page") as exc:
+            _curl_page(TOKENIZED_PAGE)
+        msg = str(exc.value)
+        assert "utm_source" not in msg
+        assert "https://www.terragrandir.com/tdah-adulte-j1-intro/" in msg
 
 
 class TestBunnyStreamSsrf:

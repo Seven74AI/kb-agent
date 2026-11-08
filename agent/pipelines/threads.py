@@ -26,7 +26,7 @@ from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.redact import url_for_display
+from agent.redact import scrub_vault_note_content, url_for_display
 from agent.llm import get_llm_client
 from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
@@ -569,7 +569,6 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
         Path to the downloaded video file.
     """
     url = task["source_url"]
-    stem = _download_artifact_stem(task)
 
     html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
@@ -590,11 +589,10 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
             step_name="extract_video",
         )
 
+    from agent.pipelines.video_common import resolve_threads_video_path
+
     # Download video with Referer header
-    if task.get("_batch_ingest"):
-        output_path = Path(config.temp_dir) / f"{stem}.mp4"
-    else:
-        output_path = Path(config.temp_dir) / f"{stem}_threads_video.mp4"
+    output_path = resolve_threads_video_path(config, task)
 
     _assert_threads_video_cdn_url_allowed(video_url)
 
@@ -806,7 +804,7 @@ Incorporate the post description as a source alongside the transcript."""
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(note_content, encoding="utf-8")
+    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -899,7 +897,7 @@ The confidence level is '{confidence}' — be appropriately cautious if it's 'un
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(note_content, encoding="utf-8")
+    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -920,12 +918,17 @@ def step_threads_cleanup(task: dict, config: Config) -> str:
     Returns:
         Status message listing removed files.
     """
+    from agent.pipelines.video_common import _artifact_stem, resolve_threads_video_path
+
     slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
+    stem = _artifact_stem(task)
 
     to_remove = []
-    for ext in ["_threads_video.mp4", "_16k.wav", "_8k.wav"]:
-        path = Path(config.temp_dir) / f"{safe_slug}{ext}"
+    video_path = resolve_threads_video_path(config, task)
+    if video_path.exists():
+        to_remove.append(str(video_path.name))
+    for ext in ["_16k.wav", "_8k.wav"]:
+        path = Path(config.temp_dir) / f"{stem}{ext}"
         if path.exists():
             to_remove.append(str(path.name))
 
@@ -1020,9 +1023,12 @@ def step_threads_minio_upload(task: dict, config: Config) -> str:
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
 
     if content_type == "threads_video":
+        from agent.pipelines.video_common import _resolve_slug, resolve_threads_video_path
+
         # Source-archival: video + transcript (matches the batch collector).
-        video_path = Path(config.temp_dir) / f"{safe_slug}_threads_video.mp4"
-        uploaded = upload_video_source(safe_slug, config, video_path, "mp4", note_path)
+        storage_slug = _resolve_slug(task)
+        video_path = resolve_threads_video_path(config, task)
+        uploaded = upload_video_source(storage_slug, config, video_path, "mp4", note_path)
         return f"Uploaded: {', '.join(uploaded)}"
 
     if not note_path.exists():

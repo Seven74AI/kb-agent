@@ -90,6 +90,36 @@ def test_tdah_bunny_cdn_url_passes_fetch_guard():
     mod._assert_fetch_url_allowed(url)
 
 
+def test_tdah_finalize_dispatch_returns_none_on_error(monkeypatch):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    ns = "tdah-adulte-2026-j1-test"
+    page_url = "https://www.terragrandir.com/tdah-adulte-j1-test/"
+
+    monkeypatch.setattr(
+        mod,
+        "dispatch_synthesize",
+        lambda *a, **k: {"status": "error", "error": "url required"},
+    )
+    assert mod._finalize_video_dispatch(page_url, MagicMock(), MagicMock(), ns) is None
+
+
+def test_tdah_finalize_dispatch_returns_task_id_on_success(monkeypatch):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    ns = "tdah-adulte-2026-j1-test"
+    page_url = "https://www.terragrandir.com/tdah-adulte-j1-test/"
+
+    monkeypatch.setattr(
+        mod,
+        "dispatch_synthesize",
+        lambda *a, **k: {"status": "pending", "task_id": "task-abc"},
+    )
+    assert mod._finalize_video_dispatch(page_url, MagicMock(), MagicMock(), ns) == "task-abc"
+
+
 def test_tdah_bunny_download_guards_cdn_and_disables_redirects(monkeypatch):
     from agent.fetch_guard import _assert_fetch_url_allowed as real_guard
 

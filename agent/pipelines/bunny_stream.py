@@ -15,7 +15,7 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
-from agent.redact import url_for_display
+from agent.redact import scrub_vault_note_content, url_for_display
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -125,7 +125,7 @@ def _curl_page(url: str, timeout: int = 40) -> str:
     )
     if result.returncode != 0:
         raise StepError(
-            f"Failed to fetch page: {url} ({result.stderr.strip()[:200]})",
+            f"Failed to fetch page: {url_for_display(url)} ({result.stderr.strip()[:200]})",
             error_type=ErrorType.RETRY,
             step_name="download_video",
         )
@@ -302,7 +302,7 @@ def _build_synthesis_prompt(source_url: str, slug: str, config: Config) -> str:
     return f"""Tu es un curateur de base de connaissances spécialisé dans les conférences TDAH.
 La vidéo source est en FRANÇAIS. Tu DOIS rédiger TOUT le contenu ET TOUS les titres de sections en FRANÇAIS.
 
-SOURCE URL: {source_url}
+SOURCE URL: {display_source_url}
 
 MODÈLE (structure exacte, ordre canonique des sections) :
 {template}
@@ -383,7 +383,10 @@ def step_synthesize_note(task: dict, config: Config) -> str:
 
     note_path = _note_path(config, display_slug)
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(strip_code_fence(response.content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(strip_code_fence(response.content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 
@@ -407,7 +410,7 @@ def step_quality_gate(task: dict, config: Config) -> str:
             step_name="quality_gate",
         )
 
-    check_density(note_path, config)
+    check_density(note_path, config, task)
     return "passed"
 
 
@@ -452,7 +455,7 @@ def _update_note_source_files(slug: str, config: Config, uploaded: list) -> None
             content,
             flags=re.DOTALL,
         )
-        note_path.write_text(content, encoding="utf-8")
+        note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
 
 
 def step_git_push(task: dict, config: Config) -> str:

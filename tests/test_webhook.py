@@ -447,6 +447,35 @@ def test_upload_cookies_rejects_non_netscape_content(client, monkeypatch, tmp_pa
         os.unlink(tmp.name)
 
 
+def test_upload_cookies_rejects_unsafe_cookie_value(client, monkeypatch, tmp_path):
+    """Cookie values with quotes or newlines must fail closed at upload."""
+    cookie_dir = tmp_path / "cookies"
+    monkeypatch.setattr("agent.webhook.config.cookie_dir", cookie_dir)
+
+    cookie_content = (
+        "# Netscape HTTP Cookie File\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tbad\"inject\n"
+    )
+    tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+    tmp.write(cookie_content.encode())
+    tmp.close()
+    try:
+        with open(tmp.name, "rb") as f:
+            resp = client.post(
+                "/upload-cookies",
+                data={
+                    "cookie_type": "ig_cookies.txt",
+                    "cookie_file": (f, "ig_cookies.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+        assert resp.status_code == 400
+        assert "disallowed" in json.loads(resp.data)["error"].lower()
+        assert not (cookie_dir / "ig_cookies.txt").exists()
+    finally:
+        os.unlink(tmp.name)
+
+
 def test_upload_cookies_rejects_oversized_payload(client, monkeypatch, tmp_path):
     from agent.webhook import MAX_COOKIE_UPLOAD_BYTES
 

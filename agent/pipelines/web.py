@@ -23,7 +23,7 @@ from agent.detection import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
-from agent.redact import url_for_display
+from agent.redact import scrub_vault_note_content, url_for_display
 
 logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
@@ -1029,7 +1029,7 @@ def step_synthesize_web(task: dict, config: Config) -> str:
             source_content, source_url, slug, config, llm
         )
 
-    note_path.write_text(note_content, encoding="utf-8")
+    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 
@@ -1423,7 +1423,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
                 else:
                     # No source_files: field — insert after the opening ---
                     content = content[:3] + "\nsource_files:\n  raw: " + minio_url + content[3:]
-                note_path.write_text(content, encoding="utf-8")
+                note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
 
         # Write the real archive URL into the Sources section (before See Also).
         # If the note lacks a See Also header, skip — the frontmatter raw: field
@@ -1433,7 +1433,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
             f'- Raw source archived: `{minio_url}`\n\n## See Also',
             content, flags=re.MULTILINE, count=1,
         )
-        note_path.write_text(content, encoding="utf-8")
+        note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
 
     return minio_url
 

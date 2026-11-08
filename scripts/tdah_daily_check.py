@@ -69,6 +69,23 @@ def bunny_uuid(url_slug):
     return m.group(1) if m else None
 
 
+def _finalize_video_dispatch(page_url, config, conn, slug):
+    """Dispatch synthesize for one uploaded video; return task_id or None on error."""
+    rr = dispatch_synthesize(
+        page_url,
+        config,
+        conn,
+        content_type="bunny_stream_synthesize",
+        slug=slug,
+    )
+    if rr.get("status") == "error":
+        err = rr.get("error") or "dispatch_synthesize failed"
+        print(f"  [warn] {slug}: dispatch failed ({err})")
+        return None
+    print(f"  {slug}: uploaded + task {rr.get('task_id', '?')}")
+    return rr.get("task_id", "?")
+
+
 def merge_speakers(diar_path, trans_path):
     d = json.load(open(diar_path))["segments"]
     t = json.load(open(trans_path))["segments"]
@@ -151,10 +168,10 @@ def main():
         sh(["mc", "cp", mpath, f"{TB}/{ns}.json"])
 
         page_url = f"https://www.terragrandir.com/{ns.replace('tdah-adulte-2026-', 'tdah-adulte-')}/"
-        r = dispatch_synthesize(page_url, config, conn,
-                                content_type="bunny_stream_synthesize", slug=ns)
-        made.append((ns, r.get("task_id", "?")))
-        print(f"  {ns}: uploaded + task {r.get('task_id', '?')}")
+        task_id = _finalize_video_dispatch(page_url, config, conn, ns)
+        if task_id is None:
+            continue
+        made.append((ns, task_id))
 
     print("DONE: " + ", ".join(n for n, _ in made))
 

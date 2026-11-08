@@ -1523,7 +1523,7 @@ def test_reingest_new_media_redispatches_after_prior_cycle(tmp_path, monkeypatch
         "UPDATE tasks SET error = ? WHERE id = ?",
         ("deferred synthesis dispatched; parent ingestion superseded", parent_id),
     )
-    create_task(
+    syn_id = create_task(
         conn, url, "substack_text_synthesize", parent,
         ["synthesize_note"], status="completed",
     )
@@ -1545,6 +1545,13 @@ def test_reingest_new_media_redispatches_after_prior_cycle(tmp_path, monkeypatch
     assert has_completed_parent_synthesis(
         conn, parent, vault_path=config.vault_path, temp_dir=config.temp_dir,
     ) is True
+
+    deferral_anchor = get_parent_media_deferral(conn, parent)["updated_at"]
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (deferral_anchor, syn_id),
+    )
+    conn.commit()
 
     queue_ingest(
         conn, "https://example.com/i2", "substack_image", "i2",
@@ -2669,16 +2676,21 @@ def test_queue_ingest_resets_dispatched_siblings_when_media_changed(tmp_path):
 
 
 def test_dispatch_synthesize_redispatches_stale_done_under_media_changed(tmp_path):
-    from agent.db import ensure_parent_media_deferral
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
 
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
     url = "https://blog.substack.com/p/x"
     slug = "stale_done_parent"
     ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor = get_parent_media_deferral(conn, slug)["updated_at"]
     done_id = create_task(
         conn, url, "substack_text_synthesize", slug,
         ["synthesize_note"], status="done",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (anchor, done_id),
     )
     conn.commit()
     ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
@@ -2760,6 +2772,73 @@ def test_find_active_task_supersedes_stale_pending_synthesize_after_media_change
         url, config, conn, content_type="substack_text_synthesize", slug=slug,
     )
     assert result.get("duplicate") is not True
+
+
+def test_find_active_task_accepts_synthesize_when_updated_at_equals_deferral(tmp_path):
+    """Same-second SQLite timestamps: equal updated_at is generation-fresh (not superseded)."""
+    from agent.db import (
+        ensure_parent_media_deferral,
+        get_parent_media_deferral,
+        mark_parent_media_changed,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/same-second"
+    slug = "same_second_syn"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    mark_parent_media_changed(conn, slug)
+    conn.commit()
+
+    deferral = get_parent_media_deferral(conn, slug)
+    assert int(deferral["media_changed"]) == 1
+    anchor = deferral["updated_at"]
+
+    pending_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="pending",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+        (anchor, pending_id),
+    )
+    conn.commit()
+
+    assert find_active_task(conn, slug, "substack_text_synthesize") == pending_id
+    assert has_active_synthesize_task(conn, slug) is True
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (pending_id,)).fetchone()
+    assert row[0] == "pending"
+
+
+def test_find_active_task_supersedes_synthesize_strictly_older_than_deferral(tmp_path):
+    from agent.db import (
+        ensure_parent_media_deferral,
+        get_parent_media_deferral,
+        mark_parent_media_changed,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/older-than-deferral"
+    slug = "older_than_deferral_syn"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor_before = get_parent_media_deferral(conn, slug)["updated_at"]
+    pending_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="pending",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime(?, '-1 day') WHERE id = ?",
+        (anchor_before, pending_id),
+    )
+    conn.commit()
+
+    mark_parent_media_changed(conn, slug)
+    conn.commit()
+
+    assert find_active_task(conn, slug, "substack_text_synthesize") is None
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (pending_id,)).fetchone()
+    assert row[0] == "failed"
 
 
 def test_dispatch_synthesize_idempotent_when_task_done(tmp_path):

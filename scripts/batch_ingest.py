@@ -433,6 +433,10 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
         content_type=f"{deferral['content_type']}_synthesize", slug=parent_slug,
         tags=_parent_tags(conn, parent_slug),
     )
+    if rr.get("status") == "error":
+        err = rr.get("error") or "dispatch_synthesize failed"
+        print(f"  [warn] {parent_slug}: dispatch failed ({_scrub_for_log(err)})")
+        return False
     if rr.get("duplicate"):
         _deferred_synthesize_dispatched.add(parent_slug)
         _supersede_deferred_parent_task(conn, parent_slug, synthesize_task_id=rr.get("task_id"))

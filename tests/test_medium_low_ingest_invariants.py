@@ -16,7 +16,15 @@ from agent.detection import (
 )
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines.instagram import step_ig_carousel_extract
-from agent.pipelines.video_common import _artifact_stem, step_fetch_transcript
+from agent.pipelines.video_common import (
+    _artifact_stem,
+    check_density,
+    resolve_instagram_reel_video,
+    resolve_threads_video_path,
+    step_fetch_transcript,
+)
+from agent.pipelines.instagram import step_ig_cleanup, step_ig_minio_upload
+from agent.pipelines.threads import step_threads_cleanup, step_threads_minio_upload
 from agent.pipelines.youtube import _ytdlp_subprocess_env, step_cleanup_temp
 
 
@@ -189,6 +197,110 @@ def test_carousel_extract_sanitizes_subprocess_details(config, monkeypatch):
     assert excinfo.value.error_type == ErrorType.RETRY
     assert excinfo.value.details is not None
     assert len(excinfo.value.details) <= 500
+
+
+@patch("subprocess.run")
+def test_ig_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
+    task_id = "batch-reel-uuid-1234"
+    slug = "owner_reel_abc"
+    task = {
+        "id": task_id,
+        "slug": slug,
+        "content_type": "instagram_reel",
+        "_batch_ingest": True,
+    }
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{slug}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(
+        "---\nsource_files:\n  video: <filled>\n---\n# Reel\n" + ("x" * 100),
+        encoding="utf-8",
+    )
+    (config.temp_dir / f"{task_id}.mp4").write_bytes(b"video-bytes")
+    (config.temp_dir / f"{slug}_merged.json").write_text("{}", encoding="utf-8")
+    mock_run.return_value = MagicMock(returncode=0, stderr="")
+    result = step_ig_minio_upload(task, config)
+    assert result.startswith("Uploaded:")
+    assert f"videos/{slug}.mp4" in result
+
+
+def test_ig_cleanup_batch_removes_id_keyed_reel_mp4(config):
+    task_id = "batch-reel-cleanup"
+    task = {
+        "id": task_id,
+        "slug": "ig/slug",
+        "content_type": "instagram_reel",
+        "_batch_ingest": True,
+    }
+    video = config.temp_dir / f"{task_id}.mp4"
+    video.write_bytes(b"v")
+    (config.temp_dir / f"{task_id}_16k.wav").write_text("a", encoding="utf-8")
+    step_ig_cleanup(task, config)
+    assert not video.exists()
+    assert not (config.temp_dir / f"{task_id}_16k.wav").exists()
+
+
+@patch("subprocess.run")
+def test_threads_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
+    task_id = "batch-threads-uuid"
+    slug = "user_post"
+    task = {
+        "id": task_id,
+        "slug": slug,
+        "content_type": "threads_video",
+        "_batch_ingest": True,
+    }
+    note_path = config.vault_path / "Knowledge base" / "threads" / f"{slug}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(
+        "---\nsource_files:\n  video: <filled>\n---\n# Vid\n",
+        encoding="utf-8",
+    )
+    (config.temp_dir / f"{task_id}.mp4").write_bytes(b"video")
+    mock_run.return_value = MagicMock(returncode=0, stderr="")
+    result = step_threads_minio_upload(task, config)
+    assert result.startswith("Uploaded:")
+    assert f"videos/{slug}.mp4" in result
+
+
+def test_threads_cleanup_batch_removes_plain_mp4(config):
+    task_id = "batch-threads-clean"
+    task = {
+        "id": task_id,
+        "slug": "thr_slug",
+        "content_type": "threads_video",
+        "_batch_ingest": True,
+    }
+    video = config.temp_dir / f"{task_id}.mp4"
+    video.write_bytes(b"v")
+    (config.temp_dir / f"{task_id}_8k.wav").write_text("x", encoding="utf-8")
+    step_threads_cleanup(task, config)
+    assert not video.exists()
+    assert not (config.temp_dir / f"{task_id}_8k.wav").exists()
+
+
+def test_check_density_uses_artifact_stem_metadata(config, tmp_path):
+    vault = config.vault_path
+    note_path = vault / "Knowledge base" / "videos" / "display-slug.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text("x" * 2000, encoding="utf-8")
+    task = {"id": "ingest-meta-id", "slug": "display-slug", "_batch_ingest": True}
+    meta = {"duration": 600}
+    (config.temp_dir / "ingest-meta-id_metadata.json").write_text(
+        json.dumps(meta), encoding="utf-8"
+    )
+    check_density(note_path, config, task)
+
+
+def test_resolve_video_paths_match_download_stems(config):
+    batch_task = {"id": "tid1", "slug": "s", "_batch_ingest": True}
+    (config.temp_dir / "tid1.mp4").write_bytes(b"1")
+    assert resolve_instagram_reel_video(config, batch_task).name == "tid1.mp4"
+    assert resolve_threads_video_path(config, batch_task).name == "tid1.mp4"
+    solo = {"id": "t2", "slug": "solo_slug", "_batch_ingest": False}
+    (config.temp_dir / "solo_slug_reel.webm").write_bytes(b"1")
+    assert resolve_instagram_reel_video(config, solo).suffix == ".webm"
+    (config.temp_dir / "solo_slug_threads_video.mp4").write_bytes(b"1")
+    assert resolve_threads_video_path(config, solo).name == "solo_slug_threads_video.mp4"
 
 
 def test_kb_ocr_registers_heif_and_avif_openers():

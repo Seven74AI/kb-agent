@@ -17,6 +17,7 @@ from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.pipelines.books import (
     CLASSIFY_BOOK_PIPELINES,
     _book_child_slug,
+    _resolve_local_book_path,
     _vault_frontmatter_source_url,
     _pdf_preflight,
     quality_score,
@@ -1089,6 +1090,18 @@ class TestMegadlArchiveExtraction:
         assert excinfo.value.step_name == "megadl_download"
         assert excinfo.value.error_type == ErrorType.FAIL
         assert any(call.args[0][0] == "unar" for call in mock_run.call_args_list)
+
+
+def test_resolve_local_book_path_prefers_slug_match_in_mega_dir(config):
+    child_slug = "mega_pack_child_alpha"
+    dl_dir = Path(config.temp_dir) / f"mega_{child_slug}"
+    dl_dir.mkdir(parents=True)
+    (dl_dir / "zzz_other.epub").write_text("wrong", encoding="utf-8")
+    slug_match = dl_dir / f"{child_slug}.epub"
+    slug_match.write_text("right", encoding="utf-8")
+    task = {"id": "child", "slug": child_slug, "source_url": ""}
+    resolved = _resolve_local_book_path(task, config, {".epub"}, "extract_epub")
+    assert resolved == slug_match
 
 
 # ── MinIO upload source resolution ─────────────────────────────────────────────
