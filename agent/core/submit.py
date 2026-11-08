@@ -15,7 +15,7 @@ from agent.detection import (
     normalize_url,
     preflight_health,
 )
-from agent.core.redact import redact_outward_url_field, url_for_display
+from agent.redact import redact_outward_url_field, url_for_display
 from agent.notify import sanitize_visible_message
 
 

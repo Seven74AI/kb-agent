@@ -24,7 +24,7 @@ from agent.core import (
     resume_tasks,
     submit_plan,
 )
-from agent.core.redact import redact_outward_url_field, url_for_display
+from agent.redact import redact_outward_url_field, url_for_display
 from agent.core.resume import ResumeReasonError, normalize_reason_pattern
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
 from scripts.batch_ingest import refresh_parent_media_manifest

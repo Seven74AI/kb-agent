@@ -139,7 +139,7 @@ def _unlink_curl_netscape_sidecar(conf_path: Path | None) -> None:
 
 def _safe_url_for_log(url: str) -> str:
     """Log-safe URL: path only (no query) with credential-shaped segments redacted."""
-    from agent.core.redact import url_for_display
+    from agent.redact import url_for_display
 
     return url_for_display(url)
 

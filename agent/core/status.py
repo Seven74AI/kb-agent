@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from agent.core.redact import url_for_display
+from agent.redact import url_for_display
 from agent.db import get_all_tasks, get_last_log_line, get_task_steps
 from agent.notify import sanitize_visible_message
 

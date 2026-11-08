@@ -11,8 +11,8 @@ import os
 
 import httpx
 
-from agent.core.redact import url_for_display
 from agent.notify import redact_credential_shapes, sanitize_visible_message
+from agent.redact import url_for_display
 
 MODEL = "typesafe/jev-1.14"
 API_URL = "https://openrouter.ai/api/alpha/decisions"
