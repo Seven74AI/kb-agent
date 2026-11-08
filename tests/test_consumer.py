@@ -768,10 +768,10 @@ def test_step_error_details():
     err = StepError(
         "Upload failed",
         error_type=ErrorType.RETRY,
-        step_name="minio_upload",
-        details="MinIO returned 503 Service Unavailable",
+        step_name="storage_upload",
+        details="object storage returned 503 Service Unavailable",
     )
-    assert err.details == "MinIO returned 503 Service Unavailable"
+    assert err.details == "object storage returned 503 Service Unavailable"
 
 
 # ── Watch scheduler gating ────────────────────────────────────────────────────

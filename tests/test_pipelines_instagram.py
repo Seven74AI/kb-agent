@@ -29,7 +29,7 @@ from agent.pipelines.instagram import (
     step_ig_carousel_synthesize,
     step_ig_quality_gate,
     step_ig_cleanup,
-    step_ig_minio_upload,
+    step_ig_storage_upload,
     step_ig_git_push,
     CAROUSEL_SLIDE_CAP,
     MUSIC_ONLY_CHAR_THRESHOLD,
@@ -55,10 +55,7 @@ def config(tmp_path):
         temp_dir=temp_dir,
         cookie_dir=tmp_path / "cookies",
         ig_carousel_min_size=100,  # Low for testing
-        minio_bucket="kb-agent-archive",
-        minio_endpoint="http://localhost:9000",
-        minio_tailscale_base="http://minio.test/base",
-    )
+        storage_bucket="kb-agent-archive",    )
 
 
 @pytest.fixture
@@ -787,13 +784,13 @@ class TestCleanup:
         assert not (Path(config.temp_dir) / "ytdlp_xdg").exists()
 
 
-# ── MinIO ────────────────────────────────────────────────────────────────────
+# ── object storage ────────────────────────────────────────────────────────────────────
 
-class TestMinIO:
-    """Tests for step_ig_minio_upload."""
+class TestStorage:
+    """Tests for step_ig_storage_upload."""
 
     @patch("subprocess.run")
-    def test_minio_upload_reel_source_archival(self, mock_run, config, reel_task):
+    def test_storage_upload_reel_source_archival(self, mock_run, config, reel_task):
         slug = reel_task["slug"]
         note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{slug}.md"
         note_path.write_text("""---
@@ -808,7 +805,7 @@ source_files:
         Path(config.temp_dir / f"{slug}_merged.json").write_text("{}")
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
-        result = step_ig_minio_upload(reel_task, config)
+        result = step_ig_storage_upload(reel_task, config)
         assert result.startswith("Uploaded:")
         assert f"videos/{slug}.mp4" in result
         assert f"transcripts/{slug}.json" in result
@@ -818,7 +815,7 @@ source_files:
         assert f"videos/{slug}.mp4" in content
 
     @patch("subprocess.run")
-    def test_minio_upload_post_note_archival(self, mock_run, config, post_task):
+    def test_storage_upload_post_note_archival(self, mock_run, config, post_task):
         slug = post_task["slug"]
         note_path = Path(config.vault_path) / "Knowledge base" / "instagram" / f"{slug}.md"
         note_path.write_text("""---
@@ -829,7 +826,7 @@ raw: <filled by archival step>
 # Content""")
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
-        result = step_ig_minio_upload(post_task, config)
+        result = step_ig_storage_upload(post_task, config)
         assert result.startswith("instagram/")
 
         content = note_path.read_text()
@@ -891,9 +888,9 @@ class TestPipelineRegistration:
         assert "ig_carousel_extract" in step_names
         assert "ig_carousel_synthesize" in step_names
         assert "ig_cleanup" in step_names
-        minio_idx = step_names.index("ig_minio_upload")
+        storage_idx = step_names.index("ig_storage_upload")
         cleanup_idx = step_names.index("ig_cleanup")
-        assert cleanup_idx == minio_idx + 1
+        assert cleanup_idx == storage_idx + 1
         assert "ig_git_push" in step_names
 
 

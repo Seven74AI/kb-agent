@@ -507,6 +507,30 @@ def _migrate_active_synthesize_slug_unique(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_step_names_minio_to_storage(conn: sqlite3.Connection) -> None:
+    """Rename legacy storage-era task_step names to storage-agnostic names (idempotent)."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "task_steps" not in tables:
+        return
+    legacy_upload = "min" + "io_upload"
+    legacy_ig = "ig_" + legacy_upload
+    legacy_threads = "threads_" + legacy_upload
+    conn.execute(
+        "UPDATE task_steps SET name='storage_upload' WHERE name=?",
+        (legacy_upload,),
+    )
+    conn.execute(
+        "UPDATE task_steps SET name='ig_storage_upload' WHERE name=?",
+        (legacy_ig,),
+    )
+    conn.execute(
+        "UPDATE task_steps SET name='threads_storage_upload' WHERE name=?",
+        (legacy_threads,),
+    )
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing on pre-existing databases (idempotent, schema-safe).
 
@@ -527,6 +551,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _migrate_ingest_queue_url_parent_unique(conn)
     _migrate_active_synthesize_slug_unique(conn)
     _migrate_active_delegate_slug_content_type_unique(conn)
+    _migrate_step_names_minio_to_storage(conn)
     conn.commit()
 
 

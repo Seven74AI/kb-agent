@@ -1,5 +1,5 @@
 """Tests for the book pipeline — Mega.nz, ePub/PDF, 3-tier pre-flight,
-chapter-level synthesis, quality gates, MinIO, Git."""
+chapter-level synthesis, quality gates, object storage, Git."""
 
 import json
 import logging
@@ -38,7 +38,7 @@ from agent.pipelines.books import (
     step_book_quality_gate,
     step_synthesize_book,
     step_megadl_download,
-    step_book_minio_upload,
+    step_book_storage_upload,
     step_book_git_push,
     _build_book_prompt,
     _today,
@@ -1595,7 +1595,7 @@ TOKENIZED_BOOK_URL = "https://cdn.example.com/book.mp3?token=secret&expires=999"
 
 
 class TestBookVaultWriteSanitization:
-    """Book vault writes must scrub URLs at rest (synthesis + MinIO frontmatter patch)."""
+    """Book vault writes must scrub URLs at rest (synthesis + object storage frontmatter patch)."""
 
     @patch("agent.pipelines.books.get_llm_client")
     def test_synthesize_book_scrubs_urls_in_vault_note(
@@ -1624,8 +1624,8 @@ class TestBookVaultWriteSanitization:
         assert "token=secret" not in written
         assert "https://cdn.example.com/book.mp3" in written
 
-    @patch("agent.archival.upload_file_to_minio")
-    def test_minio_upload_scrubs_note_after_frontmatter_patch(
+    @patch("agent.archival.upload_object")
+    def test_storage_upload_scrubs_note_after_frontmatter_patch(
         self, mock_upload, config, book_task,
     ):
         slug = book_task["slug"]
@@ -1646,20 +1646,20 @@ Body links {TOKENIZED_BOOK_URL} in prose before patch.
             encoding="utf-8",
         )
         book_task["source_url"] = str(full_txt)
-        step_book_minio_upload(book_task, config)
+        step_book_storage_upload(book_task, config)
         written = note_path.read_text(encoding="utf-8")
         assert "token=secret" not in written
         assert "https://cdn.example.com/book.mp3" in written
         assert "source_files:" in written
 
 
-# ── MinIO upload source resolution ─────────────────────────────────────────────
+# ── object storage upload source resolution ─────────────────────────────────────────────
 
-class TestBookMinioUpload:
-    """MinIO upload must resolve delegated child local paths."""
+class TestBookStorageUpload:
+    """object storage upload must resolve delegated child local paths."""
 
-    @patch("agent.archival.upload_file_to_minio")
-    def test_minio_upload_uses_child_source_url_not_mega_slug_dir(
+    @patch("agent.archival.upload_object")
+    def test_storage_upload_uses_child_source_url_not_mega_slug_dir(
         self, mock_upload, config, tmp_path,
     ):
         parent_slug = "mega_parent_batch"
@@ -1679,15 +1679,15 @@ class TestBookMinioUpload:
             "slug": child_slug,
             "source_url": str(epub),
         }
-        result = step_book_minio_upload(task, config)
+        result = step_book_storage_upload(task, config)
         data = json.loads(result)
         assert f"books/{child_slug}.txt" in data["uploaded"]
         assert f"books/{child_slug}.epub" in data["uploaded"]
         uploaded_paths = [Path(c[0][0]) for c in mock_upload.call_args_list]
         assert epub.resolve() in {p.resolve() for p in uploaded_paths}
 
-    @patch("agent.archival.upload_file_to_minio")
-    def test_minio_upload_source_failure_surfaces_step_error(
+    @patch("agent.archival.upload_object")
+    def test_storage_upload_source_failure_surfaces_step_error(
         self, mock_upload, config, tmp_path,
     ):
         """Source epub/pdf archival failure must fail the step, not return success."""
@@ -1698,13 +1698,13 @@ class TestBookMinioUpload:
         full_txt.parent.mkdir(parents=True, exist_ok=True)
         full_txt.write_text("extracted book text " * 20)
 
-        def upload_side_effect(src, dest, timeout=60):
+        def upload_side_effect(src, dest, _config, timeout=60):
             if str(src).endswith(".txt"):
                 return None
             raise StepError(
-                "minio put failed",
+                "storage put failed",
                 error_type=ErrorType.RETRY,
-                step_name="upload_file_to_minio",
+                step_name="upload_object",
             )
 
         mock_upload.side_effect = upload_side_effect
@@ -1715,9 +1715,9 @@ class TestBookMinioUpload:
             "source_url": str(epub),
         }
         with pytest.raises(StepError) as excinfo:
-            step_book_minio_upload(task, config)
-        assert excinfo.value.step_name == "book_minio_upload"
-        assert "Source book MinIO upload failed" in str(excinfo.value)
+            step_book_storage_upload(task, config)
+        assert excinfo.value.step_name == "book_storage_upload"
+        assert "Source book object storage upload failed" in str(excinfo.value)
         assert mock_upload.call_count == 2
 
 
@@ -1785,7 +1785,7 @@ class TestPipelineRegistration:
         assert "extract_text" in step_names
         assert "synthesize_note" in step_names
         assert "quality_gate" in step_names
-        assert "minio_upload" in step_names
+        assert "storage_upload" in step_names
         assert "git_push" in step_names
 
     def test_book_pdf_pipeline_registered(self):
@@ -1819,7 +1819,7 @@ class TestPipelineRegistration:
         assert "extract_text" in step_names
         assert "synthesize_note" in step_names
         assert "quality_gate" in step_names
-        assert "minio_upload" in step_names
+        assert "storage_upload" in step_names
         assert "git_push" in step_names
         # Web pipeline has firecrawl_extract — book pipeline should not
         assert "firecrawl_extract" not in step_names
@@ -1851,7 +1851,7 @@ class TestPipelineRegistration:
         assert "merge_and_identify" in step_names
         assert "synthesize_youtube" in step_names
         assert "quality_gate" in step_names
-        assert "minio_upload" in step_names
+        assert "storage_upload" in step_names
         assert "see_also" in step_names
         assert "git_push" in step_names
 

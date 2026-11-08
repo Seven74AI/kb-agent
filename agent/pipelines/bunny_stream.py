@@ -1,7 +1,7 @@
 """Bunny Stream pipeline — terragrandir / TDAH summit conference videos.
 
 Download from Bunny CDN (Referer required) → dual WAV → diarize → transcribe →
-merge → French TDAH note synthesis → quality gates → MinIO → Git push.
+merge → French TDAH note synthesis → quality gates → object storage → Git push.
 """
 
 import json
@@ -461,8 +461,8 @@ def step_quality_gate(task: dict, config: Config) -> str:
     return "passed"
 
 
-def step_minio_upload(task: dict, config: Config) -> str:
-    """Upload MP4, MP3, and merged transcript JSON to MinIO."""
+def step_storage_upload(task: dict, config: Config) -> str:
+    """Upload MP4, MP3, and merged transcript JSON to object storage."""
     stem = resolve_artifact_stem(task)
     storage_slug = _resolve_slug(task)
     display_slug = task.get("slug", task["id"][:8])
@@ -525,7 +525,7 @@ register_pipeline("bunny_stream", [
     Step(name="cleanup_temp", fn=step_cleanup_temp, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_note, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])

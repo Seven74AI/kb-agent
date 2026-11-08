@@ -95,6 +95,41 @@ def test_queue_ingest_duplicate_empty_tags_unchanged(tmp_path):
     assert row["tags"] == serialize_tags(["keep"])
 
 
+def test_migrate_step_names_legacy_to_storage_idempotent(tmp_path):
+    """Renaming legacy step rows is idempotent across repeated migrations."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    legacy_names = ("min" + "io_upload", "ig_" + "min" + "io_upload", "threads_" + "min" + "io_upload")
+    expected = ("storage_upload", "ig_storage_upload", "threads_storage_upload")
+    task_id = "task-migrate-steps"
+    conn.execute(
+        "INSERT INTO tasks (id, source_url, content_type, slug, status) VALUES (?, ?, ?, ?, ?)",
+        (task_id, "https://example.com/m", "web", "slug_m", "pending"),
+    )
+    for order, name in enumerate(legacy_names):
+        conn.execute(
+            "INSERT INTO task_steps (task_id, step_order, name, status) VALUES (?, ?, ?, 'pending')",
+            (task_id, order, name),
+        )
+    conn.commit()
+
+    _migrate(conn)
+    rows = conn.execute(
+        "SELECT name FROM task_steps WHERE task_id = ? ORDER BY step_order",
+        (task_id,),
+    ).fetchall()
+    assert [r["name"] for r in rows] == list(expected)
+
+    _migrate(conn)
+    rows2 = conn.execute(
+        "SELECT name FROM task_steps WHERE task_id = ? ORDER BY step_order",
+        (task_id,),
+    ).fetchall()
+    assert [r["name"] for r in rows2] == list(expected)
+
+
 def test_migrate_adds_missing_ingest_queue_columns(tmp_path):
     db_path = tmp_path / "data" / "agent.db"
     db_path.parent.mkdir(parents=True)
@@ -996,7 +1031,7 @@ def test_get_next_step_does_not_skip_paused_synthesize_execute_gate(
         "https://blog.substack.com/p/post",
         content_type,
         "parent_slug",
-        ["synthesize_note", "quality_gate", "minio_upload"],
+        ["synthesize_note", "quality_gate", "storage_upload"],
         status="pending",
     )
     conn.execute(
@@ -4461,9 +4496,9 @@ def test_process_videos_upload_failure_sets_failed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
     def _upload_fail(*_a, **_k):
-        raise RuntimeError("minio down")
+        raise RuntimeError("storage down")
 
-    monkeypatch.setattr(batch_ingest, "upload_file_to_minio", _upload_fail)
+    monkeypatch.setattr(batch_ingest, "upload_object", _upload_fail)
     monkeypatch.setattr(
         batch_ingest, "dispatch_synthesize",
         lambda *a, **k: {"status": "pending", "task_id": "never"},
@@ -4500,7 +4535,7 @@ def test_process_videos_dispatch_failure_sets_failed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        batch_ingest, "upload_file_to_minio", lambda *_a, **_k: None,
+        batch_ingest, "upload_object", lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
         batch_ingest,
@@ -4541,7 +4576,7 @@ def test_process_videos_dispatch_success_marks_dispatched(tmp_path, monkeypatch)
         return subprocess.run(cmd, **kwargs)
 
     monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
-    monkeypatch.setattr(batch_ingest, "upload_file_to_minio", lambda *_a, **_k: None)
+    monkeypatch.setattr(batch_ingest, "upload_object", lambda *_a, **_k: None)
     monkeypatch.setattr(
         batch_ingest,
         "dispatch_synthesize",

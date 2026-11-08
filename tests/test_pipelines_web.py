@@ -1,4 +1,4 @@
-"""Tests for the web article pipeline — Firecrawl → LLM → quality → MinIO → Git."""
+"""Tests for the web article pipeline — Firecrawl → LLM → quality → object storage → Git."""
 
 import json
 import sys
@@ -17,7 +17,7 @@ from agent.pipelines.web import (
     step_firecrawl_extract,
     step_synthesize_web,
     step_quality_gate,
-    step_minio_upload,
+    step_storage_upload,
     step_git_push,
     _estimate_tokens,
     _build_synthesis_prompt,
@@ -42,9 +42,7 @@ def config(tmp_path):
         cookie_dir=tmp_path / "cookies",
         article_min_quotes=2,  # Lower for testing
         article_min_size=100,   # Lower for testing
-        firecrawl_url="http://localhost:3002/v2/scrape",
-        minio_tailscale_base="http://minio.test/base",
-    )
+        firecrawl_url="http://localhost:3002/v2/scrape",    )
 
 
 @pytest.fixture
@@ -1005,13 +1003,13 @@ def test_pipeline_registered():
     assert "firecrawl_extract" in step_names
     assert "synthesize_note" in step_names
     assert "quality_gate" in step_names
-    assert "minio_upload" in step_names
+    assert "storage_upload" in step_names
     assert "see_also" in step_names
     assert "git_push" in step_names
     # Verify correct order
     assert step_names.index("synthesize_note") < step_names.index("quality_gate")
-    assert step_names.index("quality_gate") < step_names.index("minio_upload")
-    assert step_names.index("minio_upload") < step_names.index("git_push")
+    assert step_names.index("quality_gate") < step_names.index("storage_upload")
+    assert step_names.index("storage_upload") < step_names.index("git_push")
 
 
 def test_pipeline_unknown_content_type_returns_none():
@@ -1074,18 +1072,18 @@ A note about AI and healthcare.
     assert "0" in result or "no related" in result.lower()
 
 
-# ── step_minio_upload tests ───────────────────────────────────────────────────
+# ── step_storage_upload tests ───────────────────────────────────────────────────
 
-def test_step_minio_upload_missing_source(config, task_dict):
-    """Test minio upload fails when source file doesn't exist."""
+def test_step_storage_upload_missing_source(config, task_dict):
+    """Test storage upload fails when source file doesn't exist."""
     with pytest.raises(FileNotFoundError):
-        step_minio_upload(task_dict, config)
+        step_storage_upload(task_dict, config)
 
 
 TOKENIZED_WEB = "https://cdn.example.com/article?token=secret"
 
 
-def test_step_minio_upload_redacts_body_url_in_sources_patch(config, task_dict):
+def test_step_storage_upload_redacts_body_url_in_sources_patch(config, task_dict):
     source_path = Path(config.temp_dir) / f"{task_dict['slug']}_raw.md"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text("# Source", encoding="utf-8")
@@ -1107,15 +1105,15 @@ Body cites {TOKENIZED_WEB} before archival.
 
     with patch("agent.archival.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        step_minio_upload(task_dict, config)
+        step_storage_upload(task_dict, config)
 
     written = note_path.read_text(encoding="utf-8")
     assert "token=secret" not in written
     assert "https://cdn.example.com/article" in written
 
 
-def test_step_minio_upload_with_mock(config, task_dict):
-    """Test minio upload with mocked subprocess — placeholder replaced with real URL."""
+def test_step_storage_upload_with_mock(config, task_dict):
+    """Test storage upload with mocked subprocess — placeholder replaced with real URL."""
     source_path = Path(config.temp_dir) / f"{task_dict['slug']}_raw.md"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text("# Test source content", encoding="utf-8")
@@ -1123,34 +1121,34 @@ def test_step_minio_upload_with_mock(config, task_dict):
     with patch("agent.archival.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        # Create the note with a minio: placeholder (real-world LLM output)
+        # Create the note with a storage: placeholder (real-world LLM output)
         note_path = config.vault_path / "Knowledge base" / "articles" / f"{task_dict['slug']}.md"
         note_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.write_text("""---
 date: 2026-06-19
 source: test
-minio: http://minio.test/base/knowledge-base/placeholder/slug.md
+storage: http://storage.test/base/knowledge-base/placeholder/slug.md
 ---
 
 # Test
 
 ## Sources
-- Archived at minio: <placeholder>
+- Archived at storage: <placeholder>
 """)
 
-        result = step_minio_upload(task_dict, config)
+        result = step_storage_upload(task_dict, config)
 
     assert result.startswith("articles/")
 
-    # Verify the placeholder was replaced with the real MinIO URL in frontmatter
+    # Verify the placeholder was replaced with the real object storage URL in frontmatter
     updated_content = note_path.read_text(encoding="utf-8")
     assert result in updated_content, (
-        f"Real MinIO URL ({result}) not found in note frontmatter. "
+        f"Real object storage URL ({result}) not found in note frontmatter. "
         f"Placeholder was not replaced."
     )
-    # The minio: field in frontmatter must point to the object key (not the placeholder path)
+    # The storage: field in frontmatter must point to the object key (not the placeholder path)
     assert "articles/" in updated_content, (
-        "MinIO key should contain the real folder path (articles/...), not the template placeholder"
+        "object storage key should contain the real folder path (articles/...), not the template placeholder"
     )
 
 
@@ -1176,9 +1174,9 @@ def test_full_pipeline_order():
     # Synthesis before quality gate
     assert step_names.index("synthesize_note") < step_names.index("quality_gate")
     # Quality gate before archival
-    assert step_names.index("quality_gate") < step_names.index("minio_upload")
-    # MinIO before Git (so minio URL can be added to note)
-    assert step_names.index("minio_upload") < step_names.index("git_push")
+    assert step_names.index("quality_gate") < step_names.index("storage_upload")
+    # object storage before Git (so storage URL can be added to note)
+    assert step_names.index("storage_upload") < step_names.index("git_push")
     # See Also before Git (so links are committed)
     assert step_names.index("see_also") < step_names.index("git_push")
     # Git push is the final step

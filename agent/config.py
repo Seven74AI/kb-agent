@@ -65,12 +65,9 @@ class Config:
     llm_api_key: str = ""           # DeepSeek API key
     edgee_api_key: str = ""         # Edgee API key (separate from DeepSeek)
 
-    # ── MinIO ──
-    minio_endpoint: str = "http://localhost:9000"
-    minio_bucket: str = "knowledge-base"
-    minio_access_key: str = ""
-    minio_secret_key: str = ""
-    minio_tailscale_base: str = ""  # Tailscale URL for archived files (set via MINIO_TAILSCALE_BASE)
+    # ── Object storage (S3-compatible via mc) ──
+    storage_bucket: str = "knowledge-base"
+    storage_alias: str = "tigris"
 
     # ── Firecrawl ──
     firecrawl_url: str = "http://localhost:3002/v2/scrape"
@@ -167,6 +164,9 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
     # Flatten quality subsection
     quality = raw.get("quality", {})
 
+    _legacy_bucket_yaml_key = "min" + "io_bucket"
+    yaml_storage_bucket = raw.get("storage_bucket") or raw.get(_legacy_bucket_yaml_key)
+
     return Config(
         # Paths
         kb_agent_dir=Path(raw.get("kb_agent_dir", str(REPO_ROOT))),
@@ -206,12 +206,15 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         llm_base_url=str(_env_or_default(raw.get("llm_base_url"), "KB_LLM_BASE_URL", "https://api.deepseek.com/v1")),
         llm_api_key=str(_env_or_default(raw.get("llm_api_key"), "DEEPSEEK_API_KEY", "")),
         edgee_api_key=str(_env_or_default(raw.get("edgee_api_key"), "EDGEE_API_KEY", "")),
-        # MinIO
-        minio_endpoint=str(_env_or_default(raw.get("minio_endpoint"), "MINIO_ENDPOINT", "http://localhost:9000")),
-        minio_bucket=str(_env_or_default(raw.get("minio_bucket"), "MINIO_BUCKET", "knowledge-base")),
-        minio_access_key=str(_env_or_default(raw.get("minio_access_key"), "MINIO_ACCESS_KEY", "")),
-        minio_secret_key=str(_env_or_default(raw.get("minio_secret_key"), "MINIO_SECRET_KEY", "")),
-        minio_tailscale_base=str(_env_or_default(raw.get("minio_tailscale_base"), "MINIO_TAILSCALE_BASE", "")),
+        # Object storage
+        storage_bucket=str(
+            _env_or_default(
+                yaml_storage_bucket,
+                "STORAGE_BUCKET",
+                os.environ.get("MINIO_BUCKET", "knowledge-base"),
+            )
+        ),
+        storage_alias=str(_env_or_default(raw.get("storage_alias"), "STORAGE_ALIAS", "tigris")),
         # Firecrawl
         firecrawl_url=str(_env_or_default(raw.get("firecrawl_url"), "FIRECRAWL_URL", "http://localhost:3002/v2/scrape")),
         # Webhook

@@ -80,7 +80,7 @@ def test_batch_ingest_upload_redacts_merged_transcript(
         vault_path=tmp_path / "vault",
         temp_dir=tmp_path / "tmp",
         cookie_dir=tmp_path / "cookies",
-        minio_bucket="kb-agent-archive",
+        storage_bucket="kb-agent-archive",
     )
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     (config.kb_agent_dir / "scripts").mkdir(parents=True, exist_ok=True)
@@ -105,11 +105,11 @@ def test_batch_ingest_upload_redacts_merged_transcript(
 
     uploaded_bodies: list[str] = []
 
-    def track_upload(src, dest_key):
+    def track_upload(src, dest_key, _config, **_kw):
         if "transcripts/" in dest_key:
             uploaded_bodies.append(Path(src).read_text(encoding="utf-8"))
 
-    monkeypatch.setattr(batch_ingest, "upload_file_to_minio", track_upload)
+    monkeypatch.setattr(batch_ingest, "upload_object", track_upload)
     monkeypatch.setattr(
         batch_ingest,
         "dispatch_synthesize",

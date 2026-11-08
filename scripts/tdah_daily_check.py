@@ -22,8 +22,6 @@ CDN = "https://vz-46d29c85-ed.b-cdn.net"
 REF = "Referer: https://player.mediadelivery.net/"
 MODAL = "/root/modal"
 TMP = "/tmp/tdah_daily"
-VB = "minio/kb-agent-archive/videos"       # mc alias 'minio'
-TB = "minio/kb-agent-archive/transcripts"
 
 UUID_RE = re.compile(
     r"player\.mediadelivery\.net/embed/\d+/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"
@@ -92,6 +90,8 @@ def _finalize_video_dispatch(page_url, config, conn, slug):
 def main():
     os.makedirs(TMP, exist_ok=True)
     config = load_config()
+    vb = f"{config.storage_alias}/kb-agent-archive/videos"
+    tb = f"{config.storage_alias}/kb-agent-archive/transcripts"
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
 
     # 1. detect new slugs from the main page
@@ -99,8 +99,8 @@ def main():
     url_slugs = set(re.findall(r"/tdah-adulte-(j\d+-[a-z0-9-]+)/", html))
     note_slugs = {f"tdah-adulte-2026-{s}" for s in url_slugs}
 
-    # 2. already-processed = MinIO videos
-    r = sh(["mc", "ls", VB])
+    # 2. already-processed = object storage videos
+    r = sh(["mc", "ls", vb])
     existing = set(re.findall(r"(tdah-adulte-2026-j\d+-[a-z0-9-]+)\.mp4", r.stdout))
     new = sorted(note_slugs - existing)
     if not new:
@@ -155,8 +155,8 @@ def main():
         merged = merge_speakers_from_paths(diar, trans)
         write_merged_transcript_json(mpath, merged, indent=None)
         ensure_merged_transcript_file_redacted(mpath)
-        sh(["mc", "cp", mp4, f"{VB}/{ns}.mp4"])
-        sh(["mc", "cp", str(mpath), f"{TB}/{ns}.json"])
+        sh(["mc", "cp", mp4, f"{vb}/{ns}.mp4"])
+        sh(["mc", "cp", str(mpath), f"{tb}/{ns}.json"])
 
         page_url = f"https://www.terragrandir.com/{ns.replace('tdah-adulte-2026-', 'tdah-adulte-')}/"
         task_id = _finalize_video_dispatch(page_url, config, conn, ns)

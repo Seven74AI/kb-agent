@@ -574,7 +574,7 @@ class Consumer:
 
         Resolves step from the task's content_type pipeline registry FIRST
         (to avoid namespace collisions between pipelines with shared step names
-        like 'synthesize_note', 'quality_gate', 'minio_upload', 'git_push').
+        like 'synthesize_note', 'quality_gate', 'storage_upload', 'git_push').
         Falls back to global STEP_REGISTRY for backward compatibility.
 
         For mechanical steps that launch subprocesses, step functions should:

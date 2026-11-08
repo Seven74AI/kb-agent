@@ -41,9 +41,8 @@ llm_base_url: https://api.deepseek.com/v1
 edgee_api_key: ""             # EDGEE_API_KEY from .env (separate from DEEPSEEK_API_KEY)
 # When llm_provider=edgee, set llm_base_url: https://api.edgee.ai/v1
 
-# MinIO
-minio_endpoint: http://localhost:9000
-minio_bucket: knowledge-base
+# Object storage
+storage_bucket: knowledge-base
 
 # Firecrawl (shared with Hermes)
 firecrawl_url: http://localhost:3002/v2/scrape

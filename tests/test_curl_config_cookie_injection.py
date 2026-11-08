@@ -30,10 +30,7 @@ def config(tmp_path):
         temp_dir=temp_dir,
         cookie_dir=tmp_path / "cookies",
         ig_carousel_min_size=100,
-        minio_bucket="kb-agent-archive",
-        minio_endpoint="http://localhost:9000",
-        minio_tailscale_base="http://minio.test/base",
-    )
+        storage_bucket="kb-agent-archive",    )
 
 
 def _netscape_line(value: str, name: str = "sessionid") -> str:

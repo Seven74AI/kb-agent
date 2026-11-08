@@ -2,9 +2,9 @@
 
 Detection (Phase 0): curl + cookies + Googlebot UA → grep video_versions.
 If present → VIDEO → full video pipeline (download → dual audio → diarize →
-transcribe → merge → synthesize → quality → MinIO → Git).
+transcribe → merge → synthesize → quality → object storage → Git).
 If absent → TEXT → text extraction pipeline (curl → regex captions →
-instant LLM synthesis → quality → MinIO → Git).
+instant LLM synthesis → quality → object storage → Git).
 
 Pitfalls handled:
 - media_type=19 (Instagram video cross-post): check video_versions regardless
@@ -904,7 +904,7 @@ CONTEXT:
 TASK: Write a concise but thorough note analyzing this Threads post.
 
 SECTIONS:
-1. YAML frontmatter with date, source, source_url, minio placeholder, confidence, tags
+1. YAML frontmatter with date, source, source_url, storage placeholder, confidence, tags
 2. # Title — descriptive title for the post
 3. ## Summary — 2-3 sentences capturing the post's message
 4. ## Key Claims — ≥2 specific claims, each with the original text quoted (> )
@@ -1051,10 +1051,10 @@ def step_threads_quality_gate(task: dict, config: Config) -> str:
         })
 
 
-# ── MinIO Upload ──────────────────────────────────────────────────────────────
+# ── object storage Upload ──────────────────────────────────────────────────────────────
 
-def step_threads_minio_upload(task: dict, config: Config) -> str:
-    """Upload the generated video/text artifacts to MinIO.
+def step_threads_storage_upload(task: dict, config: Config) -> str:
+    """Upload the generated video/text artifacts to object storage.
 
     Video: source-archival (video + transcript). Text: note-archival.
     """
@@ -1122,7 +1122,7 @@ def _format_transcript_for_llm(merged: dict) -> str:
 
 # ── Pipeline Registration ────────────────────────────────────────────────────
 
-# Threads video pipeline: detection → download → audio → diarize → transcribe → merge → synthesize → quality → cleanup → minio → git
+# Threads video pipeline: detection → download → audio → diarize → transcribe → merge → synthesize → quality → cleanup → storage → git
 register_pipeline("threads_video", [
     Step(name="threads_detect", fn=step_threads_detect, on_error="pause"),
     Step(name="threads_extract_video", fn=step_threads_extract_video, on_error="retry"),
@@ -1132,7 +1132,7 @@ register_pipeline("threads_video", [
     Step(name="merge_and_identify", fn=step_threads_merge, on_error="retry"),
     Step(name="threads_video_synthesize", fn=step_threads_video_synthesize, on_error="retry"),
     Step(name="threads_quality_gate", fn=step_threads_quality_gate, on_error="retry"),
-    Step(name="threads_minio_upload", fn=step_threads_minio_upload, on_error="retry"),
+    Step(name="threads_storage_upload", fn=step_threads_storage_upload, on_error="retry"),
     Step(name="threads_cleanup", fn=step_threads_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="threads_git_push", fn=step_threads_git_push, on_error="retry"),
@@ -1146,13 +1146,13 @@ register_pipeline("threads_video_synthesize", [
     Step(name="threads_git_push", fn=step_threads_git_push, on_error="retry"),
 ])
 
-# Threads text pipeline: detection → extract_text → synthesize → quality → minio → git
+# Threads text pipeline: detection → extract_text → synthesize → quality → storage → git
 register_pipeline("threads_text", [
     Step(name="threads_detect", fn=step_threads_detect, on_error="pause"),
     Step(name="threads_extract_text", fn=step_threads_extract_text, on_error="retry"),
     Step(name="threads_text_synthesize", fn=step_threads_text_synthesize, on_error="retry"),
     Step(name="threads_quality_gate", fn=step_threads_quality_gate, on_error="retry"),
-    Step(name="threads_minio_upload", fn=step_threads_minio_upload, on_error="retry"),
+    Step(name="threads_storage_upload", fn=step_threads_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="threads_git_push", fn=step_threads_git_push, on_error="retry"),
 ])

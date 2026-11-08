@@ -242,7 +242,7 @@ def test_rotate_logs_upload_failure_scrubs_stderr(monkeypatch, capsys, tmp_path)
     assert "mcleak" not in err
     assert "/root/kb-agent" not in err
     assert "[path]" in err
-    assert "MinIO upload FAILED" in err
+    assert "object storage upload FAILED" in err
 
 
 def test_kb_transcribe_visible_stdout_routes_through_sanitize_emit():

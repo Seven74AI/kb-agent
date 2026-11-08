@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Log rotation — archive step_logs + llm_archives rows older than 30 days to MinIO.
+"""Log rotation — archive step_logs + llm_archives rows older than 30 days to object storage.
 
 Monthly cron job (0 0 1 * *):
     python3 /root/kb-agent/scripts/rotate_logs.py
@@ -7,10 +7,10 @@ Monthly cron job (0 0 1 * *):
 Workflow:
     1. Dump logs.db rows (step_logs + llm_archives) older than 30 days → JSON lines
     2. Gzip the JSON
-    3. Upload to MinIO: kb-agent-archive/logs/YYYY-MM.json.gz
+    3. Upload to object storage: kb-agent-archive/logs/YYYY-MM.json.gz
     4. DELETE old rows from both tables + VACUUM
 
-Retention: indefinite on MinIO, 30 days active in DB.
+Retention: indefinite on object storage, 30 days active in DB.
 """
 
 import gzip
@@ -22,6 +22,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent.config import load_config
 from agent.db import _persist_visible_error
 from agent.notify import sanitize_visible_message
 from agent.persist import persist_durable_text
@@ -34,8 +35,7 @@ _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 LOGS_DB = Path("/root/kb-agent/data/logs.db")
-MINIO_BUCKET = "kb-agent-archive"
-MINIO_PREFIX = "logs"
+STORAGE_PREFIX = "logs"
 RETENTION_DAYS = 30
 BATCH_SIZE = 500
 
@@ -53,7 +53,7 @@ def _sanitize_llm_text(text: str) -> str:
 
 
 def sanitize_archive_record(record: dict) -> dict:
-    """Redact sensitive fields before writing archived log rows to MinIO."""
+    """Redact sensitive fields before writing archived log rows to object storage."""
     out = dict(record)
     table = out.get("_table")
     if table == "step_logs" and out.get("content"):
@@ -143,8 +143,12 @@ def main():
         "%Y-%m"
     )
 
+    config = load_config()
+    storage_bucket = config.storage_bucket
+    storage_alias = config.storage_alias
+
     print(f"[rotate_logs] Rotating logs older than {cutoff} → "
-          f"{MINIO_BUCKET}/{MINIO_PREFIX}/{archive_month}.json.gz")
+          f"{storage_bucket}/{STORAGE_PREFIX}/{archive_month}.json.gz")
 
     # ── 1. Dump old rows from both tables ──
     conn = sqlite3.connect(str(LOGS_DB))
@@ -201,16 +205,16 @@ def main():
         conn.close()
         return 1
 
-    # ── 3. Upload to MinIO ──
-    minio_path = f"{MINIO_BUCKET}/{MINIO_PREFIX}/{archive_month}.json.gz"
+    # ── 3. Upload to object storage ──
+    storage_path = f"{storage_bucket}/{STORAGE_PREFIX}/{archive_month}.json.gz"
     result = subprocess.run(
-        ["mc", "cp", str(tmp_gz), f"minio/{minio_path}"],
+        ["mc", "cp", str(tmp_gz), f"{storage_alias}/{storage_path}"],
         capture_output=True, text=True, timeout=60,
     )
 
     if result.returncode != 0:
         print(
-            "[rotate_logs] MinIO upload FAILED:",
+            "[rotate_logs] object storage upload FAILED:",
             sanitize_visible_message((result.stderr or "").strip()),
             file=sys.stderr,
         )
@@ -220,7 +224,7 @@ def main():
         conn.close()
         return 1
 
-    print(f"[rotate_logs] Uploaded to minio/{minio_path}")
+    print(f"[rotate_logs] Uploaded to {storage_alias}/{storage_path}")
 
     # ── 4. DELETE old rows from both tables + VACUUM ──
     deleted_steps = delete_batched(conn, "step_logs", step_ids)

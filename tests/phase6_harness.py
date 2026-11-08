@@ -17,7 +17,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from agent.config import DEFAULT_VAULT_PATH
+from agent.config import DEFAULT_VAULT_PATH, load_config
 
 # ── Configuration ───────────────────────────────────────────────────────────────
 KB_AGENT_DIR = Path("/root/kb-agent")
@@ -158,13 +158,15 @@ def setup() -> bool:
     # Create data directory
     (KB_AGENT_DIR / "data").mkdir(parents=True, exist_ok=True)
 
-    # Create MinIO bucket if it doesn't exist
-    mc_check = run_cmd("mc ls minio/kb-agent-archive/ 2>&1")
+    # Create object storage bucket if it doesn't exist
+    config = load_config()
+    archive_root = f"{config.storage_alias}/kb-agent-archive"
+    mc_check = run_cmd(f"mc ls {archive_root}/ 2>&1")
     if "does not exist" in mc_check[1] or mc_check[0] != 0:
-        run_cmd("mc mb minio/kb-agent-archive 2>&1")
-        log("  Created MinIO bucket kb-agent-archive")
+        run_cmd(f"mc mb {archive_root} 2>&1")
+        log("  Created object storage bucket kb-agent-archive")
     else:
-        log("  MinIO bucket exists")
+        log("  object storage bucket exists")
 
     # Check preconditions
     issues = []
@@ -295,10 +297,13 @@ def test_1_web_article():
         size_ok = note_size >= 5000
         checks.append(f"size5k={'yes' if size_ok else 'no'}")
 
-    # 5. MinIO archive
-    mc_result = run_cmd(f"mc ls minio/kb-agent-archive/articles/{slug}.md 2>&1")
-    minio_ok = mc_result[0] == 0 and "No such object" not in mc_result[1]
-    checks.append(f"minio={'OK' if minio_ok else 'MISSING'}")
+    # 5. object storage archive
+    config = load_config()
+    mc_result = run_cmd(
+        f"mc ls {config.storage_alias}/kb-agent-archive/articles/{slug}.md 2>&1"
+    )
+    storage_ok = mc_result[0] == 0 and "No such object" not in mc_result[1]
+    checks.append(f"storage={'OK' if storage_ok else 'MISSING'}")
 
     # 6. Git commit
     git_result = run_cmd(f"cd {VAULT_PATH} && git log --oneline -10 2>&1")
@@ -308,7 +313,7 @@ def test_1_web_article():
     all_pass = all([
         check1,  # note exists
         note_size >= 5000 if check1 else False,  # size
-        minio_ok,  # minio
+        storage_ok,  # storage
         git_ok,  # git
     ])
 
@@ -376,7 +381,7 @@ def test_2_youtube():
     expected = ["extract_metadata", "download_video", "extract_audio",
                 "diarize", "transcribe", "merge_and_identify",
                 "cleanup_temp", "synthesize_youtube", "quality_gate",
-                "minio_upload", "git_push"]
+                "storage_upload", "git_push"]
     for step in expected:
         status = step_statuses.get(step, "missing")
         checks.append(f"{step}={status}")

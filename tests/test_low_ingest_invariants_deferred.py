@@ -21,7 +21,7 @@ from agent.pipelines.threads import step_threads_merge
 from agent.pipelines.video_common import _artifact_stem, _slug_path, resolve_artifact_stem
 from agent.pipelines.youtube import (
     step_merge_and_identify,
-    step_minio_upload,
+    step_storage_upload,
 )
 from agent.quality import _resynthesize
 from agent.consumer import recover_orphan_tasks
@@ -343,10 +343,10 @@ def test_threads_merge_uses_artifact_stem_paths(config):
     assert (config.temp_dir / f"{task_id}_merged.json").is_file()
 
 
-@patch("agent.archival.upload_file_to_minio", side_effect=lambda src, dest, **kw: dest)
+@patch("agent.archival.upload_object", side_effect=lambda src, dest, _config, **kw: dest)
 @patch("agent.pipelines.video_common.subprocess.run")
-def test_mega_minio_upload_resolves_webm_video(mock_run, _mock_upload, config):
-    """Mega download normalizes to {stem}.webm; MinIO upload must not require .mp4 only."""
+def test_mega_storage_upload_resolves_webm_video(mock_run, _mock_upload, config):
+    """Mega download normalizes to {stem}.webm; object storage upload must not require .mp4 only."""
     slug = "mega_video_test"
     task = {
         "id": "test-mega-video-1",
@@ -369,7 +369,7 @@ def test_mega_minio_upload_resolves_webm_video(mock_run, _mock_upload, config):
         return MagicMock(returncode=0, stderr="")
 
     mock_run.side_effect = fake_ffmpeg
-    result = step_minio_upload(task, config)
+    result = step_storage_upload(task, config)
     assert "videos/" in result
     assert f"videos/{slug}.webm" in result
     assert f"videos/{slug}.mp3" in result

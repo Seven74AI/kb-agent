@@ -1,10 +1,9 @@
-"""Archival steps — MinIO upload and Git push.
+"""Archival steps — object storage upload and Git push.
 
 Deterministic shell commands for archiving source content and pushing notes.
 Used by all pipelines (web, threads, instagram, books, youtube).
 """
 
-import os
 import re
 import subprocess
 import threading
@@ -59,7 +58,7 @@ def append_note_tags(note_path: Path, tags) -> None:
 
 
 def write_source_files_block(note_path: Path, uploaded: list[str], config) -> None:
-    """Rewrite a note's ``source_files:`` frontmatter from uploaded MinIO object paths."""
+    """Rewrite a note's ``source_files:`` frontmatter from uploaded storage object paths."""
     if not uploaded:
         return
     note_path = Path(note_path)
@@ -98,23 +97,23 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
         write_vault_note(note_path, new)
 
 
-# ── MinIO helpers ─────────────────────────────────────────────────────────────
+# ── Storage helpers ───────────────────────────────────────────────────────────
 
 def _build_content_type_folder_maps() -> tuple[dict[str, str], dict[str, str]]:
-    """Single source of truth: content_type -> (minio folder, vault subfolder)."""
+    """Single source of truth: content_type -> (storage folder, vault subfolder)."""
     pairs: dict[str, tuple[str, str]] = {}
 
-    def _add(types: list[str], minio: str, vault: str) -> None:
+    def _add(types: list[str], storage: str, vault: str) -> None:
         for content_type in types:
-            pairs[content_type] = (minio, vault)
+            pairs[content_type] = (storage, vault)
 
     _add(
         [
             "web",
             "substack",
             "substack_text",
-            "substack_image",
             "substack_text_synthesize",
+            "substack_image",
             "substack_image_synthesize",
             "wikispooks",
         ],
@@ -166,24 +165,25 @@ def _build_content_type_folder_maps() -> tuple[dict[str, str], dict[str, str]]:
     pairs["instagram_reel"] = ("videos", "instagram")
     _add(["bunny_stream", "bunny_stream_synthesize"], "videos", "")
 
-    minio = {k: v[0] for k, v in pairs.items()}
+    storage_folders = {k: v[0] for k, v in pairs.items()}
     vault = {k: v[1] for k, v in pairs.items()}
-    return minio, vault
+    return storage_folders, vault
 
 
-CONTENT_TYPE_TO_MINIO_FOLDER, CONTENT_TYPE_TO_VAULT_FOLDER = _build_content_type_folder_maps()
+CONTENT_TYPE_TO_STORAGE_FOLDER, CONTENT_TYPE_TO_VAULT_FOLDER = _build_content_type_folder_maps()
 
 
-def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str:
-    """Upload a single file to MinIO using mc cp.
+def upload_object(source_path: Path, dest: str, config, timeout: int = 60) -> str:
+    """Upload a single file to object storage using mc cp.
 
     Args:
         source_path: Absolute path to the file to upload.
-        dest: MinIO destination path (e.g. "kb-agent-archive/articles/slug.md").
+        dest: Storage destination path (e.g. "kb-agent-archive/articles/slug.md").
+        config: Config dataclass (storage_alias for mc alias).
         timeout: Subprocess timeout in seconds.
 
     Returns:
-        The Tailscale-accessible MinIO URL for the uploaded file.
+        The object key (bucket stripped) for the uploaded file.
 
     Raises:
         StepError(RETRY): If the upload fails.
@@ -192,7 +192,7 @@ def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str
     if not source_path.exists():
         raise FileNotFoundError(f"Source file not found: {source_path}")
 
-    alias = os.environ.get("STORAGE_ALIAS", "minio")
+    alias = config.storage_alias
     result = subprocess.run(
         ["mc", "cp", str(source_path), f"{alias}/{dest}"],
         capture_output=True, text=True, timeout=timeout,
@@ -200,19 +200,19 @@ def upload_file_to_minio(source_path: Path, dest: str, timeout: int = 60) -> str
 
     if result.returncode != 0:
         raise StepError(
-            f"MinIO upload failed: {result.stderr.strip()[:200]}",
+            f"Storage upload failed: {result.stderr.strip()[:200]}",
             error_type=ErrorType.RETRY,
-            step_name="minio_upload",
+            step_name="storage_upload",
         )
 
     # Return the object KEY (bucket stripped) — notes reference keys, not URLs.
     return dest.split("/", 1)[1] if "/" in dest else dest
 
 
-# ── Step: MinIO Upload ────────────────────────────────────────────────────────
+# ── Step: Storage Upload ──────────────────────────────────────────────────────
 
-def step_minio_upload(task: dict, config, source_path: Path | None = None) -> str:
-    """Upload source content to MinIO for permanent archival.
+def step_storage_upload(task: dict, config, source_path: Path | None = None) -> str:
+    """Upload source content to object storage for permanent archival.
 
     Args:
         task: Task dict with id, slug, content_type, source_url.
@@ -221,10 +221,10 @@ def step_minio_upload(task: dict, config, source_path: Path | None = None) -> st
                      to ``{config.temp_dir}/{slug}_raw.md``.
 
     Returns:
-        MinIO object URL for the archived file.
+        Storage object key for the archived file.
 
     Raises:
-        StepError: If MinIO upload fails.
+        StepError: If storage upload fails.
         FileNotFoundError: If the source file does not exist.
     """
     slug = task.get("slug", task["id"][:8])
@@ -234,10 +234,10 @@ def step_minio_upload(task: dict, config, source_path: Path | None = None) -> st
     if source_path is None:
         source_path = Path(config.temp_dir) / f"{slug}_raw.md"
 
-    folder = CONTENT_TYPE_TO_MINIO_FOLDER.get(content_type, "articles")
-    dest = f"{config.minio_bucket}/{folder}/{slug}.md"
+    folder = CONTENT_TYPE_TO_STORAGE_FOLDER.get(content_type, "articles")
+    dest = f"{config.storage_bucket}/{folder}/{slug}.md"
 
-    return upload_file_to_minio(source_path, dest)
+    return upload_object(source_path, dest, config)
 
 
 # ── Step: Git Push ────────────────────────────────────────────────────────────
@@ -332,4 +332,3 @@ def step_git_push(
             error_type=ErrorType.RETRY,
             step_name="git_push",
         ) from e
-

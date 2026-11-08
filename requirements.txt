@@ -4,4 +4,4 @@ httpx>=0.27
 pyyaml>=6.0
 python-dotenv>=1.0
 # External tools (already installed on VPS, documented for reference):
-# yt-dlp, faster-whisper, pyannote-audio, ffmpeg, megadl, mc (MinIO client)
+# yt-dlp, faster-whisper, pyannote-audio, ffmpeg, megadl, mc (S3-compatible storage client)

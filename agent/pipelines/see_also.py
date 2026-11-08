@@ -44,7 +44,7 @@ def step_see_also(task: dict, config: Config) -> str:
     content_type = task.get("content_type", "web")
 
     folder = _get_folder(content_type)
-    # Match synthesis / MinIO / IG+Threads vault writes: filesystem-safe slug first.
+    # Match synthesis / object storage / IG+Threads vault writes: filesystem-safe slug first.
     safe_slug = slug_path(slug)
     note_path = config.vault_path / "Knowledge base" / folder / f"{safe_slug}.md"
     if not note_path.exists():

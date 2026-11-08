@@ -3,7 +3,7 @@
 import re
 from urllib.parse import urlparse, urlunparse
 
-# Single length cap for every slug-derived path segment (note filename, MinIO
+# Single length cap for every slug-derived path segment (note filename, object storage
 # object key, temp files). 128 chars: well under ext4's 255-byte component
 # limit, round power-of-two, enough headroom that long paths don't collide.
 SLUG_MAX_LEN = 128
@@ -79,7 +79,7 @@ def slugify(url: str, *, content_type: str | None = None) -> str:
     slug; batch staging must key files by ``ingest_queue.id``, not slug.
 
     Netloc credentials (``user:pass@``) are stripped before slug building so secrets
-    never land in ``tasks.slug``, MinIO keys, or vault note filenames.
+    never land in ``tasks.slug``, object storage keys, or vault note filenames.
     """
     slug = re.sub(r"^https?://", "", _url_for_slug_body(url))
     identity_suffix = ""
@@ -102,7 +102,7 @@ def batch_standalone_video_storage_slug(
     content_type: str,
     parent_slug: str | None = None,
 ) -> str:
-    """MinIO object prefix and synthesize dispatch slug for batch-collected standalone videos.
+    """object storage object prefix and synthesize dispatch slug for batch-collected standalone videos.
 
     Native Substack deferred URLs use ``post#<video_id>``; :func:`slugify` strips the
     fragment so siblings share one slug. Standalone batch rows (no ``parent_slug``) must

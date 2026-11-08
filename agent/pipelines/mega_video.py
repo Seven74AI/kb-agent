@@ -21,7 +21,7 @@ from agent.pipelines.youtube import (
     step_extract_audio,
     step_git_push,
     step_merge_and_identify,
-    step_minio_upload,
+    step_storage_upload,
     step_quality_gate,
     step_synthesize_youtube,
     step_transcribe,
@@ -207,7 +207,7 @@ register_pipeline("mega_video", [
     Step(name="cleanup_temp", fn=step_cleanup_temp, on_error="fail"),
     Step(name="synthesize_youtube", fn=step_synthesize_youtube, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])
