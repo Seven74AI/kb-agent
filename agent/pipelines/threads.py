@@ -26,6 +26,7 @@ from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
+from agent.redact import url_for_display
 from agent.llm import get_llm_client
 from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
@@ -693,6 +694,7 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
     source_url = task.get("source_url", "")
+    display_source_url = url_for_display(source_url)
 
     merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
     if not merged_path.exists():
@@ -775,7 +777,7 @@ OUTPUT FORMAT:
 - Start with YAML frontmatter:
   date: {date_str}
   source: threads.net (@{author})
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     video: videos/{safe_slug}.mp4
     transcript: transcripts/{safe_slug}.json
@@ -825,6 +827,7 @@ def step_threads_text_synthesize(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
     source_url = task.get("source_url", "")
+    display_source_url = url_for_display(source_url)
 
     raw_path = Path(config.temp_dir) / f"{safe_slug}_threads_raw.json"
     if not raw_path.exists():
@@ -876,7 +879,7 @@ OUTPUT FORMAT:
 - Start with YAML frontmatter:
   date: {date_str}
   source: threads.net (@{author})
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     raw: <filled by archival step>
   confidence: {confidence}

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -19,15 +20,14 @@ from agent.router import SIMPLE_PLATFORMS, route_jev
 
 logger = logging.getLogger(__name__)
 
-_threads_subtype_fetch_failed = False
 
+@dataclass(frozen=True)
+class ContentSubtypeDetection:
+    """Result of content subtype detection for submit routing."""
 
-def consume_threads_subtype_fetch_failed() -> bool:
-    """Return whether the last Threads subtype probe failed, then clear the flag."""
-    global _threads_subtype_fetch_failed
-    failed = _threads_subtype_fetch_failed
-    _threads_subtype_fetch_failed = False
-    return failed
+    subtype: str
+    threads_subtype_fetch_failed: bool = False
+
 
 # ── URL Pattern Matching ────────────────────────────────────────────────────
 
@@ -214,7 +214,14 @@ def _fetch_content(url: str, platform: str) -> str | None:
 
 
 def detect_content_subtype(url: str, platform: str) -> str:
-    """Determine the content subtype for platforms with variants.
+    """Determine the content subtype for platforms with variants."""
+    return detect_content_subtype_with_signals(url, platform).subtype
+
+
+def detect_content_subtype_with_signals(
+    url: str, platform: str,
+) -> ContentSubtypeDetection:
+    """Like :func:`detect_content_subtype`, plus per-request Threads fetch signals.
 
     Simple platforms (regex already unambiguous) return the platform directly.
     Ambiguous platforms (threads/substack/mega) and the 'web' fallback are
@@ -225,13 +232,12 @@ def detect_content_subtype(url: str, platform: str) -> str:
         platform: Detected platform from detect_platform().
 
     Returns:
-        Content subtype string. For most platforms, just returns the platform.
+        ContentSubtypeDetection with subtype string and optional Threads flags.
         - threads -> 'threads_text' or 'threads_video'
         - substack -> 'substack_text' / 'substack_video' / 'substack_image'
         - mega -> 'mega_video' / 'book' / 'book_batch'
     """
-    global _threads_subtype_fetch_failed
-    _threads_subtype_fetch_failed = False
+    threads_subtype_fetch_failed = False
 
     # A comment deep-link (?comment_id=) is a comment ON a post — capture the
     # comment + parent, not the parent alone (Instagram only).
@@ -241,10 +247,10 @@ def detect_content_subtype(url: str, platform: str) -> str:
         "instagram.com"
     )
     if "comment_id" in url and is_instagram:
-        return "instagram_comment"
+        return ContentSubtypeDetection("instagram_comment")
 
     if platform in SIMPLE_PLATFORMS:
-        return platform
+        return ContentSubtypeDetection(platform)
 
     # Ambiguous tail (threads/substack/mega/web) → Jev with fetched content.
     content = _fetch_content(url, platform)
@@ -255,12 +261,17 @@ def detect_content_subtype(url: str, platform: str) -> str:
     if platform == "threads":
         if content is not None:
             has_video = re.search(r'"video_versions"\s*:\s*\[', content) is not None
-            return "threads_video" if has_video else "threads_text"
-        return _detect_threads_subtype(url)
+            subtype = "threads_video" if has_video else "threads_text"
+            return ContentSubtypeDetection(subtype)
+        subtype, threads_subtype_fetch_failed = _detect_threads_subtype(url)
+        return ContentSubtypeDetection(
+            subtype, threads_subtype_fetch_failed=threads_subtype_fetch_failed,
+        )
 
     # Remaining ambiguous tail (substack/mega/web) → Jev with FULL content.
     try:
-        return route_jev(url, content)
+        subtype = route_jev(url, content)
+        return ContentSubtypeDetection(subtype)
     except Exception as exc:
         logger.warning(
             "Jev routing failed for %s (platform=%s) — falling back to legacy scraper: %s",
@@ -272,22 +283,22 @@ def detect_content_subtype(url: str, platform: str) -> str:
 
     # Legacy fallback (Jev unavailable or failed).
     if platform == "substack":
-        return _detect_substack_subtype(url)
-    elif platform == "mega":
-        return _detect_mega_subtype(url)
-    return platform
+        return ContentSubtypeDetection(_detect_substack_subtype(url))
+    if platform == "mega":
+        return ContentSubtypeDetection(_detect_mega_subtype(url))
+    return ContentSubtypeDetection(platform)
 
 
-def _detect_threads_subtype(url: str) -> str:
+def _detect_threads_subtype(url: str) -> tuple[str, bool]:
     """Check a Threads URL for video_versions in the page JSON.
 
     Uses cookies + Googlebot UA for reliable scraping.
-    Returns 'threads_video' if video_versions is present, 'threads_text' otherwise.
+    Returns (subtype, fetch_failed) where subtype is 'threads_video' or
+    'threads_text', and fetch_failed is True when the HTTP probe failed.
 
     Handles media_type=19 (Instagram video cross-post) — checks video_versions
     regardless of outer media type.
     """
-    global _threads_subtype_fetch_failed
     _assert_fetch_url_allowed(url)
     conf_path: Path | None = None
     try:
@@ -305,15 +316,14 @@ def _detect_threads_subtype(url: str) -> str:
             cmd, capture_output=True, text=True, timeout=20,
         )
         if re.search(r'"video_versions"\s*:\s*\[', result.stdout):
-            return "threads_video"
-        return "threads_text"
+            return "threads_video", False
+        return "threads_text", False
     except subprocess.TimeoutExpired:
         logger.warning(
             "Threads subtype fetch timed out for %s — defaulting to threads_text",
             _safe_url_for_log(url),
         )
-        _threads_subtype_fetch_failed = True
-        return "threads_text"
+        return "threads_text", True
     except Exception as exc:
         logger.warning(
             "Threads subtype fetch failed for %s: %s",
@@ -321,8 +331,7 @@ def _detect_threads_subtype(url: str) -> str:
             exc,
             exc_info=True,
         )
-        _threads_subtype_fetch_failed = True
-        return "threads_text"
+        return "threads_text", True
     finally:
         _unlink_curl_netscape_sidecar(conf_path)
 

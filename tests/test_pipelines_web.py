@@ -343,6 +343,13 @@ def test_build_synthesis_prompt_includes_source_domain(config):
     assert "stripe.com" in prompt
 
 
+def test_build_synthesis_prompt_uses_display_safe_source_url(config):
+    tokenized = "https://cdn.example.com/article?token=secret"
+    prompt = _build_synthesis_prompt(tokenized, "cdn_article", config)
+    assert "source_url: https://cdn.example.com/article" in prompt
+    assert "token=secret" not in prompt
+
+
 # ── step_synthesize_web tests ─────────────────────────────────────────────────
 
 def test_step_synthesize_web_single_pass(config, task_dict, sample_source):

@@ -8,9 +8,9 @@ from agent.core.slugify import slugify
 from agent.db import create_task, find_active_task, queue_ingest
 from agent.detection import (
     DedupCheckError,
-    consume_threads_subtype_fetch_failed,
     dedup_check,
     detect_content_subtype,
+    detect_content_subtype_with_signals,
     detect_platform,
     normalize_url,
     preflight_health,
@@ -62,7 +62,8 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
                 "platform": platform,
             }
 
-    subtype = detect_content_subtype(url, platform)
+    detection = detect_content_subtype_with_signals(url, platform)
+    subtype = detection.subtype
     if subtype == "unknown":
         return {
             "status": "error",
@@ -83,7 +84,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
         }
 
     ok, reason = preflight_health(platform)
-    if platform == "threads" and consume_threads_subtype_fetch_failed():
+    if platform == "threads" and detection.threads_subtype_fetch_failed:
         ok = False
         reason = reason or "Threads subtype fetch failed — retry when cookies or network recover"
     slug = slugify(url, content_type=subtype)

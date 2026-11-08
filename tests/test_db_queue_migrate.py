@@ -3087,3 +3087,60 @@ def test_embedded_videos_empty_transcript_sets_failed(tmp_path, monkeypatch):
     row = conn.execute("SELECT status, error FROM ingest_queue WHERE id=?", (q["id"],)).fetchone()
     assert row["status"] == "failed"
     assert row["error"] == "empty transcript"
+
+
+def test_lookup_parent_article_metadata_tie_breaks_on_id(tmp_path):
+    from agent.db import _lookup_parent_article_metadata
+
+    conn = init_db(tmp_path / "agent.db", AGENT_SCHEMA)
+    slug = "dup_slug_tiebreak"
+    older_id = create_task(
+        conn, "https://example.com/older", "web", slug, ["download"],
+    )
+    newer_id = create_task(
+        conn, "https://example.com/newer", "web", slug, ["download"],
+    )
+    ts = "2024-06-01 12:00:00"
+    conn.execute(
+        "UPDATE tasks SET created_at = ? WHERE id IN (?, ?)",
+        (ts, older_id, newer_id),
+    )
+    conn.execute("UPDATE tasks SET id = ? WHERE id = ?", ("id-aaa", older_id))
+    conn.execute("UPDATE tasks SET id = ? WHERE id = ?", ("id-bbb", newer_id))
+    conn.commit()
+
+    source_url, content_type = _lookup_parent_article_metadata(conn, slug)
+    assert source_url == "https://example.com/older"
+    assert content_type == "web"
+
+
+def test_bootstrap_parent_media_deferral_manifest_tie_breaks_on_id(tmp_path):
+    from agent.db import (
+        bootstrap_parent_media_deferral_from_manifest,
+        get_parent_media_deferral,
+    )
+
+    conn = init_db(tmp_path / "agent.db", AGENT_SCHEMA)
+    slug = "manifest_tiebreak_parent"
+    older_id = create_task(
+        conn, "https://example.com/first", "substack_text", slug, ["synthesize"],
+    )
+    newer_id = create_task(
+        conn, "https://example.com/second", "substack_text", slug, ["synthesize"],
+    )
+    ts = "2024-06-01 12:00:00"
+    conn.execute(
+        "UPDATE tasks SET created_at = ? WHERE id IN (?, ?)",
+        (ts, older_id, newer_id),
+    )
+    conn.execute("UPDATE tasks SET id = ? WHERE id = ?", ("man-aaa", older_id))
+    conn.execute("UPDATE tasks SET id = ? WHERE id = ?", ("man-bbb", newer_id))
+    conn.commit()
+
+    manifest = tmp_path / f"{slug}_media.json"
+    manifest.write_text(json.dumps({"total": 2}), encoding="utf-8")
+    bootstrap_parent_media_deferral_from_manifest(conn, slug, tmp_path)
+    row = get_parent_media_deferral(conn, slug)
+    assert row is not None
+    assert row["source_url"] == "https://example.com/first"
+    assert row["content_type"] == "substack_text"

@@ -9,7 +9,11 @@ import pytest
 
 from agent.config import Config
 from agent.core.submit import plan_submission
-from agent.detection import _detect_threads_subtype, _fetch_content
+from agent.detection import (
+    _detect_threads_subtype,
+    _fetch_content,
+    detect_content_subtype_with_signals,
+)
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines.instagram import step_ig_carousel_extract
 from agent.pipelines.video_common import _artifact_stem, step_fetch_transcript
@@ -47,7 +51,34 @@ def test_detect_threads_subtype_defaults_text_on_fetch_failure(monkeypatch, capl
 
     monkeypatch.setattr("agent.detection.subprocess.run", boom)
     caplog.set_level("WARNING")
-    assert _detect_threads_subtype("https://threads.net/@u/post/1") == "threads_text"
+    subtype, fetch_failed = _detect_threads_subtype("https://threads.net/@u/post/1")
+    assert subtype == "threads_text"
+    assert fetch_failed is True
+
+
+def test_threads_subtype_fetch_failed_isolated_per_detection_call(monkeypatch, tmp_path):
+    """One request's Threads fetch failure must not affect another request's signal."""
+    cookie_dir = tmp_path / "cookies"
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    (cookie_dir / "threads_cookies.txt").write_text("x", encoding="utf-8")
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=cookie_dir)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+    monkeypatch.setattr("agent.detection._fetch_content", lambda url, p: None)
+
+    call_n = {"n": 0}
+
+    def alternating_subprocess(cmd, **kwargs):
+        call_n["n"] += 1
+        if call_n["n"] == 1:
+            raise OSError("down")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", alternating_subprocess)
+    url = "https://threads.net/@user/post/abc"
+    failed = detect_content_subtype_with_signals(url, "threads")
+    ok = detect_content_subtype_with_signals(url, "threads")
+    assert failed.threads_subtype_fetch_failed is True
+    assert ok.threads_subtype_fetch_failed is False
 
 
 def test_plan_submission_threads_fetch_failure_paused_not_dropped(core_config, monkeypatch, tmp_path):

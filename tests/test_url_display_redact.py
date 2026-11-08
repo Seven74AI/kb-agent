@@ -4,15 +4,36 @@ import sqlite3
 
 import pytest
 
+from agent.config import Config
+from agent.core.bulk import ingest_playlist
 from agent.core.redact import url_for_display
+from agent.redact import scrub_vault_note_content
 from agent.core.status import get_task, list_tasks
 from agent.core.submit import plan_submission
+from agent.core.watch_source import get_watch_source, poll_watch_source, register_watch_source
 from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest
 from agent.webhook import app
 
 MEGA_WITH_KEY = "https://mega.nz/file/abc123#decryptionkey"
 TOKENIZED = "https://cdn.example.com/video.mp4?token=secret&expires=999"
 PLAIN = "https://example.com/article/path"
+
+
+@pytest.fixture
+def agent_conn(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def core_config(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Knowledge base" / "articles").mkdir(parents=True)
+    return Config(kb_agent_dir=tmp_path, vault_path=vault)
 
 
 def test_url_for_display_strips_mega_fragment():
@@ -28,6 +49,20 @@ def test_url_for_display_strips_query_params():
 
 def test_url_for_display_preserves_plain_path():
     assert url_for_display(PLAIN) == PLAIN
+
+
+def test_scrub_vault_note_content_redacts_frontmatter_only():
+    body = f"""---
+source_url: {TOKENIZED}
+tags: [web]
+---
+
+source_url: {TOKENIZED}
+"""
+    scrubbed = scrub_vault_note_content(body)
+    frontmatter = scrubbed.split("---")[1]
+    assert "token=secret" not in frontmatter
+    assert TOKENIZED in scrubbed.split("---", 2)[2]
 
 
 def test_status_and_list_tasks_redact_http_url(tmp_path):
@@ -99,6 +134,87 @@ def test_dashboard_ingest_and_task_urls_redacted(submit_client, monkeypatch, tmp
     assert "token=secret" not in html
     assert "https://mega.nz/file/abc123" in html
     assert "https://cdn.example.com/video.mp4" in html
+
+
+PLAYLIST_WITH_LIST = "https://youtube.com/playlist?list=PLsecret&session=abc"
+WATCH_PAGE = "https://example.com/listing?tracker=1"
+WATCH_TEMPLATE = "https://cdn.example.com/watch/{item}?token=secret"
+
+
+def test_ingest_playlist_redacts_playlist_url_in_ok(monkeypatch, core_config, agent_conn):
+    monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
+    monkeypatch.setattr(
+        "agent.core.bulk.expand_youtube_playlist",
+        lambda _url: ["https://youtube.com/watch?v=1"],
+    )
+    result = ingest_playlist(PLAYLIST_WITH_LIST, core_config, agent_conn)
+    assert result["status"] == "ok"
+    assert result["playlist_url"] == "https://youtube.com/playlist"
+    assert "?" not in result["playlist_url"]
+    assert "list=PLsecret" not in result["playlist_url"]
+
+
+def test_ingest_playlist_redacts_playlist_url_when_empty(monkeypatch, core_config, agent_conn):
+    monkeypatch.setattr(
+        "agent.core.bulk.expand_youtube_playlist",
+        lambda _url: [],
+    )
+    result = ingest_playlist(PLAYLIST_WITH_LIST, core_config, agent_conn)
+    assert result["status"] == "error"
+    assert result["playlist_url"] == "https://youtube.com/playlist"
+    assert "?" not in result["playlist_url"]
+
+
+def test_watch_source_register_redacts_urls_in_response(agent_conn):
+    row = register_watch_source(
+        agent_conn,
+        WATCH_PAGE,
+        item_pattern=r"id-(\d+)",
+        item_url_template=WATCH_TEMPLATE,
+        cadence_seconds=3600,
+        fetch_html=None,
+        baseline=False,
+    )
+    assert row["page_url"] == "https://example.com/listing"
+    assert row["item_url_template"] == "https://cdn.example.com/watch/{item}"
+    assert "?" not in row["page_url"]
+    assert "token" not in row["item_url_template"]
+
+    stored = get_watch_source(agent_conn, WATCH_PAGE)
+    assert stored is not None
+    assert stored["page_url"] == WATCH_PAGE
+    assert stored["item_url_template"] == WATCH_TEMPLATE
+
+
+def test_poll_watch_source_redacts_page_url_in_outcome(core_config, agent_conn, monkeypatch):
+    page = "https://example.com/poll-me?sig=hidden"
+    register_watch_source(
+        agent_conn,
+        page,
+        item_pattern=r"x",
+        item_url_template="https://example.com/i/{item}",
+        cadence_seconds=1,
+        fetch_html=lambda _u: "",
+        baseline=False,
+    )
+
+    def _noop_submit(_url, _cfg, _conn):
+        return {"status": "ok"}
+
+    monkeypatch.setattr(
+        "agent.core.watch_source.extract_items_available",
+        lambda _html, _pat, now=None: frozenset(),
+    )
+    result = poll_watch_source(
+        agent_conn,
+        page,
+        core_config,
+        fetch_html=lambda _u: "",
+        submit_fn=_noop_submit,
+        force=True,
+    )
+    assert result["page_url"] == "https://example.com/poll-me"
+    assert "?" not in result["page_url"]
 
 
 def test_submit_json_redacts_url_on_error(submit_client, monkeypatch):

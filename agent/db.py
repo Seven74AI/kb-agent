@@ -481,7 +481,7 @@ def _lookup_parent_article_metadata(
     parent_row = conn.execute(
         "SELECT source_url, content_type FROM tasks "
         "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        "ORDER BY created_at LIMIT 1",
+        "ORDER BY created_at ASC, id ASC LIMIT 1",
         (parent_slug,),
     ).fetchone()
     source_url = None
@@ -493,7 +493,7 @@ def _lookup_parent_article_metadata(
         syn_row = conn.execute(
             "SELECT source_url, content_type FROM tasks "
             "WHERE slug = ? AND content_type GLOB '*_synthesize' "
-            "ORDER BY created_at LIMIT 1",
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
             (parent_slug,),
         ).fetchone()
         if syn_row:
@@ -1402,7 +1402,7 @@ def bootstrap_parent_media_deferral_from_manifest(
         parent_row = conn.execute(
             "SELECT source_url, content_type FROM tasks "
             "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-            "ORDER BY created_at LIMIT 1",
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
             (parent_slug,),
         ).fetchone()
         if parent_row:

@@ -8,8 +8,6 @@ from agent.redact import url_for_display
 from agent.db import get_all_tasks, get_last_log_line, get_task_steps
 from agent.notify import sanitize_visible_message
 
-_ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
-
 
 def redact_source_url_for_display(source_url: str) -> str:
     """Dashboard/MCP-safe source_url (delegates to :func:`url_for_display`)."""
@@ -21,7 +19,7 @@ def source_url_href(source_url: str) -> str | None:
     if not source_url:
         return None
     parsed = urlparse(source_url.strip())
-    if parsed.scheme in _ALLOWED_SOURCE_URL_SCHEMES:
+    if parsed.scheme in ("http", "https"):
         return url_for_display(source_url)
     return None
 

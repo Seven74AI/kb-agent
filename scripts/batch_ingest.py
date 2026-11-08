@@ -54,6 +54,7 @@ from agent.db import (  # noqa: E402
 )
 from agent.notify import sanitize_visible_message  # noqa: E402
 from agent.core.batch_lock import acquire, release  # noqa: E402
+from agent.core.slugify import batch_standalone_video_storage_slug  # noqa: E402
 from agent.core.submit import (  # noqa: E402
     dispatch_synthesize,
     plan_submission,
@@ -262,9 +263,21 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                 causes.append(f"{q['slug']}: no merged transcript")
                 print(f"  [warn] {q['slug']}: no merged transcript; marked failed")
                 continue
+            storage_slug = batch_standalone_video_storage_slug(
+                ingest_id=q["id"],
+                slug=q["slug"],
+                content_type=q["content_type"],
+                parent_slug=q.get("parent_slug"),
+            )
             try:
-                upload_file_to_minio(vdest, f"{config.minio_bucket}/videos/{q['slug']}{vdest.suffix.lower()}")
-                upload_file_to_minio(merged, f"{config.minio_bucket}/transcripts/{q['slug']}.json")
+                upload_file_to_minio(
+                    vdest,
+                    f"{config.minio_bucket}/videos/{storage_slug}{vdest.suffix.lower()}",
+                )
+                upload_file_to_minio(
+                    merged,
+                    f"{config.minio_bucket}/transcripts/{storage_slug}.json",
+                )
             except Exception as exc:  # noqa: BLE001
                 update_ingest_status(conn, q["id"], "failed", error=f"upload failed: {exc}")
                 failed += 1
@@ -274,7 +287,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
             update_ingest_status(conn, q["id"], "dispatching")
             rr = dispatch_synthesize(
                 q["url"], config, conn,
-                content_type=f"{q['content_type']}_synthesize", slug=q["slug"],
+                content_type=f"{q['content_type']}_synthesize", slug=storage_slug,
                 tags=q.get("tags"),
             )
             if rr.get("status") == "error":

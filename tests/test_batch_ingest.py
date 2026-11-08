@@ -989,6 +989,85 @@ class TestVideoStagingUsesQueueId:
             (i,),
         ).fetchone()["status"] == "dispatched" for i in (id_a, id_b))
 
+    def test_two_standalone_native_videos_same_slug_distinct_minio_and_dispatch_keys(
+        self, config, conn, monkeypatch, tmp_path,
+    ):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = self._shared_substack_post_slug()
+        post = "https://author.substack.com/p/my-post"
+        id_a = queue_ingest(
+            conn,
+            f"{post}#native-a",
+            "substack_video",
+            slug,
+            media_kind="video",
+        )[0]
+        id_b = queue_ingest(
+            conn,
+            f"{post}#native-b",
+            "substack_video",
+            slug,
+            media_kind="video",
+        )[0]
+        q_a = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_a,)).fetchone())
+        q_b = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (id_b,)).fetchone())
+        assert q_a["slug"] == q_b["slug"]
+        assert not q_a.get("parent_slug")
+
+        v_a = tmp_path / "a.mp4"
+        v_b = tmp_path / "b.mp4"
+        v_a.write_bytes(b"a" * 200)
+        v_b.write_bytes(b"b" * 200)
+
+        def fake_download(q, _cfg):
+            return (v_a if q["id"] == id_a else v_b, None)
+
+        monkeypatch.setattr(batch_ingest, "_download_video", fake_download)
+
+        upload_keys: list[str] = []
+
+        def track_upload(_src, dest_key):
+            upload_keys.append(dest_key)
+
+        monkeypatch.setattr(batch_ingest, "upload_file_to_minio", track_upload)
+
+        dispatch_slugs: list[str] = []
+
+        def fake_dispatch(*_a, **kwargs):
+            dispatch_slugs.append(kwargs.get("slug"))
+            return {"status": "pending", "task_id": f"task-{kwargs.get('slug')}"}
+
+        monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+
+        def fake_run(cmd, **kw):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for ingest_id in (id_a, id_b):
+                    (out_dir / f"{ingest_id}.json").write_text(
+                        json.dumps({"segments": [{"text": f"tx-{ingest_id}"}]}),
+                        encoding="utf-8",
+                    )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        failed, dispatched, _ = batch_ingest._process_videos([q_a, q_b], config, conn, 79)
+        assert failed == 0
+        assert dispatched == 2
+        assert len(upload_keys) == 4
+        joined = " ".join(upload_keys)
+        assert f"videos/{id_a}.mp4" in joined
+        assert f"videos/{id_b}.mp4" in joined
+        assert f"transcripts/{id_a}.json" in joined
+        assert f"transcripts/{id_b}.json" in joined
+        assert f"videos/{slug}." not in joined
+        assert f"transcripts/{slug}.json" not in joined
+        assert dispatch_slugs == [id_a, id_b]
+
     def test_same_youtube_embed_two_parents_distinct_staged_files(
         self, config, conn, monkeypatch, tmp_path,
     ):

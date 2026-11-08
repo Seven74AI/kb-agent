@@ -27,6 +27,7 @@ from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
+from agent.redact import url_for_display
 from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -361,6 +362,7 @@ def step_ig_reel_synthesize(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
     source_url = task.get("source_url", "")
+    display_source_url = url_for_display(source_url)
 
     merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
     if not merged_path.exists():
@@ -399,7 +401,7 @@ TASK: Write a note that:
 4. Describes what can be observed from the transcript (if any words were detected)
 
 OUTPUT FORMAT:
-- YAML frontmatter: date, source: instagram.com, source_url, minio placeholder,
+- YAML frontmatter: date, source: instagram.com, source_url: {display_source_url}, minio placeholder,
   confidence: low (music-only reel), tags: [instagram, reel, music]
 - Note sections: Title, Summary, Post Description (verbatim caption), Caption Analysis,
   Transcript Notes, Reliability (note music-only limitation)"""
@@ -430,7 +432,7 @@ OUTPUT FORMAT:
 - Start with YAML frontmatter:
   date: {date_str}
   source: instagram.com
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     video: videos/{safe_slug}.mp4
     transcript: transcripts/{safe_slug}.json
@@ -693,6 +695,7 @@ def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
     source_url = task.get("source_url", "")
+    display_source_url = url_for_display(source_url)
 
     # Load carousel data
     slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
@@ -752,7 +755,7 @@ OUTPUT FORMAT:
 - Start with YAML frontmatter:
   date: {date_str}
   source: instagram.com (@{uploader})
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     raw: <filled by archival step>
   confidence: plausible
@@ -905,6 +908,11 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
             removed.append(path.name)
         except OSError:
             pass
+
+    ytdlp_xdg = Path(config.temp_dir) / "ytdlp_xdg"
+    if ytdlp_xdg.exists():
+        shutil.rmtree(ytdlp_xdg, ignore_errors=True)
+        removed.append("ytdlp_xdg")
 
     return f"Cleaned up: {', '.join(removed)}" if removed else "Nothing to clean up"
 
@@ -1157,6 +1165,7 @@ def step_ig_comment_synthesize(task: dict, config: Config) -> str:
     slug = task.get("slug", task["id"][:8])
     safe_slug = _slug_path(slug)
     source_url = task.get("source_url", "")
+    display_source_url = url_for_display(source_url)
 
     raw_path = Path(config.temp_dir) / f"{safe_slug}_ig_comment.json"
     if not raw_path.exists():
@@ -1181,7 +1190,7 @@ SECTIONS:
 1. YAML frontmatter:
    date: {date_str}
    source: instagram comment (@{comment_author})
-   source_url: {source_url}
+   source_url: {display_source_url}
    source_files:
      raw: <filled by archival step>
    confidence: plausible
@@ -1249,6 +1258,7 @@ register_pipeline("instagram_post", [
     Step(name="ig_carousel_synthesize", fn=step_ig_carousel_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
     Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])
