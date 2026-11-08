@@ -18,6 +18,9 @@ _SCRIPTS_RAW_WRITE_ALLOWLIST = frozenset(
     }
 )
 
+# machine_local operator-secret cookie upload, byte-exact by design
+_AGENT_WRITE_BYTES_ALLOWLIST = frozenset({"agent/webhook.py"})
+
 
 def _py_files_under(*roots: tuple[str, ...]) -> list[Path]:
     out: list[Path] = []
@@ -57,12 +60,51 @@ def _is_json_dump_to_disk(node: ast.Call) -> bool:
     return False
 
 
-def _collect_raw_disk_writers(tree: ast.AST, rel: str) -> list[str]:
+def _is_json_dumps_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "dumps"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "json"
+    )
+
+
+def _expr_contains_json_dumps(expr: ast.AST) -> bool:
+    for child in ast.walk(expr):
+        if _is_json_dumps_call(child):
+            return True
+    return False
+
+
+def _is_json_dumps_write(node: ast.Call) -> bool:
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr not in ("write", "writelines"):
+        return False
+    if not node.args:
+        return False
+    return _expr_contains_json_dumps(node.args[0])
+
+
+def _is_path_write_bytes(node: ast.Call) -> bool:
+    if not (isinstance(node.func, ast.Attribute) and node.func.attr == "write_bytes"):
+        return False
+    return isinstance(node.func.value, (ast.Name, ast.Attribute))
+
+
+def _collect_raw_disk_writers(
+    tree: ast.AST,
+    rel: str,
+    *,
+    allow_write_bytes: bool = False,
+) -> list[str]:
     violations: list[str] = []
 
     class _Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
             self._func_stack: list[str] = []
+            self._allow_write_bytes = allow_write_bytes
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             self._func_stack.append(node.name)
@@ -80,6 +122,10 @@ def _collect_raw_disk_writers(tree: ast.AST, rel: str) -> list[str]:
                 violations.append(f"{rel}:{func} -> write_text")
             elif _is_json_dump_to_disk(node):
                 violations.append(f"{rel}:{func} -> json.dump")
+            elif _is_json_dumps_write(node):
+                violations.append(f"{rel}:{func} -> json.dumps+write")
+            elif _is_path_write_bytes(node) and not self._allow_write_bytes:
+                violations.append(f"{rel}:{func} -> write_bytes")
             self.generic_visit(node)
 
     _Visitor().visit(tree)
@@ -93,7 +139,10 @@ def test_inventory_no_raw_disk_writers_outside_persist_and_allowlist():
         if rel == "agent/persist.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        errors.extend(_collect_raw_disk_writers(tree, rel))
+        allow_wb = rel in _AGENT_WRITE_BYTES_ALLOWLIST
+        errors.extend(
+            _collect_raw_disk_writers(tree, rel, allow_write_bytes=allow_wb),
+        )
     for path in _inventory_script_paths():
         rel = str(path.relative_to(_REPO)).replace("\\", "/")
         if rel in _SCRIPTS_RAW_WRITE_ALLOWLIST:
@@ -119,6 +168,35 @@ def test_collect_raw_disk_writers_flags_json_dump_to_open_handle():
     tree = ast.parse(src)
     hits = _collect_raw_disk_writers(tree, "example.py")
     assert hits == ["example.py:main -> json.dump"]
+
+
+def test_collect_raw_disk_writers_flags_json_dumps_write():
+    src = (
+        "import json\n"
+        "def main():\n"
+        "    f.write(json.dumps(safe, ensure_ascii=False) + '\\n')\n"
+    )
+    tree = ast.parse(src)
+    hits = _collect_raw_disk_writers(tree, "example.py")
+    assert hits == ["example.py:main -> json.dumps+write"]
+
+
+def test_collect_raw_disk_writers_flags_path_write_bytes():
+    src = "def upload():\n    dest_path.write_bytes(payload)\n"
+    tree = ast.parse(src)
+    hits = _collect_raw_disk_writers(tree, "scripts/evil.py")
+    assert hits == ["scripts/evil.py:upload -> write_bytes"]
+
+
+def test_collect_raw_disk_writers_ignores_allowlisted_write_bytes():
+    src = "def upload_cookies():\n    dest_path.write_bytes(payload)\n"
+    tree = ast.parse(src)
+    hits = _collect_raw_disk_writers(
+        tree,
+        "agent/webhook.py",
+        allow_write_bytes=True,
+    )
+    assert hits == []
 
 
 def _calls_name(node: ast.AST, name: str) -> bool:
