@@ -22,7 +22,8 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
-from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
+from agent.core.note import write_vault_note
+from agent.redact import redact_http_urls_in_text
 from agent.db import init_db, LOGS_SCHEMA
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
@@ -781,7 +782,7 @@ def step_extract_epub(task: dict, config: Config) -> str:
         with open(output_path, "w", encoding="utf-8") as f:
             for idx, chars, text in all_text:
                 f.write(f"\n\n=== CHAPTER {idx} ===\n\n")
-                f.write(text)
+                f.write(redact_http_urls_in_text(text))
 
         total = sum(c for _, c, _ in all_text)
 
@@ -863,7 +864,7 @@ def step_extract_pdf(task: dict, config: Config) -> str:
 
         output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(full_text))
+            f.write(redact_http_urls_in_text("\n\n".join(full_text)))
 
         total_chars = sum(len(t) for t in full_text)
 
@@ -905,7 +906,7 @@ def _write_pdf_full_text(
 
     output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(full_text))
+        f.write(redact_http_urls_in_text("\n\n".join(full_text)))
 
     total_chars = sum(len(t) for t in full_text)
     payload = {
@@ -1011,7 +1012,7 @@ def step_extract_pdf_scanned(task: dict, config: Config) -> str:
 
     combined = "\n\n".join(p.read_text(encoding="utf-8", errors="replace") for p in md_files)
     output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
-    output_path.write_text(combined, encoding="utf-8")
+    output_path.write_text(redact_http_urls_in_text(combined), encoding="utf-8")
 
     task["_book_title"] = pdf_path.stem
     task["_book_author"] = "Unknown"
@@ -1183,12 +1184,7 @@ tags: [book, book-summary]
 **Author:** {author}
 
 """
-    note_path.write_text(
-        scrub_vault_note_content(
-            frontmatter + redact_http_urls_in_text(note_content),
-        ),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, frontmatter + note_content)
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -1542,7 +1538,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
             )
         else:
             content = content[:3] + "\n" + block + content[3:]
-        note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
+        write_vault_note(note_path, content)
 
     return json.dumps({
         "uploaded": uploaded,

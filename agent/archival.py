@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from agent.config import RETIRED_AB_VAULT_PATH
+from agent.redact import write_vault_note
 from agent.db import normalize_tags
 from agent.exceptions import ErrorType, StepError
 
@@ -48,13 +49,13 @@ def append_note_tags(note_path: Path, tags) -> None:
 
     new_text = re.sub(r"^([ \t]*)tags:\s*\[([^\]]*)\]", _merge, text, count=1, flags=re.MULTILINE)
     if new_text != text:
-        note_path.write_text(new_text, encoding="utf-8")
+        write_vault_note(note_path, new_text)
         return
 
     # No tags: line — insert one right after the opening frontmatter fence.
     new_text = re.sub(r"(^---\s*\n)", r"\1" + f"tags: [{', '.join(tags)}]\n", text, count=1)
     if new_text != text:
-        note_path.write_text(new_text, encoding="utf-8")
+        write_vault_note(note_path, new_text)
 
 
 def write_source_files_block(note_path: Path, uploaded: list[str], config) -> None:
@@ -86,7 +87,7 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
         block, content, count=1, flags=re.DOTALL,
     )
     if new != content:
-        note_path.write_text(new, encoding="utf-8")
+        write_vault_note(note_path, new)
         return
 
     # No source_files: line — insert after source_url: (or the opening fence).
@@ -94,7 +95,7 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
     if new == content:
         new = re.sub(r"(^---\s*\n)", r"\1" + block + "\n", content, count=1)
     if new != content:
-        note_path.write_text(new, encoding="utf-8")
+        write_vault_note(note_path, new)
 
 
 # ── MinIO helpers ─────────────────────────────────────────────────────────────

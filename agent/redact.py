@@ -5,8 +5,11 @@ Leaf module: importable without loading :mod:`agent.core` package exports.
 
 from __future__ import annotations
 
+import copy
+import json
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 from agent.notify import redact_credential_shapes
@@ -79,6 +82,18 @@ def _yaml_scalar_unquote(value: str) -> str:
     return value
 
 
+def prepare_vault_note_for_write(content: str) -> str:
+    """Apply body URL redaction and frontmatter scrub before persisting a vault note."""
+    return scrub_vault_note_content(redact_http_urls_in_text(content))
+
+
+def write_vault_note(note_path: Path, content: str) -> None:
+    """Write a vault note with outbound URL redaction applied to body and frontmatter."""
+    note_path = Path(note_path)
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(prepare_vault_note_for_write(content), encoding="utf-8")
+
+
 def scrub_vault_note_content(content: str) -> str:
     """Return note markdown with display-safe ``source_url`` in YAML frontmatter."""
     if not content.startswith("---"):
@@ -98,6 +113,55 @@ def _redact_frontmatter_source_url_block(text: str) -> str:
         return f"{match.group('indent')}source_url: {safe}"
 
     return _FRONTMATTER_SOURCE_URL.sub(repl, text, count=1)
+
+
+def _redact_segment_text_fields(segments: Any) -> None:
+    if not isinstance(segments, list):
+        return
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get("text")
+        if isinstance(text, str):
+            seg["text"] = redact_http_urls_in_text(text)
+
+
+def redact_merged_transcript_payload(data: dict) -> dict:
+    """Return a copy of merged transcript JSON with segment ``text`` URLs redacted."""
+    out = copy.deepcopy(data)
+    _redact_segment_text_fields(out.get("segments"))
+    nested = out.get("transcript")
+    if isinstance(nested, dict):
+        _redact_segment_text_fields(nested.get("segments"))
+    return out
+
+
+def write_merged_transcript_json(
+    path: Path,
+    data: dict,
+    *,
+    indent: int | None = 2,
+) -> None:
+    """Persist merged transcript JSON with segment text redacted for archival upload."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    redacted = redact_merged_transcript_payload(data)
+    payload = json.dumps(redacted, indent=indent, ensure_ascii=False)
+    path.write_text(payload, encoding="utf-8")
+
+
+def ensure_merged_transcript_file_redacted(path: Path) -> None:
+    """Rewrite an on-disk merged transcript so segment text is redacted before upload."""
+    path = Path(path)
+    if not path.is_file():
+        return
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+    except (OSError, ValueError):
+        return
+    compact = raw.lstrip().startswith("{") and "\n" not in raw.strip()
+    write_merged_transcript_json(path, parsed, indent=None if compact else 2)
 
 
 def redact_outward_url_field(result: dict) -> dict:

@@ -8,6 +8,7 @@ import pytest
 from agent.config import Config
 from agent.core.bulk import ingest_playlist
 from agent.core.redact import url_for_display
+from agent.core.note import write_vault_note
 from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
 from agent.core.status import get_task, list_tasks
 from agent.core.submit import plan_submission
@@ -58,6 +59,20 @@ def test_redact_http_urls_in_text_strips_query():
     redacted = redact_http_urls_in_text(text)
     assert "token=secret" not in redacted
     assert "https://cdn.example.com/video.mp4" in redacted
+
+
+def test_prepare_vault_note_for_write_redacts_body_and_frontmatter(tmp_path):
+    note_path = tmp_path / "note.md"
+    body = f"""---
+source_url: {TOKENIZED}
+---
+
+See {TOKENIZED} in the body.
+"""
+    write_vault_note(note_path, body)
+    written = note_path.read_text(encoding="utf-8")
+    assert "token=secret" not in written
+    assert "https://cdn.example.com/video.mp4" in written
 
 
 def test_scrub_vault_note_content_redacts_frontmatter_only():

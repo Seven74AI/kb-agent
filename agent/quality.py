@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from agent.notify import redact_credential_shapes
-from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
+from agent.core.note import write_vault_note
 
 logger = logging.getLogger(__name__)
 
@@ -340,10 +340,7 @@ def _resynthesize(note_path: Path, config, llm, failures: list[str]) -> bool:
 
     new_note = response.content.strip()
     if new_note and not new_note.startswith("QUALITY GATE FAILED"):
-        note_path.write_text(
-            scrub_vault_note_content(redact_http_urls_in_text(new_note)),
-            encoding="utf-8",
-        )
+        write_vault_note(note_path, new_note)
         return True
     return False
 

@@ -21,7 +21,13 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
-from agent.redact import redact_http_urls_in_text, url_for_display
+from agent.redact import (
+    ensure_merged_transcript_file_redacted,
+    redact_http_urls_in_text,
+    url_for_display,
+    write_merged_transcript_json,
+    write_vault_note,
+)
 from agent.llm import get_llm_client
 from agent.quality import quality_gate_retry_loop, quality_gate_threads_video, quality_gate_youtube
 from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
@@ -631,6 +637,7 @@ def upload_video_artifacts(slug: str, config: Config, video_path: Path) -> list[
 
     merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
     if merged_path.exists():
+        ensure_merged_transcript_file_redacted(merged_path)
         upload_file_to_minio(merged_path, f"{bucket}/transcripts/{slug}.json", timeout=120)
         uploaded.append(f"transcripts/{slug}.json")
 
@@ -651,6 +658,7 @@ def upload_video_source(slug: str, config: Config, video_path: Path,
 
     merged = Path(config.temp_dir) / f"{slug}_merged.json"
     if merged.exists():
+        ensure_merged_transcript_file_redacted(merged)
         upload_file_to_minio(merged, f"{bucket}/transcripts/{slug}.json", timeout=120)
         uploaded.append(f"transcripts/{slug}.json")
 
@@ -672,7 +680,7 @@ def upload_note_archive(slug: str, config: Config, note_path: Path, folder: str)
         f"raw: {minio_url}",
         content,
     )
-    note_path.write_text(updated, encoding="utf-8")
+    write_vault_note(note_path, updated)
 
     return minio_url
 
@@ -750,7 +758,7 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
         if isinstance(seg, dict) and "end" not in seg:
             nxt = segs[i + 1].get("start", segs[i + 1].get("time")) if i + 1 < len(segs) else None
             seg["end"] = nxt if nxt is not None else seg.get("start", 0) + 5.0
-    merged_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    write_merged_transcript_json(merged_path, data, indent=None)
 
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if not meta_path.exists():

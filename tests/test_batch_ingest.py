@@ -693,6 +693,11 @@ class TestKbOcrSizeCap:
         assert 'r.get("error")' in text
         assert "ocr_error_json" in text
 
+    def test_main_redacts_reading_urls_before_write(self):
+        text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
+        assert "redact_http_urls_in_text" in text
+        assert 'r["reading"]' in text or "r['reading']" in text
+
     def test_batch_ingest_rejects_truncated_ocr_flag(self, config, conn, monkeypatch):
         import scripts.batch_ingest as batch_ingest
         from agent.db import queue_ingest

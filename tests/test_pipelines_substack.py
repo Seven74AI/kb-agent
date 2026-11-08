@@ -206,6 +206,18 @@ class TestSubstackCleanup:
         result = step_substack_cleanup(task_dict, config)
         assert result == "no raw file to clean"
 
+    def test_cleanup_redacts_http_urls_on_rewrite(self, config, task_dict):
+        """Rewritten _raw.md must re-apply redact_http_urls_in_text (not trust prior scrape)."""
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        raw_path = config.temp_dir / f"{slug}_raw.md"
+        tokenized = "https://cdn.example.com/embed?token=secret&expires=999"
+        raw_path.write_text(f"# Title\n\nLink: {tokenized}\n", encoding="utf-8")
+        step_substack_cleanup(task_dict, config)
+        cleaned = raw_path.read_text(encoding="utf-8")
+        assert "token=secret" not in cleaned
+        assert "https://cdn.example.com/embed" in cleaned
+
 
 # ── Embedded Media Tests (body images + embedded videos) ─────────────────────
 

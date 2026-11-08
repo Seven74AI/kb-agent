@@ -342,4 +342,5 @@ def test_kb_ocr_registers_heif_and_avif_openers():
     )
     assert "register_heif_opener" in text
     assert "pillow_avif" in text
-    assert "_sanitize_modal_log" in text
+    assert "_sanitize_emit" in text
+    assert "sanitize_visible_message" in text

@@ -778,6 +778,38 @@ def test_step_minio_upload_missing_source(config, task_dict):
         step_minio_upload(task_dict, config)
 
 
+TOKENIZED_WEB = "https://cdn.example.com/article?token=secret"
+
+
+def test_step_minio_upload_redacts_body_url_in_sources_patch(config, task_dict):
+    source_path = Path(config.temp_dir) / f"{task_dict['slug']}_raw.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("# Source", encoding="utf-8")
+
+    note_path = config.vault_path / "Knowledge base" / "articles" / f"{task_dict['slug']}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(
+        f"""---
+date: 2026-06-19
+source_url: {TOKENIZED_WEB}
+---
+
+Body cites {TOKENIZED_WEB} before archival.
+
+## See Also
+""",
+        encoding="utf-8",
+    )
+
+    with patch("agent.archival.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        step_minio_upload(task_dict, config)
+
+    written = note_path.read_text(encoding="utf-8")
+    assert "token=secret" not in written
+    assert "https://cdn.example.com/article" in written
+
+
 def test_step_minio_upload_with_mock(config, task_dict):
     """Test minio upload with mocked subprocess — placeholder replaced with real URL."""
     source_path = Path(config.temp_dir) / f"{task_dict['slug']}_raw.md"

@@ -10,7 +10,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
-from agent.pipelines.video_common import step_fetch_transcript
+from agent.pipelines.video_common import (
+    step_fetch_transcript,
+    upload_note_archive,
+    upload_video_artifacts,
+)
+
+TOKENIZED = "https://cdn.example.com/spoken.mp3?token=secret&expires=999"
 
 
 @pytest.fixture
@@ -49,6 +55,52 @@ def test_step_fetch_transcript_writes_metadata_from_segments(config):
     assert meta_path.exists()
     meta = json.loads(meta_path.read_text())
     assert meta["duration"] == 300.0
+
+
+@patch("agent.archival.upload_file_to_minio")
+def test_upload_video_artifacts_redacts_merged_segment_text(mock_upload, config):
+    slug = "vid_slug"
+    merged = {
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": f"visit {TOKENIZED} now"},
+        ],
+    }
+    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path.write_text(json.dumps(merged), encoding="utf-8")
+    video_path = Path(config.temp_dir) / f"{slug}.mp4"
+    video_path.write_bytes(b"")
+
+    upload_video_artifacts(slug, config, video_path)
+
+    on_disk = json.loads(merged_path.read_text(encoding="utf-8"))
+    assert "token=secret" not in on_disk["segments"][0]["text"]
+    assert "https://cdn.example.com/spoken.mp3" in on_disk["segments"][0]["text"]
+    transcript_uploads = [
+        c for c in mock_upload.call_args_list if "transcripts/" in str(c)
+    ]
+    assert transcript_uploads
+
+
+@patch("agent.archival.upload_file_to_minio", return_value="articles/slug.md")
+def test_upload_note_archive_redacts_note_body(mock_upload, config):
+    slug = "ig_post"
+    note_path = config.vault_path / "Knowledge base" / "instagram" / f"{slug}.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(
+        f"""---
+source_files:
+  raw: <filled by archival step>
+---
+
+Mention {TOKENIZED} in the body.
+""",
+        encoding="utf-8",
+    )
+    upload_note_archive(slug, config, note_path, "instagram")
+    written = note_path.read_text(encoding="utf-8")
+    assert "token=secret" not in written
+    assert "https://cdn.example.com/spoken.mp3" in written
+    assert "raw: articles/slug.md" in written
 
 
 def test_step_fetch_transcript_metadata_uses_top_level_duration(config):
