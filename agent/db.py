@@ -1286,6 +1286,7 @@ def _has_stale_deferral_synthesize_terminal(
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') AND datetime(updated_at) <= datetime(?) "
+        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
@@ -2115,9 +2116,9 @@ def claim_task(conn: sqlite3.Connection) -> dict | None:
 def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
     """Get the next step the consumer should run, ordered by ``step_order``.
 
-    Invariant: a paused step is always a barrier — the consumer must not run
-    any later ``pending`` step while an earlier step is still ``paused`` (deferred
-    media, cookies, Firecrawl, paywall, or any other pause reason).
+    Invariant: any earlier non-success step is a barrier — the consumer must not
+    run a later ``pending`` step while an earlier step is still ``paused`` or
+    ``failed`` (deferred media gate, cookies, Firecrawl, paywall, or any other).
 
     Args:
         conn: Agent database connection.
@@ -2148,6 +2149,18 @@ def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
     for paused in paused_rows:
         if pending_order is None or paused["step_order"] < pending_order:
             return dict(paused)
+
+    failed_rows = conn.execute(
+        """
+        SELECT * FROM task_steps
+        WHERE task_id = ? AND status = 'failed'
+        ORDER BY step_order
+        """,
+        (task_id,),
+    ).fetchall()
+    for failed in failed_rows:
+        if pending_order is None or failed["step_order"] < pending_order:
+            return dict(failed)
 
     if pending_row is None:
         return None
@@ -2406,6 +2419,8 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
     resumed = 0
     with conn:
         for task_id, slug, error in rows:
+            if _is_superseded_parent_error(error):
+                continue
             if slug and has_active_synthesize_task(conn, slug):
                 continue
             if _task_blocks_bulk_resume(conn, task_id, slug=slug, error=error):

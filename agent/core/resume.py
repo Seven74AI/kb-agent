@@ -3,6 +3,7 @@
 import sqlite3
 
 from agent.db import (
+    _is_superseded_parent_error,
     has_active_synthesize_task,
     reset_task_steps_for_retry,
     resume_tasks_by_reason,
@@ -53,6 +54,9 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
         (task_id,),
     ).fetchone()
     if row is None or row[0] not in ("failed", "paused"):
+        return False
+    # Terminal superseded rows must not be resurrected (mirrors complete_task CAS).
+    if _is_superseded_parent_error(row[1]):
         return False
     if row[2] and has_active_synthesize_task(agent_conn, row[2]):
         return False

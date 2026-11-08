@@ -29,6 +29,7 @@ from agent.pipelines.web import (
     _extract_rumble_urls,
     _extract_youtube_ids,
     _extract_bunny_embed_urls,
+    _detect_unenqueued_handled_embed,
     _detect_unsupported_foreign_embed,
     _fetch_substack_html,
     _is_content_image,
@@ -730,6 +731,95 @@ class TestSubstackVideoMetadata:
             "</p></body></html>"
         )
         assert _detect_unsupported_foreign_embed(html) is None
+
+    def test_detect_unenqueued_handled_embed_truncated_bunny_iframe(self):
+        html = (
+            '<iframe src="https://player.mediadelivery.net/embed/99/"></iframe>'
+        )
+        assert _detect_unenqueued_handled_embed(html, [], [], []) is not None
+        assert _detect_unsupported_foreign_embed(html) is None
+
+    def test_detect_unenqueued_handled_embed_rumble_embed_unknown(self):
+        html = '<iframe src="https://rumble.com/embed/unknown"></iframe>'
+        assert _detect_unenqueued_handled_embed(html, [], [], []) is not None
+
+    def test_detect_unenqueued_handled_embed_short_youtube_id(self):
+        html = '<iframe src="https://www.youtube.com/embed/abc12"></iframe>'
+        assert _detect_unenqueued_handled_embed(html, [], [], []) is not None
+
+    def test_detect_unenqueued_handled_embed_absent_when_canonical_bunny_queued(self):
+        bunny = (
+            "https://player.mediadelivery.net/embed/384567/"
+            "12345678-abcd-ef01-2345-6789abcdef01"
+        )
+        html = f'<iframe src="{bunny}"></iframe>'
+        assert _detect_unenqueued_handled_embed(html, [], [], [bunny]) is None
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_truncated_bunny_iframe_pauses_not_no_embedded_media(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        mock_fetch.return_value = (
+            '<html><body>'
+            '<iframe src="https://player.mediadelivery.net/embed/99/"></iframe>'
+            "</body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unenqueued handled embed" in str(exc.value).lower()
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_rumble_embed_unknown_pauses_not_no_embedded_media(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = (
+            '<html><body><iframe src="https://rumble.com/embed/unknown"></iframe></body></html>'
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unenqueued handled embed" in str(exc.value).lower()
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_short_youtube_embed_pauses_not_no_embedded_media(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = (
+            '<html><body><iframe src="https://www.youtube.com/embed/abc12"></iframe></body></html>'
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unenqueued handled embed" in str(exc.value).lower()
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_mixed_image_and_truncated_bunny_pauses_with_image_enqueued(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        chart_key = "chart_1664x1184.png"
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'<img src="https://substack-post-media.s3.amazonaws.com/public/images/{chart_key}">'
+            '<iframe src="https://player.mediadelivery.net/embed/99/"></iframe>'
+            "</body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unenqueued handled embed" in str(exc.value).lower()
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            rows = conn.execute(
+                "SELECT url FROM ingest_queue WHERE parent_slug = ?",
+                (slug,),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert chart_key in rows[0][0]
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_youtube_iframe_with_instagram_blockquote_enqueues_then_pauses(
