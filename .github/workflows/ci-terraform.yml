@@ -1,0 +1,25 @@
+name: CI Terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/ci-terraform.yml'
+  pull_request:
+    paths:
+      - 'infra/**'
+      - '.github/workflows/ci-terraform.yml'
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: Validate
+        run: |
+          terraform -chdir=infra/cloudflare init -backend=false
+          terraform -chdir=infra/cloudflare validate
