@@ -31,7 +31,7 @@ from agent.curl_config import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.redact import scrub_vault_note_content, url_for_display
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
 from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -583,6 +583,9 @@ def step_ig_carousel_extract(task: dict, config: Config) -> str:
             step_name="ig_carousel_extract",
         ) from exc
 
+    # Persisted script must not embed credential-bearing query strings from the task URL.
+    display_nav_url = url_for_display(url)
+
     # Build Playwright script for alt text extraction
     playwright_script = f"""import asyncio, json, sys
 from playwright.async_api import async_playwright
@@ -596,7 +599,7 @@ async def main():
         page = await context.new_page()
         
         try:
-            await page.goto({json.dumps(url)}, wait_until="networkidle", timeout=30000)
+            await page.goto({json.dumps(display_nav_url)}, wait_until="networkidle", timeout=30000)
         except Exception:
             pass
         
@@ -635,49 +638,50 @@ asyncio.run(main())
     script_path = Path(config.temp_dir) / f"{safe_slug}_playwright.py"
     script_path.write_text(playwright_script)
 
-    result = subprocess.run(
-        ["python3", str(script_path)],
-        capture_output=True, text=True, timeout=60,
-    )
-
-    if result.returncode != 0:
-        raise StepError(
-            "Playwright carousel extraction failed",
-            error_type=ErrorType.RETRY,
-            step_name="carousel_extract",
-            details=sanitize_visible_message(result.stderr.strip()[:500]),
+    try:
+        result = subprocess.run(
+            ["python3", str(script_path)],
+            capture_output=True, text=True, timeout=60,
         )
 
-    try:
-        slides = json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
-        raise StepError(
-            "Failed to parse Playwright output for carousel",
-            error_type=ErrorType.RETRY,
-            step_name="carousel_extract",
-            details=sanitize_visible_message(result.stdout.strip()[:500]),
-        )
+        if result.returncode != 0:
+            raise StepError(
+                "Playwright carousel extraction failed",
+                error_type=ErrorType.RETRY,
+                step_name="carousel_extract",
+                details=sanitize_visible_message(result.stderr.strip()[:500]),
+            )
 
-    # Write extracted slides
-    slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
-    slides_persisted = [
-        {"slide": s["slide"], "alt_text": s.get("alt_text", "")}
-        for s in slides
-    ]
-    slides_data = {
-        "slides": slides_persisted,
-        "slide_count": len(slides_persisted),
-        "cap_note": f"Hard cap: {CAROUSEL_SLIDE_CAP} slides. Slides beyond {CAROUSEL_SLIDE_CAP} are not extractable.",
-    }
-    slides_path.write_text(json.dumps(slides_data, indent=2, ensure_ascii=False))
+        try:
+            slides = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            raise StepError(
+                "Failed to parse Playwright output for carousel",
+                error_type=ErrorType.RETRY,
+                step_name="carousel_extract",
+                details=sanitize_visible_message(result.stdout.strip()[:500]),
+            )
 
-    # Clean up the temp script
-    try:
-        script_path.unlink()
-    except OSError:
-        pass
+        # Write extracted slides
+        slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
+        slides_persisted = [
+            {"slide": s["slide"], "alt_text": s.get("alt_text", "")}
+            for s in slides
+        ]
+        slides_data = {
+            "slides": slides_persisted,
+            "slide_count": len(slides_persisted),
+            "cap_note": f"Hard cap: {CAROUSEL_SLIDE_CAP} slides. Slides beyond {CAROUSEL_SLIDE_CAP} are not extractable.",
+        }
+        slides_path.write_text(json.dumps(slides_data, indent=2, ensure_ascii=False))
 
-    return str(slides_path)
+        return str(slides_path)
+    finally:
+        try:
+            if script_path.is_file():
+                script_path.unlink()
+        except OSError:
+            pass
 
 
 def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
@@ -1178,13 +1182,31 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
             pass
 
 
+_IG_COMMENT_TEXT_FIELDS = ("comment_text", "parent_caption")
+
+
+def _ig_comment_sidecar_for_disk(info: dict) -> dict:
+    """Return ig_comment payload safe for at-rest JSON (display URLs, redacted free text)."""
+    out = dict(info)
+    parent_url = out.get("parent_url")
+    if isinstance(parent_url, str):
+        out["parent_url"] = url_for_display(parent_url)
+    for key in _IG_COMMENT_TEXT_FIELDS:
+        val = out.get(key)
+        if isinstance(val, str):
+            out[key] = redact_http_urls_in_text(val)
+    return out
+
+
 def step_ig_comment_fetch(task: dict, config: Config) -> str:
     """Fetch the comment + parent reel context and write it to a raw JSON file."""
     url = task["source_url"]
     slug = task.get("slug", task["id"][:8])
     info = _fetch_ig_comment(url, config)
     raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_ig_comment.json"
-    raw_path.write_text(json.dumps(info, indent=2, ensure_ascii=False))
+    raw_path.write_text(
+        json.dumps(_ig_comment_sidecar_for_disk(info), indent=2, ensure_ascii=False),
+    )
     return str(raw_path)
 
 

@@ -38,12 +38,12 @@ from agent.pipelines.video_common import (
     merge_speaker_labels,
     resolve_threads_raw_path,
     run_threads_video_quality_gate,
+    write_threads_raw_sidecar,
     step_diarize,
     step_extract_audio,
     step_fetch_transcript,
     step_transcribe,
     strip_code_fence,
-    threads_raw_path,
     upload_note_archive,
     upload_video_source,
 )
@@ -441,21 +441,18 @@ def step_threads_detect(task: dict, config: Config) -> str:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
             parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
 
-    raw_path = threads_raw_path(config, task)
-    raw_path.write_text(
-        json.dumps(
-            {
-                "url": url,
-                "author": author,
-                "captions": _extract_all_captions(html),
-                "is_reply": is_reply,
-                "parent_url": parent_url,
-                "parent_context": parent_context,
-                "extracted_at": datetime.now().isoformat(),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+    write_threads_raw_sidecar(
+        config,
+        task,
+        {
+            "url": url,
+            "author": author,
+            "captions": _extract_all_captions(html),
+            "is_reply": is_reply,
+            "parent_url": parent_url,
+            "parent_context": parent_context,
+            "extracted_at": datetime.now().isoformat(),
+        },
     )
 
     return json.dumps({
@@ -536,20 +533,21 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
             parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
 
-    # Write raw extraction for archival
-    raw_path = threads_raw_path(config, task)
-    extracted = {
-        "url": url,
-        "author": author,
-        "captions": captions,
-        "og_description": og_description,
-        "is_reply": is_reply,
-        "parent_url": parent_url,
-        "parent_context": parent_context,
-        "confidence": confidence,
-        "extracted_at": datetime.now().isoformat(),
-    }
-    raw_path.write_text(json.dumps(extracted, indent=2, ensure_ascii=False))
+    raw_path = write_threads_raw_sidecar(
+        config,
+        task,
+        {
+            "url": url,
+            "author": author,
+            "captions": captions,
+            "og_description": og_description,
+            "is_reply": is_reply,
+            "parent_url": parent_url,
+            "parent_context": parent_context,
+            "confidence": confidence,
+            "extracted_at": datetime.now().isoformat(),
+        },
+    )
 
     return str(raw_path)
 

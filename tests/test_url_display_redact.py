@@ -1,6 +1,7 @@
 """Regression: outward surfaces never emit http(s) URLs with query or fragment."""
 
 import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -171,6 +172,49 @@ def test_ingest_playlist_redacts_playlist_url_when_empty(monkeypatch, core_confi
     assert result["status"] == "error"
     assert result["playlist_url"] == "https://youtube.com/playlist"
     assert "?" not in result["playlist_url"]
+
+
+def test_register_watch_source_duplicate_error_redacts_page_url(agent_conn):
+    page_token = "https://example.com/listing?tracker=supersecret"
+    register_watch_source(
+        agent_conn,
+        page_token,
+        item_pattern=r"id-(\d+)",
+        item_url_template="https://example.com/i/{item}",
+        cadence_seconds=3600,
+        fetch_html=None,
+        baseline=False,
+    )
+    with pytest.raises(ValueError, match="already registered") as exc_info:
+        register_watch_source(
+            agent_conn,
+            page_token,
+            item_pattern=r"id-(\d+)",
+            item_url_template="https://example.com/i/{item}",
+            cadence_seconds=3600,
+            fetch_html=None,
+            baseline=False,
+        )
+    msg = str(exc_info.value)
+    assert "supersecret" not in msg
+    assert "tracker=" not in msg
+    assert "https://example.com/listing" in msg
+
+
+def test_poll_watch_source_not_registered_error_redacts_page_url(agent_conn):
+    token_page = "https://example.com/missing?sig=hidden"
+    with pytest.raises(ValueError, match="not registered") as exc_info:
+        poll_watch_source(
+            agent_conn,
+            token_page,
+            MagicMock(),
+            fetch_html=lambda _u: "",
+            force=True,
+        )
+    msg = str(exc_info.value)
+    assert "hidden" not in msg
+    assert "sig=" not in msg
+    assert "https://example.com/missing" in msg
 
 
 def test_watch_source_register_redacts_urls_in_response(agent_conn):

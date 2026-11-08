@@ -773,7 +773,7 @@ def main() -> None:
                 print(f"  [failed] {q['slug']} -> {_scrub_for_log(err_detail)}")
             else:
                 detail = r.get("reason") or r.get("status") or "retry later"
-                print(f"  [requeue] {q['slug']} ({q['content_type']}): {detail}")
+                print(f"  [requeue] {q['slug']} ({q['content_type']}): {_scrub_for_log(detail)}")
 
         _reconcile_deferred_parent_syntheses(conn, config)
 

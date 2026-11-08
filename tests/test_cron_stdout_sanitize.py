@@ -24,6 +24,69 @@ def _load_script_module(name: str, relpath: str):
     return mod
 
 
+def test_tdah_modal_output_tail_sanitized(monkeypatch, capsys, tmp_path):
+    mod = _load_script_module("tdah_daily_check", "scripts/tdah_daily_check.py")
+    raw_tail = (
+        "stderr from /root/modal/kb_transcribe.py\n"
+        "ERROR: token=modal-secret\n"
+    )
+    ns = "tdah-adulte-2026-j9-modaltest"
+    slug_html = f'<a href="/tdah-adulte-j9-modaltest/">x</a>'
+
+    monkeypatch.setattr(mod, "TMP", str(tmp_path))
+    monkeypatch.setattr(mod, "load_config", lambda: MagicMock(kb_agent_dir=tmp_path))
+    monkeypatch.setattr(
+        mod,
+        "init_db",
+        lambda *a, **k: MagicMock(close=lambda: None),
+    )
+    monkeypatch.setattr(mod, "fetch", lambda url: slug_html if "terragrandir" in url else "")
+    monkeypatch.setattr(mod, "bunny_uuid", lambda _s: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+    def fake_sh(cmd, **kw):
+        cmd0 = cmd[0] if cmd else ""
+        if cmd0.endswith("modal") or (len(cmd) > 1 and "modal" in cmd[0]):
+            return MagicMock(stdout="", stderr=raw_tail, returncode=0)
+        if cmd0 == "mc":
+            return MagicMock(stdout="", stderr="", returncode=0)
+        if cmd0 == "curl":
+            out_mp4 = cmd[cmd.index("-o") + 1] if "-o" in cmd else str(tmp_path / "x.mp4")
+            with open(out_mp4, "wb") as fh:
+                fh.write(b"\x00" * 200_000)
+            return MagicMock(stdout="", stderr="", returncode=0)
+        if cmd0 == "ffmpeg":
+            return MagicMock(stdout="", stderr="", returncode=0)
+        return MagicMock(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(mod, "sh", fake_sh)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    diar = out_dir / f"{ns}.diarization.json"
+    trans = out_dir / f"{ns}.transcript.json"
+    diar.write_text('{"segments": []}', encoding="utf-8")
+    trans.write_text('{"segments": []}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod,
+        "merge_speakers",
+        lambda *_a, **_k: {"segments": []},
+    )
+    monkeypatch.setattr(
+        mod,
+        "dispatch_synthesize",
+        lambda *a, **k: {"status": "pending", "task_id": "t1"},
+    )
+
+    mod.main()
+    out = capsys.readouterr().out
+    assert "modal-secret" not in out
+    assert "token=" not in out
+    assert "/root/modal" not in out
+    assert "[path]" in out
+    assert "Modal output tail:" in out
+
+
 def test_tdah_finalize_dispatch_sanitizes_error_stdout(monkeypatch, capsys):
     mod = _load_script_module("tdah_daily_check", "scripts/tdah_daily_check.py")
     secret = (

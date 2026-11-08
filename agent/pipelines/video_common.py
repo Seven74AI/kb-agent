@@ -21,6 +21,7 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
+from agent.redact import redact_http_urls_in_text, url_for_display
 from agent.llm import get_llm_client
 from agent.quality import quality_gate_retry_loop, quality_gate_threads_video, quality_gate_youtube
 from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
@@ -169,6 +170,31 @@ def resolve_threads_raw_path(config: Config, task: dict) -> Path:
         if batch_sidecar.is_file():
             return batch_sidecar
     return slug_path
+
+
+def sanitize_threads_raw_sidecar(record: dict) -> dict:
+    """Return a copy of threads raw JSON safe for at-rest temp storage (display URLs, redacted text)."""
+    out = dict(record)
+    if out.get("url"):
+        out["url"] = url_for_display(str(out["url"]))
+    if out.get("parent_url"):
+        out["parent_url"] = url_for_display(str(out["parent_url"]))
+    if out.get("parent_context") is not None:
+        out["parent_context"] = redact_http_urls_in_text(str(out["parent_context"]))
+    if out.get("og_description"):
+        out["og_description"] = redact_http_urls_in_text(str(out["og_description"]))
+    captions = out.get("captions")
+    if isinstance(captions, list):
+        out["captions"] = [redact_http_urls_in_text(str(c)) for c in captions]
+    return out
+
+
+def write_threads_raw_sidecar(config: Config, task: dict, record: dict) -> Path:
+    """Write ``{stem}_threads_raw.json`` with display-safe URL fields and redacted free text."""
+    raw_path = threads_raw_path(config, task)
+    safe = sanitize_threads_raw_sidecar(record)
+    raw_path.write_text(json.dumps(safe, indent=2, ensure_ascii=False))
+    return raw_path
 
 
 def _find_video_file(config: Config, slug: str) -> Path:

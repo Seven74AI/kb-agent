@@ -427,6 +427,24 @@ def test_ingest_playlist_surfaces_expand_failure(monkeypatch, core_config, agent
     assert "no videos found" not in result["error"]
 
 
+def test_ingest_playlist_sanitizes_expand_error_detail(monkeypatch, core_config, agent_conn):
+    leak = (
+        "playlist expansion failed (exit 1): ERROR: cookie at /root/kb-agent/cookies/youtube.txt "
+        "api_key=deadbeef"
+    )
+
+    def fail(_url):
+        raise PlaylistExpandError(leak)
+
+    monkeypatch.setattr("agent.core.bulk.expand_youtube_playlist", fail)
+    result = ingest_playlist("https://youtube.com/playlist?list=PLx", core_config, agent_conn)
+    assert result["status"] == "error"
+    assert "deadbeef" not in result["error"]
+    assert "/root/kb-agent" not in result["error"]
+    assert "[credential redacted]" in result["error"]
+    assert "[path]" in result["error"]
+
+
 def test_submit_url_health_pause(core_config, agent_conn, monkeypatch):
     monkeypatch.setattr(
         "agent.core.submit.preflight_health",
