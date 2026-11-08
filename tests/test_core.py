@@ -28,6 +28,7 @@ from agent.core import (
 from agent.core.bulk import expand_youtube_playlist
 from agent.core.resume import ResumeReasonError
 from agent.core.submit import plan_submission, submit_ingest, submit_plan
+from agent.detection import ContentSubtypeDetection
 from agent.db import (
     AGENT_SCHEMA,
     LOGS_SCHEMA,
@@ -209,8 +210,8 @@ def test_plan_submission_rejects_javascript_url(core_config):
 
 def test_plan_submission_unknown_content_type_not_enqueued(core_config, monkeypatch):
     monkeypatch.setattr(
-        "agent.core.submit.detect_content_subtype",
-        lambda url, platform: "unknown",
+        "agent.core.submit.detect_content_subtype_with_signals",
+        lambda url, platform: ContentSubtypeDetection(subtype="unknown"),
     )
     result = plan_submission("https://mega.nz/folder/x", core_config)
     assert result["status"] == "error"
@@ -220,8 +221,8 @@ def test_plan_submission_unknown_content_type_not_enqueued(core_config, monkeypa
 
 def test_plan_submission_unregistered_pipeline_error(core_config, monkeypatch):
     monkeypatch.setattr(
-        "agent.core.submit.detect_content_subtype",
-        lambda url, platform: "nonexistent_typo_xyz",
+        "agent.core.submit.detect_content_subtype_with_signals",
+        lambda url, platform: ContentSubtypeDetection(subtype="nonexistent_typo_xyz"),
     )
     monkeypatch.setattr("agent.core.submit.detect_platform", lambda url: "not_a_pipeline")
     monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
