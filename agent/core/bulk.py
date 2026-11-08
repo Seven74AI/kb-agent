@@ -11,6 +11,7 @@ import sqlite3
 
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
+from agent.redact import url_for_display
 
 # yt-dlp lives in the py3.11 hermes-agent venv; the MCP server runs in a separate
 # mcp-venv with system PATH (no yt-dlp), so resolve it explicitly.
@@ -110,14 +111,14 @@ def ingest_playlist(
         return {
             "status": "error",
             "error": "no videos found in playlist",
-            "playlist_url": playlist_url,
+            "playlist_url": url_for_display(playlist_url),
             "count": 0,
             "results": [],
         }
     batch = bulk_import(urls, config, agent_conn, submit_fn=submit_fn)
     return {
         "status": "ok",
-        "playlist_url": playlist_url,
+        "playlist_url": url_for_display(playlist_url),
         "count": batch["count"],
         "results": batch["results"],
     }

@@ -1020,9 +1020,60 @@ class TestBookVaultSourceUrl:
         assert "super-secret-key" not in _vault_frontmatter_source_url(mega)
 
 
+class TestMegadlZeroArtifacts:
+    @patch("agent.pipelines.books.subprocess.run")
+    def test_megadl_fails_when_no_book_files_after_download(self, mock_run, config, mega_task):
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "megadl":
+                dl_path = Path(cmd[cmd.index("--path") + 1])
+                (dl_path / "readme.txt").write_text("not a book", encoding="utf-8")
+                return MagicMock(returncode=0, stderr="", stdout="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mock_run.side_effect = fake_run
+        from agent.exceptions import ErrorType, StepError
+
+        with pytest.raises(StepError) as excinfo:
+            step_megadl_download(mega_task, config)
+        assert excinfo.value.step_name == "megadl_download"
+        assert excinfo.value.error_type == ErrorType.FAIL
+
+    def test_delegate_fails_when_no_child_tasks_created(self, config, mega_task, tmp_path):
+        from agent.exceptions import ErrorType, StepError
+
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        classify_json = json.dumps({"books": [{"pipeline": "not_registered", "filename": "x.pdf"}]})
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'done', output = ? "
+            "WHERE task_id = ? AND name = 'classify_content'",
+            (classify_json, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        mega_task["id"] = parent_id
+        with pytest.raises(StepError) as excinfo:
+            step_delegate_books(mega_task, config)
+        assert excinfo.value.step_name == "delegate"
+        assert excinfo.value.error_type == ErrorType.FAIL
+
+
 class TestMegadlArchiveExtraction:
     @patch("agent.pipelines.books.subprocess.run")
-    def test_megadl_logs_skipped_rar_when_unar_fails(self, mock_run, config, mega_task):
+    def test_megadl_fails_closed_when_unar_fails(self, mock_run, config, mega_task):
         def fake_run(cmd, **kwargs):
             if cmd[0] == "megadl":
                 dl_path = Path(cmd[cmd.index("--path") + 1])
@@ -1031,8 +1082,12 @@ class TestMegadlArchiveExtraction:
             return MagicMock(returncode=1, stderr="unar failed", stdout="")
 
         mock_run.side_effect = fake_run
-        result = json.loads(step_megadl_download(mega_task, config))
-        assert result["file_count"] == 0
+        from agent.exceptions import ErrorType, StepError
+
+        with pytest.raises(StepError) as excinfo:
+            step_megadl_download(mega_task, config)
+        assert excinfo.value.step_name == "megadl_download"
+        assert excinfo.value.error_type == ErrorType.FAIL
         assert any(call.args[0][0] == "unar" for call in mock_run.call_args_list)
 
 

@@ -14,6 +14,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.instagram import (
     _validate_ig_cookies,
+    _ytdlp_subprocess_env,
     _fetch_ig_caption,
     _fetch_ig_comment,
     _is_music_only,
@@ -537,6 +538,55 @@ class TestCleanup:
         assert not comment_json.exists()
         assert not conf.exists()
 
+    @pytest.mark.parametrize("task_fixture", ["reel_task", "post_task"])
+    def test_cleanup_removes_ytdlp_xdg_after_ytdlp_env(self, config, request, task_fixture):
+        """Success and failure paths both leave ytdlp_xdg until ig_cleanup runs."""
+        task = request.getfixturevalue(task_fixture)
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text("sessionid=1\n", encoding="utf-8")
+        _ytdlp_subprocess_env(config)
+        xdg_root = Path(config.temp_dir) / "ytdlp_xdg"
+        assert xdg_root.is_dir()
+        conf = xdg_root / "yt-dlp" / "config"
+        assert conf.is_file()
+        assert "ig_cookies.txt" in conf.read_text(encoding="utf-8")
+
+        result = step_ig_cleanup(task, config)
+        assert "ytdlp_xdg" in result
+        assert not xdg_root.exists()
+
+    def test_cleanup_removes_carousel_artifacts_success_path(self, config, post_task):
+        slug = post_task["slug"]
+        temp = config.temp_dir
+        for name in (
+            f"{slug}_playwright.py",
+            f"{slug}_carousel_slides.json",
+            f"{slug}_carousel_meta.json",
+        ):
+            Path(temp / name).write_text("{}", encoding="utf-8")
+        _ytdlp_subprocess_env(config)
+
+        result = step_ig_cleanup(post_task, config)
+        assert "ytdlp_xdg" in result
+        for name in (
+            f"{slug}_playwright.py",
+            f"{slug}_carousel_slides.json",
+            f"{slug}_carousel_meta.json",
+        ):
+            assert not Path(temp / name).exists()
+
+    def test_cleanup_removes_carousel_artifacts_failure_residual(self, config, post_task):
+        """Failed carousel extract can leave playwright; ig_cleanup must remove it."""
+        slug = post_task["slug"]
+        script = Path(config.temp_dir) / f"{slug}_playwright.py"
+        script.write_text("# failed extract leftover\n", encoding="utf-8")
+        _ytdlp_subprocess_env(config)
+
+        step_ig_cleanup(post_task, config)
+        assert not script.exists()
+        assert not (Path(config.temp_dir) / "ytdlp_xdg").exists()
+
 
 # ── MinIO ────────────────────────────────────────────────────────────────────
 
@@ -641,6 +691,10 @@ class TestPipelineRegistration:
         assert "ig_carousel_metadata" in step_names
         assert "ig_carousel_extract" in step_names
         assert "ig_carousel_synthesize" in step_names
+        assert "ig_cleanup" in step_names
+        minio_idx = step_names.index("ig_minio_upload")
+        cleanup_idx = step_names.index("ig_cleanup")
+        assert cleanup_idx == minio_idx + 1
         assert "ig_git_push" in step_names
 
 

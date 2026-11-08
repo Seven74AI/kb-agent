@@ -49,3 +49,22 @@ def slugify(url: str, *, content_type: str | None = None) -> str:
     slug = re.sub(r"[?#].*", "", slug)
     slug = re.sub(r"[^a-zA-Z0-9._-]", "_", slug)
     return slug[: SLUG_MAX_LEN - len(identity_suffix)] + identity_suffix
+
+
+def batch_standalone_video_storage_slug(
+    *,
+    ingest_id: str,
+    slug: str,
+    content_type: str,
+    parent_slug: str | None = None,
+) -> str:
+    """MinIO object prefix and synthesize dispatch slug for batch-collected standalone videos.
+
+    Native Substack deferred URLs use ``post#<video_id>``; :func:`slugify` strips the
+    fragment so siblings share one slug. Standalone batch rows (no ``parent_slug``) must
+    key artifacts and dedupe on ``ingest_queue.id`` instead. Embedded siblings keep
+    the parent slug and are keyed by ingest id only in temp/staging paths (not here).
+    """
+    if content_type == "substack_video" and not (parent_slug or "").strip():
+        return ingest_id
+    return slug

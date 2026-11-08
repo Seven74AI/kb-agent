@@ -23,6 +23,7 @@ from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
+from agent.redact import url_for_display
 from agent.llm import LLMClient, get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -802,6 +803,7 @@ def _pass2_build_note(
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     source_domain = urlparse(source_url).netloc or "youtube.com"
+    display_source_url = url_for_display(source_url)
 
     system_prompt = f"""You are a knowledge base curator specializing in video content synthesis.
 Follow the deep treatment standard for YouTube videos.
@@ -835,7 +837,7 @@ OUTPUT FORMAT:
 - Start with YAML frontmatter:
   date: {date_str}
   source: {source_domain} ({metadata.get('uploader', 'Unknown')})
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     video: videos/{slug}.mp4
     transcript: transcripts/{slug}.json

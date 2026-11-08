@@ -106,7 +106,9 @@ def test_detect_content_subtype_jev_failure_falls_back(monkeypatch):
         raise RuntimeError("down")
 
     monkeypatch.setattr(detection, "route_jev", boom)
-    monkeypatch.setattr(detection, "_detect_threads_subtype", lambda url: "threads_text")
+    monkeypatch.setattr(
+        detection, "_detect_threads_subtype", lambda url: ("threads_text", False),
+    )
     assert detection.detect_content_subtype("https://threads.net/@x/post/1", "threads") == "threads_text"
 
 

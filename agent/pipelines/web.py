@@ -23,6 +23,7 @@ from agent.detection import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
+from agent.redact import url_for_display
 
 logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
@@ -1148,6 +1149,7 @@ def _build_synthesis_prompt(source_url: str, slug: str, config: Config) -> str:
         template = _fallback_template()
 
     source_domain = urlparse(source_url).netloc or "unknown"
+    display_source_url = url_for_display(source_url)
     date_str = datetime.now().strftime("%Y-%m-%d")
 
     prompt = f"""You are a knowledge base curator. Follow the deep treatment standard.
@@ -1173,7 +1175,7 @@ OUTPUT FORMAT:
 - Start with YAML frontmatter:
   date: {date_str}
   source: {source_domain}
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     raw: <filled by archival step>
   confidence: plausible

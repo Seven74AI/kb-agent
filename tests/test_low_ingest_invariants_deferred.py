@@ -143,7 +143,9 @@ def test_detect_threads_subtype_returns_text_on_fetch_failure(monkeypatch, caplo
 
     monkeypatch.setattr("agent.detection.subprocess.run", boom)
     caplog.set_level(logging.WARNING)
-    assert _detect_threads_subtype("https://threads.net/@u/post/1") == "threads_text"
+    subtype, fetch_failed = _detect_threads_subtype("https://threads.net/@u/post/1")
+    assert subtype == "threads_text"
+    assert fetch_failed is True
     assert any("Threads subtype fetch failed" in r.message for r in caplog.records)
 
 

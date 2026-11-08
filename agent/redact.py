@@ -5,6 +5,7 @@ Leaf module: importable without loading :mod:`agent.core` package exports.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -35,6 +36,40 @@ def url_for_display(url: str) -> str:
         name = Path(stripped).name
         return name if name else "<local-path>"
     return redact_credential_shapes(stripped)
+
+
+_FRONTMATTER_SOURCE_URL = re.compile(
+    r"^(?P<indent>[ \t]*)source_url:\s*(?P<value>.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _yaml_scalar_unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def scrub_vault_note_content(content: str) -> str:
+    """Return note markdown with display-safe ``source_url`` in YAML frontmatter."""
+    if not content.startswith("---"):
+        return _redact_frontmatter_source_url_block(content)
+    close = content.find("\n---", 3)
+    if close < 0:
+        return _redact_frontmatter_source_url_block(content)
+    head = content[: close + 1]
+    tail = content[close + 1 :]
+    return _redact_frontmatter_source_url_block(head) + tail
+
+
+def _redact_frontmatter_source_url_block(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        raw = _yaml_scalar_unquote(match.group("value"))
+        safe = url_for_display(raw)
+        return f"{match.group('indent')}source_url: {safe}"
+
+    return _FRONTMATTER_SOURCE_URL.sub(repl, text, count=1)
 
 
 def redact_outward_url_field(result: dict) -> dict:

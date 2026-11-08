@@ -15,6 +15,7 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
+from agent.redact import url_for_display
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -296,6 +297,7 @@ def _build_synthesis_prompt(source_url: str, slug: str, config: Config) -> str:
     template = template_path.read_text(encoding="utf-8") if template_path.exists() else ""
 
     date_str = datetime.now().strftime("%Y-%m-%d")
+    display_source_url = url_for_display(source_url)
 
     return f"""Tu es un curateur de base de connaissances spécialisé dans les conférences TDAH.
 La vidéo source est en FRANÇAIS. Tu DOIS rédiger TOUT le contenu ET TOUS les titres de sections en FRANÇAIS.
@@ -318,7 +320,7 @@ FORMAT DE SORTIE :
   created: {date_str} 00:00:00
   modified: {date_str} 00:00:00
   source: "<Intervenant> — <Titre> (Sommet TDAH Adulte — Terr'à Grandir)"
-  source_url: {source_url}
+  source_url: {display_source_url}
   source_files:
     video: videos/{slug}.mp4
     transcript: transcripts/{slug}.json

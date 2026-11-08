@@ -153,20 +153,28 @@ def step_megadl_download(task: dict, config: Config) -> str:
                 extract_dir.mkdir(parents=True, exist_ok=True)
                 suffix = f.suffix.lower()
                 if suffix == ".zip":
-                    subprocess.run(
+                    result = subprocess.run(
                         ["unzip", "-o", str(f), "-d", str(extract_dir)],
-                        capture_output=True, timeout=120,
+                        capture_output=True, text=True, timeout=120,
                     )
+                    if result.returncode != 0:
+                        detail = (result.stderr or result.stdout or "unzip failed").strip()
+                        raise StepError(
+                            f"failed to extract .zip archive {f.name}: {detail[:200]}",
+                            error_type=ErrorType.FAIL,
+                            step_name="megadl_download",
+                        )
                 elif suffix == ".rar":
                     result = subprocess.run(
                         ["unar", "-no-directory", "-o", str(extract_dir), str(f)],
                         capture_output=True, text=True, timeout=300,
                     )
                     if result.returncode != 0:
-                        _log.warning(
-                            "megadl_download: skipped .rar archive %s (unar: %s)",
-                            f.name,
-                            (result.stderr or result.stdout or "failed").strip()[:200],
+                        detail = (result.stderr or result.stdout or "unar failed").strip()
+                        raise StepError(
+                            f"failed to extract .rar archive {f.name}: {detail[:200]}",
+                            error_type=ErrorType.FAIL,
+                            step_name="megadl_download",
                         )
                 elif suffix == ".7z":
                     result = subprocess.run(
@@ -174,10 +182,11 @@ def step_megadl_download(task: dict, config: Config) -> str:
                         capture_output=True, text=True, timeout=300,
                     )
                     if result.returncode != 0:
-                        _log.warning(
-                            "megadl_download: skipped .7z archive %s (7z: %s)",
-                            f.name,
-                            (result.stderr or result.stdout or "failed").strip()[:200],
+                        detail = (result.stderr or result.stdout or "7z failed").strip()
+                        raise StepError(
+                            f"failed to extract .7z archive {f.name}: {detail[:200]}",
+                            error_type=ErrorType.FAIL,
+                            step_name="megadl_download",
                         )
 
         # Find all book files
@@ -187,6 +196,12 @@ def step_megadl_download(task: dict, config: Config) -> str:
             if f.suffix.lower() in BOOK_EXTENSIONS
             and "__MACOSX" not in str(f)
         ]
+        if not book_files:
+            raise StepError(
+                "megadl download produced no book files after extraction",
+                error_type=ErrorType.FAIL,
+                step_name="megadl_download",
+            )
 
         # Build result
         result_data = {
@@ -481,6 +496,13 @@ def step_delegate_books(task: dict, config: Config) -> str:
         conn.commit()
     finally:
         conn.close()
+
+    if not created:
+        raise StepError(
+            "delegate step created no child book tasks",
+            error_type=ErrorType.FAIL,
+            step_name="delegate",
+        )
 
     return json.dumps({
         "parent_task_id": task_id,

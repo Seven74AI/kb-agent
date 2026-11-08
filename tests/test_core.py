@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from agent.config import Config
+from agent.core.slugify import batch_standalone_video_storage_slug
 from agent.core import (
     bulk_import,
     compute_staleness,
@@ -65,6 +66,34 @@ def logs_conn(tmp_path):
     conn.row_factory = sqlite3.Row
     yield conn
     conn.close()
+
+
+def test_batch_standalone_video_storage_slug_substack_uses_ingest_id():
+    shared = "author.substack.com_p_post"
+    assert batch_standalone_video_storage_slug(
+        ingest_id="ing-a",
+        slug=shared,
+        content_type="substack_video",
+        parent_slug="",
+    ) == "ing-a"
+    assert batch_standalone_video_storage_slug(
+        ingest_id="ing-b",
+        slug=shared,
+        content_type="substack_video",
+        parent_slug=None,
+    ) == "ing-b"
+    assert batch_standalone_video_storage_slug(
+        ingest_id="ing-emb",
+        slug=shared,
+        content_type="substack_video",
+        parent_slug="parent_slug",
+    ) == shared
+    assert batch_standalone_video_storage_slug(
+        ingest_id="ing-yt",
+        slug="youtube.com_watch_v_abc",
+        content_type="youtube",
+        parent_slug="",
+    ) == "youtube.com_watch_v_abc"
 
 
 def test_slugify_basic():

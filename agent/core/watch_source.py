@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.notify import sanitize_visible_message
+from agent.redact import url_for_display
 
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
 FetchHtml = Callable[[str], str]
@@ -124,6 +125,20 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {k: row[k] for k in row.keys()}
 
 
+def _row_for_display(row: dict[str, Any]) -> dict[str, Any]:
+    """Outward-facing watch source row: redact URL fields; DB keeps full values."""
+    out = dict(row)
+    if "page_url" in out:
+        out["page_url"] = url_for_display(out["page_url"])
+    if "item_url_template" in out:
+        out["item_url_template"] = url_for_display(out["item_url_template"])
+    return out
+
+
+def _display_page_url(page_url: str) -> str:
+    return url_for_display(page_url)
+
+
 def _validate_page_url(url: str) -> str:
     url = (url or "").strip()
     if not url:
@@ -191,7 +206,7 @@ def register_watch_source(
         "SELECT * FROM watch_sources WHERE id = ?",
         (source_id,),
     ).fetchone()
-    return _row_to_dict(row)
+    return _row_for_display(_row_to_dict(row))
 
 
 def get_watch_source(conn: sqlite3.Connection, page_url: str) -> dict[str, Any] | None:
@@ -227,11 +242,19 @@ def poll_watch_source(
     if row is None:
         raise ValueError(f"watch source not registered: {page_url}")
     if not row["enabled"]:
-        return {"page_url": page_url, "skipped": True, "reason": "disabled"}
+        return {
+            "page_url": _display_page_url(page_url),
+            "skipped": True,
+            "reason": "disabled",
+        }
 
     now = now or datetime.now(timezone.utc)
     if not force and not is_poll_due(row["last_polled_at"], row["cadence_seconds"], now):
-        return {"page_url": page_url, "skipped": True, "reason": "not_due"}
+        return {
+            "page_url": _display_page_url(page_url),
+            "skipped": True,
+            "reason": "not_due",
+        }
 
     submit = submit_fn or submit_routed
     html = fetch_html(page_url)
@@ -278,7 +301,7 @@ def poll_watch_source(
             )
 
     return {
-        "page_url": page_url,
+        "page_url": _display_page_url(page_url),
         "new_items": new_items,
         "submissions": submissions,
         "last_seen_count": len(merged),
@@ -314,7 +337,7 @@ def poll_all_due_sources(
         except Exception as exc:  # isolate per-source failures
             results.append(
                 {
-                    "page_url": source["page_url"],
+                    "page_url": _display_page_url(source["page_url"]),
                     "error": sanitize_visible_message(f"{type(exc).__name__}: {exc}"),
                 }
             )
