@@ -1632,6 +1632,28 @@ class TestChildProcessLogScrubbing:
         assert "[credential redacted]" in logged
         assert "ocr status: reading complete" in logged
 
+    def test_process_videos_scrubs_urls_in_causes_and_ingest_error(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        ingest_id = queue_ingest(
+            conn,
+            "https://www.youtube.com/watch?v=urlfail",
+            "youtube",
+            "yt_url_scrub",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        leaky = "GET https://cdn.example.com/seg.m3u8?sig=deadbeef refused"
+        monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (None, leaky))
+
+        _failed, _dispatched, causes = batch_ingest._process_videos([q], config, conn, 502)
+        assert causes
+        assert "sig=deadbeef" not in causes[0]
+        row = conn.execute(
+            "SELECT error FROM ingest_queue WHERE id=?", (ingest_id,),
+        ).fetchone()
+        assert "sig=deadbeef" not in (row["error"] or "")
+
     def test_process_videos_scrubs_download_failure_line(self, config, conn, monkeypatch, capsys):
         import scripts.batch_ingest as batch_ingest
         from agent.db import queue_ingest

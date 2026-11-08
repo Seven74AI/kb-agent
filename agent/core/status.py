@@ -98,7 +98,11 @@ def _task_counts(tasks: list[dict]) -> dict[str, int]:
     counts["total"] = len(tasks)
     for t in tasks:
         status = t["status"]
-        counts[status] = counts.get(status, 0) + 1
+        bucket = "done" if status == "completed" else status
+        if bucket in counts:
+            counts[bucket] += 1
+        else:
+            counts[status] = counts.get(status, 0) + 1
     return counts
 
 

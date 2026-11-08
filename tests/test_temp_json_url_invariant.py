@@ -77,6 +77,27 @@ def test_rumble_metadata_sidecar_omits_signed_cdn_urls(mock_resolve, sidecar_con
     assert data["source_url"] == url_for_display(task["source_url"])
 
 
+@patch(
+    "agent.pipelines.bunny_stream._curl_page",
+    return_value=(
+        '<html><meta property="og:title" content="Watch https://cdn.example.com/v.mp4?token=secret" />'
+        "</html>"
+    ),
+)
+def test_bunny_metadata_sidecar_redacts_title_urls(mock_curl, sidecar_config):
+    task = {
+        "id": "bunny-2",
+        "slug": "bunny_title",
+        "source_url": "https://terragrandir.com/talk",
+    }
+    step_extract_metadata(task, sidecar_config)
+    meta_path = sidecar_config.temp_dir / "bunny_title_metadata.json"
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert "token=secret" not in data["title"]
+    assert data["title"].startswith("Watch https://cdn.example.com/v.mp4")
+
+
 @patch("agent.pipelines.bunny_stream._curl_page", return_value="<html><h1>Talk</h1></html>")
 def test_bunny_metadata_sidecar_redacts_source_url(mock_curl, sidecar_config):
     task = {

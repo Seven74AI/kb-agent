@@ -515,6 +515,28 @@ def test_archive_llm_call_store_raw_opt_in(logs_conn, monkeypatch):
     assert row["prompt"] == raw_prompt
 
 
+def test_list_tasks_counts_completed_toward_done(core_config, agent_conn, logs_conn):
+    create_task(
+        agent_conn,
+        "https://a.com",
+        "web",
+        "done_slug",
+        ["extract"],
+        status="done",
+    )
+    create_task(
+        agent_conn,
+        "https://b.com",
+        "web",
+        "completed_slug",
+        ["extract"],
+        status="completed",
+    )
+    listed = list_tasks(agent_conn, logs_conn=logs_conn, limit=10)
+    assert listed["counts"]["done"] == 2
+    assert listed["counts"].get("completed", 0) == 0
+
+
 def test_list_tasks_and_get_task(core_config, agent_conn, logs_conn):
     task_id = create_task(agent_conn, "https://a.com", "web", "a_slug", ["extract"])
     listed = list_tasks(agent_conn, logs_conn=logs_conn, limit=10)

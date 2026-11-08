@@ -116,6 +116,16 @@ def test_resume_tasks_by_reason(temp_dbs):
                        ("cookies invalid — LOGIN_INFO missing", task_id))
     agent_conn.commit()
 
+    step_id = agent_conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? ORDER BY step_order LIMIT 1",
+        (task_id,),
+    ).fetchone()[0]
+    agent_conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'cookies invalid' WHERE id = ?",
+        (step_id,),
+    )
+    agent_conn.commit()
+
     # Resume by cookies reason
     count = resume_tasks_by_reason(agent_conn, "%cookies%")
     assert count == 1
@@ -126,6 +136,11 @@ def test_resume_tasks_by_reason(temp_dbs):
     assert row[0] == "pending"
     assert row[1] is None
     assert row[2] == 0
+    step_row = agent_conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?", (step_id,),
+    ).fetchone()
+    assert step_row[0] == "pending"
+    assert step_row[1] is None
 
 
 def test_resume_tasks_by_reason_no_match(temp_dbs):

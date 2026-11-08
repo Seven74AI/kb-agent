@@ -484,6 +484,71 @@ def _extract_rumble_urls(html: str) -> list[str]:
     return out
 
 
+# Hosts the deferred-media gate enqueues inline (native Substack / YouTube / Rumble).
+_HANDLED_EMBED_URL_RE = re.compile(
+    r"(?:youtube(?:-nocookie)?\.com|youtu\.be|rumble\.com|substack-post-media\.|"
+    r"substack\.com/api/v1/video)",
+    re.IGNORECASE,
+)
+
+_FOREIGN_EMBED_URL_RULES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"instagram\.com", re.IGNORECASE), "instagram"),
+    (re.compile(r"threads\.(?:net|com)/", re.IGNORECASE), "threads"),
+    (re.compile(r"tiktok\.com", re.IGNORECASE), "tiktok"),
+    (re.compile(r"vimeo\.com", re.IGNORECASE), "vimeo"),
+    (re.compile(r"(?:player\.)?mediadelivery\.net", re.IGNORECASE), "bunny"),
+    (re.compile(r"bunnycdn\.com", re.IGNORECASE), "bunny"),
+    (re.compile(r"(?:www\.)?bunny\.net", re.IGNORECASE), "bunny"),
+    (re.compile(r"terragrandir\.com", re.IGNORECASE), "bunny"),
+    (re.compile(r"mega\.nz", re.IGNORECASE), "mega"),
+    (re.compile(r"(?:platform\.)?(?:twitter|x)\.com", re.IGNORECASE), "twitter"),
+]
+
+_IFRAME_SRC_RE = re.compile(
+    r'<iframe[^>]+src=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_LINK_HREF_RE = re.compile(
+    r'<a[^>]+href=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_OEMBED_PROVIDER_RE = re.compile(
+    r'"provider_(?:url|name)"\s*:\s*"([^"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _foreign_platform_from_url(url: str) -> str | None:
+    """Return a platform label when *url* names media we do not batch from Substack parents."""
+    if not url or _HANDLED_EMBED_URL_RE.search(url):
+        return None
+    for pattern, platform in _FOREIGN_EMBED_URL_RULES:
+        if pattern.search(url):
+            return platform
+    return None
+
+
+def _detect_unsupported_foreign_embed(html: str) -> str | None:
+    """First foreign embed platform in article HTML that the deferral gate cannot enqueue.
+
+    Scans iframe ``src``, anchor ``href``, and oEmbed provider fields. Substack-native,
+    YouTube, and Rumble embeds are exempt (handled by the existing extractors).
+    """
+    decoded = _html_unescape(html)
+    if "data-instgrm-permalink" in decoded or "instagram-media" in decoded:
+        return "instagram"
+    if "tiktok-embed" in decoded:
+        return "tiktok"
+    candidates: list[str] = []
+    for pattern in (_IFRAME_SRC_RE, _LINK_HREF_RE, _OEMBED_PROVIDER_RE):
+        candidates.extend(m.group(1) for m in pattern.finditer(decoded))
+    for url in candidates:
+        platform = _foreign_platform_from_url(url)
+        if platform:
+            return platform
+    return None
+
+
 class EmbeddedMediaEnqueueStats(NamedTuple):
     """Per-pass enqueue outcomes for the parent media deferral gate."""
 
@@ -492,7 +557,31 @@ class EmbeddedMediaEnqueueStats(NamedTuple):
 
 
 def _submit_embed_succeeded(result: dict) -> bool:
-    return result.get("status") not in (None, "error")
+    """Enqueue success is explicit-positive only: queued/pending status or ingest_id."""
+    status = result.get("status")
+    if status in ("queued", "pending"):
+        return True
+    if result.get("ingest_id"):
+        return True
+    return False
+
+
+def _bump_embed_success_or_warn(
+    parent_slug: str,
+    media_kind: str,
+    result: dict,
+    success_count: int,
+) -> int:
+    if _submit_embed_succeeded(result):
+        return success_count + 1
+    status = result.get("status")
+    logger.warning(
+        "embedded media enqueue not accepted (%s) parent=%s status=%s",
+        media_kind,
+        parent_slug,
+        sanitize_visible_message(str(status) if status is not None else "missing"),
+    )
+    return success_count
 
 
 def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],
@@ -530,8 +619,9 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     exc_info=True,
                 )
                 continue
-            if _submit_embed_succeeded(result):
-                success_count += 1
+            success_count = _bump_embed_success_or_warn(
+                parent_slug, "image", result, success_count,
+            )
         for vid in youtube_ids:
             try:
                 result = submit_ingest(
@@ -546,8 +636,9 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     exc_info=True,
                 )
                 continue
-            if _submit_embed_succeeded(result):
-                success_count += 1
+            success_count = _bump_embed_success_or_warn(
+                parent_slug, "youtube", result, success_count,
+            )
         for url in rumble_urls:
             try:
                 result = submit_ingest(
@@ -562,8 +653,9 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     exc_info=True,
                 )
                 continue
-            if _submit_embed_succeeded(result):
-                success_count += 1
+            success_count = _bump_embed_success_or_warn(
+                parent_slug, "rumble", result, success_count,
+            )
         for vid in native_video_ids:
             try:
                 result = submit_ingest(
@@ -578,8 +670,9 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     exc_info=True,
                 )
                 continue
-            if _submit_embed_succeeded(result):
-                success_count += 1
+            success_count = _bump_embed_success_or_warn(
+                parent_slug, "native_video", result, success_count,
+            )
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
             (parent_slug,),
@@ -675,6 +768,13 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     extracted_total = (
         len(images) + len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
     )
+    unsupported = _detect_unsupported_foreign_embed(html)
+    if unsupported:
+        raise StepError(
+            f"unsupported embed: {unsupported}",
+            error_type=ErrorType.PAUSE,
+            step_name="substack_embedded_media",
+        )
     if extracted_total == 0:
         if not _substack_cookie_configured(config) and _is_substack_unauth_paywall_shell(html):
             raise StepError(

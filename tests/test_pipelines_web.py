@@ -261,6 +261,86 @@ def test_enqueue_embedded_media_logs_redact_rumble_url_query(config, caplog):
     assert "rumble.com/vabc-post" in combined
 
 
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        ({}, False),
+        ({"status": "weird"}, False),
+        ({"status": "error"}, False),
+        ({"status": "queued"}, True),
+        ({"status": "pending"}, True),
+        ({"ingest_id": "ingest-1"}, True),
+    ],
+)
+def test_submit_embed_succeeded_explicit_positive_only(result, expected):
+    from agent.pipelines.web import _submit_embed_succeeded
+
+    assert _submit_embed_succeeded(result) is expected
+
+
+@pytest.mark.parametrize(
+    "submit_return",
+    [
+        {},
+        {"status": "weird"},
+        {"status": "error"},
+    ],
+)
+def test_enqueue_embedded_media_rejects_non_explicit_submit_result(
+    config, caplog, submit_return,
+):
+    import logging
+
+    from agent.pipelines.web import _enqueue_embedded_media
+
+    caplog.set_level(logging.WARNING, logger="agent.pipelines.web")
+
+    with patch("agent.core.submit.submit_ingest", return_value=submit_return):
+        with patch("agent.db.init_db") as mock_init:
+            conn = MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"n": 0}
+            mock_init.return_value = conn
+            stats = _enqueue_embedded_media(
+                "parent_slug",
+                ["https://example.com/img.png"],
+                [],
+                [],
+                [],
+                "https://example.com/post",
+                config,
+                None,
+            )
+
+    assert stats.success_count == 0
+    rejects = [r for r in caplog.records if "embedded media enqueue not accepted" in r.message]
+    assert len(rejects) == 1
+
+
+def test_enqueue_embedded_media_counts_queued_submit_result(config):
+    from agent.pipelines.web import _enqueue_embedded_media
+
+    with patch(
+        "agent.core.submit.submit_ingest",
+        return_value={"status": "queued", "ingest_id": "ingest-1"},
+    ):
+        with patch("agent.db.init_db") as mock_init:
+            conn = MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"n": 1}
+            mock_init.return_value = conn
+            stats = _enqueue_embedded_media(
+                "parent_slug",
+                ["https://example.com/img.png"],
+                [],
+                [],
+                [],
+                "https://example.com/post",
+                config,
+                None,
+            )
+
+    assert stats.success_count == 1
+
+
 # ── _estimate_tokens tests ────────────────────────────────────────────────────
 
 def test_estimate_tokens_empty():
