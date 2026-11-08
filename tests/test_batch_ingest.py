@@ -250,6 +250,28 @@ class TestAppendToParent:
 
 
 class TestDeferredSynthesizeTags:
+    def test_parent_tags_ignores_synthesize_task_row(self, conn):
+        import scripts.batch_ingest as batch_ingest
+
+        parent = "parent_with_synth_dup"
+        create_task(
+            conn,
+            "https://blog.substack.com/p/x",
+            "substack_text",
+            parent,
+            ["substack_cleanup"],
+            tags=["article-tag"],
+        )
+        create_task(
+            conn,
+            "https://blog.substack.com/p/x",
+            "substack_text_synthesize",
+            parent,
+            ["synthesize_note"],
+            tags='["synth-only"]',
+        )
+        assert batch_ingest._parent_tags(conn, parent) == ["article-tag"]
+
     def test_dispatch_includes_parent_tags_from_task(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
 
@@ -521,7 +543,7 @@ class TestKbOcrSizeCap:
         body = text[start : text.index("@app.local_entrypoint", start)]
         assert "for item in images:" in body
         assert "except Exception" in body
-        assert '{"name":name,"error":str(exc)}' in body.replace(" ", "")
+        assert '"error":safe' in body.replace(" ", "") or '"error": safe' in body
 
     def test_main_writes_error_ocr_json(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
@@ -1461,7 +1483,7 @@ class TestChildProcessLogScrubbing:
         monkeypatch.setattr(batch_ingest, "record_batch_run", lambda _c: 9)
         monkeypatch.setattr(
             batch_ingest,
-            "submit_url",
+            "submit_standalone_non_video_for_batch",
             lambda *_a, **_k: {
                 "status": "error",
                 "error": "firecrawl refused /root/.hermes/profiles api_key=xyz",
@@ -1604,44 +1626,63 @@ class TestCorruptJsonHandling:
 
 
 class TestStandaloneNonVideoDispatch:
-    """Mirror batch_ingest standalone non-video dispatch gate (pending + task_id only)."""
+    """batch_ingest standalone non-video dispatch + requeue invariants."""
 
-    @staticmethod
-    def _apply_non_video_status(conn, ingest_id: str, r: dict) -> str | None:
-        from agent.db import update_ingest_status
+    def test_skipped_submit_requeues_ingest(self, conn):
+        import scripts.batch_ingest as batch_ingest
 
-        status = r.get("status")
-        if status == "pending" and r.get("task_id"):
-            update_ingest_status(conn, ingest_id, "dispatched")
-            return "dispatched"
-        if status in ("skipped", "paused"):
-            return None
-        update_ingest_status(conn, ingest_id, "failed", error=str(r.get("error") or status))
-        return "failed"
-
-    def test_skipped_submit_leaves_ingest_queued(self, conn):
         ingest_id, _ = queue_ingest(conn, "https://example.com/page", "web", "web_slug")
-        outcome = self._apply_non_video_status(
+        conn.execute("UPDATE ingest_queue SET status='downloading' WHERE id=?", (ingest_id,))
+        conn.commit()
+        outcome = batch_ingest.apply_standalone_non_video_result(
             conn, ingest_id, {"status": "skipped", "reason": "Already in vault"},
         )
         assert outcome is None
         row = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone()
         assert row["status"] == "queued"
 
-    def test_paused_submit_leaves_ingest_queued(self, conn):
+    def test_paused_submit_requeues_ingest(self, conn):
+        import scripts.batch_ingest as batch_ingest
+
         ingest_id, _ = queue_ingest(conn, "https://example.com/page2", "web", "web_slug2")
-        outcome = self._apply_non_video_status(
-            conn, ingest_id, {"status": "paused", "task_id": "paused-task", "reason": "cookies"},
+        conn.execute("UPDATE ingest_queue SET status='downloading' WHERE id=?", (ingest_id,))
+        conn.commit()
+        outcome = batch_ingest.apply_standalone_non_video_result(
+            conn, ingest_id, {"status": "paused", "reason": "cookies"},
         )
         assert outcome is None
         row = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone()
         assert row["status"] == "queued"
 
     def test_pending_with_task_id_dispatches(self, conn):
+        import scripts.batch_ingest as batch_ingest
+
         ingest_id, _ = queue_ingest(conn, "https://example.com/page3", "web", "web_slug3")
-        outcome = self._apply_non_video_status(
+        conn.execute("UPDATE ingest_queue SET status='downloading' WHERE id=?", (ingest_id,))
+        conn.commit()
+        outcome = batch_ingest.apply_standalone_non_video_result(
             conn, ingest_id, {"status": "pending", "task_id": "new-task"},
         )
         assert outcome == "dispatched"
         row = conn.execute("SELECT status FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone()
         assert row["status"] == "dispatched"
+
+    def test_batch_preflight_pause_skips_paused_task(self, config, conn, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        monkeypatch.setattr(
+            batch_ingest,
+            "plan_submission",
+            lambda url, cfg, ignore_dedup=False: {
+                "status": "paused",
+                "reason": "cookie jar empty",
+                "platform": "youtube",
+            },
+        )
+        r = batch_ingest.submit_standalone_non_video_for_batch(
+            conn, "https://youtube.com/watch?v=abc", config,
+        )
+        assert r["status"] == "paused"
+        assert "task_id" not in r
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before

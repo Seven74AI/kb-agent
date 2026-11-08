@@ -24,6 +24,7 @@ from agent.core import (
     resume_tasks,
     submit_plan,
 )
+from agent.core.redact import redact_outward_url_field, url_for_display
 from agent.core.resume import ResumeReasonError, normalize_reason_pattern
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, get_last_batch_run, list_ingest_queue, remove_ingest
 from scripts.batch_ingest import refresh_parent_media_manifest
@@ -172,6 +173,7 @@ def submit():
 
     body = {k: v for k, v in result.items() if k not in ("http_status", "status")}
     body["status"] = result["status"]
+    body = redact_outward_url_field(body)
     return jsonify(body), result["http_status"]
 
 
@@ -592,6 +594,8 @@ def dashboard():
     for q in ingest:
         if q.get("error"):
             q["error"] = sanitize_visible_message(q["error"])
+        if q.get("url"):
+            q["url"] = url_for_display(q["url"])
     if last_run and last_run.get("summary"):
         last_run = {**last_run, "summary": sanitize_visible_message(last_run["summary"])}
     for task in tasks:

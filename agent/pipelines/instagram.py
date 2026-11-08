@@ -90,10 +90,9 @@ CAROUSEL_SLIDE_CAP = 2
 
 def _download_artifact_stem(task: dict) -> str:
     """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    if task.get("_batch_ingest"):
-        return task["id"]
-    slug = task.get("slug", task["id"][:8])
-    return _slug_path(slug)
+    from agent.pipelines.video_common import _artifact_stem
+
+    return _artifact_stem(task)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -644,18 +643,20 @@ asyncio.run(main())
 
     if result.returncode != 0:
         raise StepError(
-            f"Playwright carousel extraction failed: {result.stderr.strip()[:200]}",
+            "Playwright carousel extraction failed",
             error_type=ErrorType.RETRY,
             step_name="carousel_extract",
+            details=sanitize_visible_message(result.stderr.strip()[:500]),
         )
 
     try:
         slides = json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         raise StepError(
-            f"Failed to parse Playwright output for carousel: {result.stdout[:200]}",
+            "Failed to parse Playwright output for carousel",
             error_type=ErrorType.RETRY,
             step_name="carousel_extract",
+            details=sanitize_visible_message(result.stdout.strip()[:500]),
         )
 
     # Write extracted slides

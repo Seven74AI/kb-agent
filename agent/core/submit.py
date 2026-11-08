@@ -8,12 +8,14 @@ from agent.core.slugify import slugify
 from agent.db import create_task, find_active_task, queue_ingest
 from agent.detection import (
     DedupCheckError,
+    consume_threads_subtype_fetch_failed,
     dedup_check,
     detect_content_subtype,
     detect_platform,
     normalize_url,
     preflight_health,
 )
+from agent.core.redact import redact_outward_url_field, url_for_display
 from agent.notify import sanitize_visible_message
 
 
@@ -67,7 +69,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
             "http_status": 400,
             "error": "unknown content_type",
             "platform": platform,
-            "url": url,
+            "url": url_for_display(url),
         }
 
     steps = get_pipeline_names(subtype, platform)
@@ -77,10 +79,13 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
             "http_status": 400,
             "error": f"unknown content_type: {subtype}",
             "platform": platform,
-            "url": url,
+            "url": url_for_display(url),
         }
 
     ok, reason = preflight_health(platform)
+    if platform == "threads" and consume_threads_subtype_fetch_failed():
+        ok = False
+        reason = reason or "Threads subtype fetch failed — retry when cookies or network recover"
     slug = slugify(url, content_type=subtype)
     pause_reason = sanitize_visible_message(reason) if (not ok and reason) else None
 
@@ -146,7 +151,7 @@ def submit_url(
     """
     plan = plan_submission(url, config, ignore_dedup=ignore_dedup)
     if plan["status"] in ("error", "skipped"):
-        return plan
+        return redact_outward_url_field(plan)
     return submit_plan(agent_conn, plan, tags=tags)
 
 

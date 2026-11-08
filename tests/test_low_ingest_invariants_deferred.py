@@ -62,6 +62,57 @@ def test_see_also_counts_links_only_in_see_also_section():
     assert _see_also_link_count(body, "## Voir aussi") == 0
 
 
+def test_step_see_also_appends_section_when_header_missing(config):
+    """Notes without a See Also stub must gain the section; count is section-only."""
+    task_dict = {"slug": "no-see-also-header", "content_type": "web", "id": "task-no-header"}
+    folder = config.vault_path / "Knowledge base" / "articles"
+    note_path = folder / f"{task_dict['slug']}.md"
+    note_path.write_text(
+        "# Book summary\n\nBody only — no See Also section.\n",
+        encoding="utf-8",
+    )
+    other = folder / "peer.md"
+    other.write_text("# Peer\nOverlap.\n", encoding="utf-8")
+
+    with patch("agent.pipelines.see_also._search_vault", return_value=[other]), patch(
+        "agent.pipelines.see_also.get_llm_client"
+    ) as mock_llm:
+        mock_llm.return_value.call.return_value = MagicMock(
+            content="## See Also\n- [[peer]] — related\n- [[peer-two]] — also\n"
+        )
+        result = step_see_also(task_dict, config)
+
+    updated = note_path.read_text(encoding="utf-8")
+    assert updated.endswith("## See Also\n- [[peer]] — related\n- [[peer-two]] — also")
+    assert "## See Also" in updated
+    assert "Added 2 See Also links" in result
+    assert _see_also_link_count(updated, "## See Also") == 2
+
+
+def test_step_see_also_reported_count_ignores_body_wikilinks(config):
+    """Status message must not count wikilinks outside the See Also section."""
+    task_dict = {"slug": "body-wikilinks-only", "content_type": "web", "id": "task-body-wl"}
+    folder = config.vault_path / "Knowledge base" / "articles"
+    note_path = folder / f"{task_dict['slug']}.md"
+    note_path.write_text(
+        "Mentions [[alpha]] and [[beta]] and [[gamma]] in the body.\n",
+        encoding="utf-8",
+    )
+    other = folder / "delta.md"
+    other.write_text("# Delta\n", encoding="utf-8")
+
+    with patch("agent.pipelines.see_also._search_vault", return_value=[other]), patch(
+        "agent.pipelines.see_also.get_llm_client"
+    ) as mock_llm:
+        mock_llm.return_value.call.return_value = MagicMock(
+            content="## See Also\n- [[delta]] — one link\n"
+        )
+        result = step_see_also(task_dict, config)
+
+    assert "Added 1 See Also links" in result
+    assert "Added 4" not in result
+
+
 def test_step_see_also_refreshes_when_body_has_many_wikilinks(config):
     task_dict = {"slug": "see-also-body-links", "content_type": "web", "id": "task-see-also"}
     folder = config.vault_path / "Knowledge base" / "articles"
@@ -86,13 +137,13 @@ def test_step_see_also_refreshes_when_body_has_many_wikilinks(config):
     assert "[[other-note]]" in updated
 
 
-def test_detect_threads_subtype_returns_unknown_on_fetch_failure(monkeypatch, caplog):
+def test_detect_threads_subtype_returns_text_on_fetch_failure(monkeypatch, caplog):
     def boom(cmd, **kwargs):
         raise OSError("network down")
 
     monkeypatch.setattr("agent.detection.subprocess.run", boom)
     caplog.set_level(logging.WARNING)
-    assert _detect_threads_subtype("https://threads.net/@u/post/1") == "unknown"
+    assert _detect_threads_subtype("https://threads.net/@u/post/1") == "threads_text"
     assert any("Threads subtype fetch failed" in r.message for r in caplog.records)
 
 

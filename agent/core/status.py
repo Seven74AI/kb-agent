@@ -2,9 +2,9 @@
 
 import sqlite3
 from datetime import UTC, datetime
-from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.core.redact import url_for_display
 from agent.db import get_all_tasks, get_last_log_line, get_task_steps
 from agent.notify import sanitize_visible_message
 
@@ -12,20 +12,8 @@ _ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
 
 
 def redact_source_url_for_display(source_url: str) -> str:
-    """Dashboard/MCP-safe source_url: http(s) unchanged; local filesystem paths redacted."""
-    if not source_url:
-        return source_url
-    stripped = source_url.strip()
-    parsed = urlparse(stripped)
-    if parsed.scheme in _ALLOWED_SOURCE_URL_SCHEMES:
-        return stripped
-    if parsed.scheme == "file":
-        name = Path(parsed.path).name
-        return name if name else "<local-path>"
-    if parsed.scheme == "" and stripped.startswith("/"):
-        name = Path(stripped).name
-        return name if name else "<local-path>"
-    return stripped
+    """Dashboard/MCP-safe source_url (delegates to :func:`url_for_display`)."""
+    return url_for_display(source_url)
 
 
 def source_url_href(source_url: str) -> str | None:
@@ -34,7 +22,7 @@ def source_url_href(source_url: str) -> str | None:
         return None
     parsed = urlparse(source_url.strip())
     if parsed.scheme in _ALLOWED_SOURCE_URL_SCHEMES:
-        return source_url.strip()
+        return url_for_display(source_url)
     return None
 
 

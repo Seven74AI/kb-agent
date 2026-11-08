@@ -11,6 +11,7 @@ import os
 
 import httpx
 
+from agent.core.redact import url_for_display
 from agent.notify import redact_credential_shapes, sanitize_visible_message
 
 MODEL = "typesafe/jev-1.14"
@@ -72,7 +73,7 @@ def route_jev(url: str, content: str | None = None, api_key: str | None = None) 
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
 
-    safe_url = redact_credential_shapes(url)
+    safe_url = url_for_display(url)
     state = f"URL: {safe_url}"
     if content:
         state += f"\nContent: {redact_credential_shapes(content)}"

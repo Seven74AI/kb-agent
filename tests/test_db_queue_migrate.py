@@ -366,6 +366,55 @@ def test_get_next_step_blocks_on_media_gate_pause(tmp_path):
     assert nxt["status"] == "paused"
 
 
+def test_bootstrap_parent_media_deferral_siblings_no_spurious_media_changed(tmp_path):
+    from agent.db import (
+        bootstrap_parent_media_deferral_from_siblings,
+        get_parent_media_deferral,
+    )
+    import uuid
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "aligned_parent"
+    url = "https://blog.substack.com/p/aligned"
+    create_task(
+        conn,
+        url,
+        "substack_text",
+        parent,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    for i in range(2):
+        conn.execute(
+            """
+            INSERT INTO ingest_queue (id, url, content_type, slug, status, parent_slug, media_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                f"https://example.com/{i}.png",
+                "substack_image",
+                f"img{i}",
+                "queued",
+                parent,
+                "image",
+            ),
+        )
+    manifest = tmp_path / f"{parent}_media.json"
+    manifest.write_text(
+        json.dumps({"total": 2, "url": url, "content_type": "substack_text"}),
+        encoding="utf-8",
+    )
+    conn.commit()
+
+    bootstrap_parent_media_deferral_from_siblings(conn, parent, tmp_path)
+    deferral = get_parent_media_deferral(conn, parent)
+    assert deferral is not None
+    assert deferral["expected_total"] == 2
+    assert deferral["media_changed"] == 0
+
+
 def test_bootstrap_parent_media_deferral_high_water_enqueues_shortfall(tmp_path):
     from agent.db import (
         bootstrap_parent_media_deferral_from_siblings,
@@ -1093,6 +1142,39 @@ def test_find_active_task_synthesize_slug_wide(tmp_path):
     )
     assert find_active_task(conn, slug, "substack_image_synthesize") == synth_id
     assert find_active_task(conn, slug, "substack_text") is None
+
+
+def test_find_active_task_prefers_oldest_row_when_duplicates_exist(tmp_path):
+    """Invariant: LIMIT 1 without ORDER BY is nondeterministic — oldest wins."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "dup_parent"
+    older_id = create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="pending",
+    )
+    newer_id = create_task(
+        conn,
+        "https://blog.substack.com/p/x",
+        "substack_image_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="pending",
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = datetime('now', '-2 hours') WHERE id = ?",
+        (older_id,),
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = datetime('now', '-1 hour') WHERE id = ?",
+        (newer_id,),
+    )
+    conn.commit()
+    assert find_active_task(conn, slug, "substack_text_synthesize") == older_id
 
 
 def test_recover_stale_ingest_increments_attempts(tmp_path):
