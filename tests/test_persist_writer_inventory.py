@@ -21,6 +21,14 @@ _SCRIPTS_RAW_WRITE_ALLOWLIST = frozenset(
 # machine_local operator-secret cookie upload, byte-exact by design
 _AGENT_WRITE_BYTES_ALLOWLIST = frozenset({"agent/webhook.py"})
 
+# Ephemeral /tmp byte staging inside Modal GPU workers (not durable kb artifacts)
+_OPEN_WRITE_ALLOWLIST = frozenset(
+    {
+        "modal/kb_transcribe.py",
+        "modal/kb_ocr.py",
+    },
+)
+
 
 def _py_files_under(*roots: tuple[str, ...]) -> list[Path]:
     out: list[Path] = []
@@ -93,11 +101,89 @@ def _is_path_write_bytes(node: ast.Call) -> bool:
     return isinstance(node.func.value, (ast.Name, ast.Attribute))
 
 
+_NON_BUILTIN_OPEN_MODULES = frozenset(
+    {
+        "gzip",
+        "bz2",
+        "lzma",
+        "zipfile",
+        "wave",
+        "codecs",
+        "io",
+        "Image",
+        "pymupdf",
+        "fitz",
+        "PIL",
+    },
+)
+
+
+def _is_open_call(node: ast.Call) -> bool:
+    if isinstance(node.func, ast.Name) and node.func.id == "open":
+        return True
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "open":
+        base = node.func.value
+        if isinstance(base, ast.Name) and base.id in _NON_BUILTIN_OPEN_MODULES:
+            return False
+        return True
+    return False
+
+
+def _open_mode_from_call(node: ast.Call) -> str:
+    mode = "r"
+    if len(node.args) >= 2:
+        arg = node.args[1]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            mode = arg.value
+    for kw in node.keywords:
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant) and isinstance(
+            kw.value.value,
+            str,
+        ):
+            mode = kw.value.value
+    return mode
+
+
+def _is_write_open_mode(mode: str) -> bool:
+    if not mode or mode == "r":
+        return False
+    return mode[0] in ("w", "a", "x")
+
+
+def _with_handle_names(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Tuple):
+        return {
+            elt.id
+            for elt in node.elts
+            if isinstance(elt, ast.Name)
+        }
+    return set()
+
+
+def _block_writes_handles(stmts: list[ast.stmt], handle_names: set[str]) -> bool:
+    if not handle_names:
+        return False
+    for stmt in stmts:
+        for child in ast.walk(stmt):
+            if not isinstance(child, ast.Call) or not isinstance(child.func, ast.Attribute):
+                continue
+            if child.func.attr not in ("write", "writelines"):
+                continue
+            if isinstance(child.func.value, ast.Name) and child.func.value.id in handle_names:
+                return True
+    return False
+
+
 def _collect_raw_disk_writers(
     tree: ast.AST,
     rel: str,
     *,
     allow_write_bytes: bool = False,
+    allow_open_write: bool = False,
 ) -> list[str]:
     violations: list[str] = []
 
@@ -105,6 +191,7 @@ def _collect_raw_disk_writers(
         def __init__(self) -> None:
             self._func_stack: list[str] = []
             self._allow_write_bytes = allow_write_bytes
+            self._allow_open_write = allow_open_write
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             self._func_stack.append(node.name)
@@ -115,6 +202,21 @@ def _collect_raw_disk_writers(
             self._func_stack.append(node.name)
             self.generic_visit(node)
             self._func_stack.pop()
+
+        def visit_With(self, node: ast.With) -> None:
+            if not self._allow_open_write:
+                for item in node.items:
+                    ctx = item.context_expr
+                    if not isinstance(ctx, ast.Call) or not _is_open_call(ctx):
+                        continue
+                    if not _is_write_open_mode(_open_mode_from_call(ctx)):
+                        continue
+                    names = _with_handle_names(item.optional_vars)
+                    if _block_writes_handles(node.body, names):
+                        func = self._func_stack[-1] if self._func_stack else "<module>"
+                        violations.append(f"{rel}:{func} -> open+write")
+                        break
+            self.generic_visit(node)
 
         def visit_Call(self, node: ast.Call) -> None:
             func = self._func_stack[-1] if self._func_stack else "<module>"
@@ -140,8 +242,14 @@ def test_inventory_no_raw_disk_writers_outside_persist_and_allowlist():
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         allow_wb = rel in _AGENT_WRITE_BYTES_ALLOWLIST
+        allow_open = rel in _OPEN_WRITE_ALLOWLIST
         errors.extend(
-            _collect_raw_disk_writers(tree, rel, allow_write_bytes=allow_wb),
+            _collect_raw_disk_writers(
+                tree,
+                rel,
+                allow_write_bytes=allow_wb,
+                allow_open_write=allow_open,
+            ),
         )
     for path in _inventory_script_paths():
         rel = str(path.relative_to(_REPO)).replace("\\", "/")
@@ -168,6 +276,20 @@ def test_collect_raw_disk_writers_flags_json_dump_to_open_handle():
     tree = ast.parse(src)
     hits = _collect_raw_disk_writers(tree, "example.py")
     assert hits == ["example.py:main -> json.dump"]
+
+
+def test_collect_raw_disk_writers_flags_bare_open_write():
+    src = "def main():\n    with open(path, 'w') as f:\n        f.write('payload')\n"
+    tree = ast.parse(src)
+    hits = _collect_raw_disk_writers(tree, "scripts/evil.py")
+    assert hits == ["scripts/evil.py:main -> open+write"]
+
+
+def test_collect_raw_disk_writers_flags_bare_open_writelines():
+    src = "def main():\n    with open(path, 'a') as f:\n        f.writelines(lines)\n"
+    tree = ast.parse(src)
+    hits = _collect_raw_disk_writers(tree, "example.py")
+    assert hits == ["example.py:main -> open+write"]
 
 
 def test_collect_raw_disk_writers_flags_json_dumps_write():
@@ -299,6 +421,13 @@ def test_persist_machine_local_writes_verbatim(tmp_path):
     out = tmp_path / "local.conf"
     persist_durable_text(out, raw, policy="machine_local")
     assert out.read_text(encoding="utf-8") == raw
+
+
+def test_persist_machine_local_append_preserves_existing(tmp_path):
+    out = tmp_path / "batch.log"
+    persist_durable_text(out, "line1\n", policy="machine_local")
+    persist_durable_text(out, "line2\n", policy="machine_local", append=True)
+    assert out.read_text(encoding="utf-8") == "line1\nline2\n"
 
 
 def test_persist_vault_scrubs_frontmatter_and_body_urls(tmp_path):
