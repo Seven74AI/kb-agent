@@ -229,8 +229,7 @@ class TestThreadsCurlRedirects:
         cookie_path = cookie_dir / "threads_cookies.txt"
         assert str(cookie_path) not in cmd
         conf_path = cookie_dir / ".curl-threads_cookies.txt.conf"
-        assert conf_path.is_file()
-        assert oct(conf_path.stat().st_mode)[-3:] == "600"
+        assert not conf_path.exists(), "curl sidecar must not persist after threads curl"
 
 
 class TestThreadsSsrf:

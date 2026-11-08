@@ -43,6 +43,15 @@ MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_PIXELS = 4_194_304  # 2048 x 2048
 MAX_NEW_OCR_TOKENS = 768
 
+
+def _sanitize_modal_log(message: str, *, limit: int = 400) -> str:
+    """Keep Modal worker logs short and free of noisy subprocess dumps."""
+    text = str(message or "").replace("\n", " ").strip()
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
 PROMPT = (
     "Transcribe every piece of text visible in this image, verbatim and complete, "
     "preserving order. Then, in a separate paragraph after the text, describe what "
@@ -60,6 +69,14 @@ def read_images(images: list) -> list:
     import torch
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
     from qwen_vl_utils import process_vision_info
+
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    try:
+        import pillow_avif  # noqa: F401 — registers AVIF support with Pillow
+    except ImportError:
+        pillow_avif = None
 
     os.environ["HF_HOME"] = CACHE  # route the model cache onto the volume
 
@@ -125,8 +142,9 @@ def read_images(images: list) -> list:
             results.append({"name": name, "reading": reading})
             print(f"[{name}] {len(reading)} chars in {time.time() - t0:.0f}s", flush=True)
         except Exception as exc:
-            print(f"[{name}] failed: {exc}", flush=True)
-            results.append({"name": name, "error": str(exc)})
+            safe = _sanitize_modal_log(exc)
+            print(f"[{name}] failed: {safe}", flush=True)
+            results.append({"name": name, "error": safe})
     return results
 
 

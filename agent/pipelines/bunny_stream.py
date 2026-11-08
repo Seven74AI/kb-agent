@@ -18,6 +18,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
+from agent.pipelines.video_common import _artifact_stem
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -45,9 +46,7 @@ BUNNY_REFERER = "Referer: https://player.mediadelivery.net/"
 
 def _download_artifact_stem(task: dict) -> str:
     """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    if task.get("_batch_ingest"):
-        return task["id"]
-    return task.get("slug", task["id"][:8])
+    return _artifact_stem(task)
 
 
 BUNNY_UUID_RE = re.compile(
@@ -333,29 +332,30 @@ NE TRADUIS JAMAIS vers l'anglais. Contenu et libellés de sections en français 
 
 def step_synthesize_note(task: dict, config: Config) -> str:
     """LLM synthesis for Bunny Stream / TDAH summit talks (French note)."""
-    slug = task.get("slug", task["id"][:8])
+    stem = _artifact_stem(task)
+    display_slug = task.get("slug", task["id"][:8])
     source_url = task.get("source_url", "")
 
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     if not merged_path.exists():
         raise FileNotFoundError(f"Merged transcript not found: {merged_path}")
 
     merged = json.loads(merged_path.read_text())
     transcript_text = _format_transcript_for_llm(merged)
 
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     metadata = json.loads(meta_path.read_text()) if meta_path.exists() else {}
 
     logs_conn = init_db(config.kb_agent_dir / "data" / "logs.db", LOGS_SCHEMA)
     llm = get_llm_client(config)
     llm.set_task_context(task["id"], logs_conn)
 
-    system_prompt = _build_synthesis_prompt(source_url, slug, config)
+    system_prompt = _build_synthesis_prompt(source_url, display_slug, config)
     user_prompt = (
         "Voici la transcription complète (locuteurs et timestamps). "
         "Lis-la intégralement, puis rédige la note de base de connaissances "
         "en suivant le modèle et les règles du prompt système.\n\n"
-        f"Titre suggéré : {metadata.get('title', slug)}\n\n"
+        f"Titre suggéré : {metadata.get('title', display_slug)}\n\n"
         f"=== TRANSCRIPTION ===\n{transcript_text}\n=== FIN ==="
     )
 
@@ -379,7 +379,7 @@ def step_synthesize_note(task: dict, config: Config) -> str:
         role="synthesis",
     )
 
-    note_path = _note_path(config, slug)
+    note_path = _note_path(config, display_slug)
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(strip_code_fence(response.content), encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
@@ -411,12 +411,13 @@ def step_quality_gate(task: dict, config: Config) -> str:
 
 def step_minio_upload(task: dict, config: Config) -> str:
     """Upload MP4, MP3, and merged transcript JSON to MinIO."""
-    slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{slug}.mp4"
+    stem = _artifact_stem(task)
+    display_slug = task.get("slug", task["id"][:8])
+    video_path = Path(config.temp_dir) / f"{stem}.mp4"
 
-    uploaded = upload_video_artifacts(slug, config, video_path)
+    uploaded = upload_video_artifacts(stem, config, video_path)
 
-    _update_note_source_files(slug, config, uploaded)
+    _update_note_source_files(display_slug, config, uploaded)
     return f"Uploaded: {', '.join(uploaded)}"
 
 

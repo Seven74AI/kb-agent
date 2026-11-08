@@ -611,6 +611,7 @@ def find_active_task(
         row = conn.execute(
             "SELECT id, status FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
+            "ORDER BY created_at ASC, id ASC "
             "LIMIT 1",
             (slug,),
         ).fetchone()
@@ -618,6 +619,7 @@ def find_active_task(
         row = conn.execute(
             "SELECT id, status FROM tasks WHERE slug = ? AND content_type = ? "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
+            "ORDER BY created_at ASC, id ASC "
             "LIMIT 1",
             (slug, content_type),
         ).fetchone()
@@ -657,6 +659,7 @@ def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
             f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
             f"AND status IN ({_SYNTHESIZE_IN_FLIGHT_STATUSES}) "
             f"AND datetime(updated_at) {op} datetime(?) "
+            "ORDER BY created_at ASC, id ASC "
             "LIMIT 1",
             (slug, anchor),
         ).fetchone()
@@ -664,6 +667,7 @@ def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         f"AND status IN ({_SYNTHESIZE_IN_FLIGHT_STATUSES}) "
+        "ORDER BY created_at ASC, id ASC "
         "LIMIT 1",
         (slug,),
     ).fetchone()
@@ -1366,12 +1370,11 @@ def bootstrap_parent_media_deferral_from_siblings(
     source_url, content_type = _lookup_parent_article_metadata(conn, parent_slug)
     if not source_url or not content_type:
         return
-    grew = expected > 0
     ensure_parent_media_deferral(
         conn, parent_slug, source_url, content_type, expected,
     )
     _mark_parent_media_enqueue_shortfall(
-        conn, parent_slug, sibling_n, expected, expected_grew=grew,
+        conn, parent_slug, sibling_n, expected,
     )
 
 

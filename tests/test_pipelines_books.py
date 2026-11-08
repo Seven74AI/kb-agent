@@ -16,6 +16,8 @@ from agent.detection import _classify_mega_filenames
 from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.pipelines.books import (
     CLASSIFY_BOOK_PIPELINES,
+    _book_child_slug,
+    _vault_frontmatter_source_url,
     _pdf_preflight,
     quality_score,
     step_extract_epub,
@@ -839,6 +841,199 @@ class TestDelegateBooks:
             f"{mega_task['slug']}_alpha",
             f"{mega_task['slug']}_beta",
         ]
+
+    def test_delegate_reuses_failed_child_instead_of_duplicate(
+        self, config, mega_task, tmp_path,
+    ):
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        epub_path = dl_dir / "alpha.epub"
+        epub_path.write_text("epub a")
+
+        classify_json = json.dumps({
+            "books": [{
+                "path": str(epub_path),
+                "filename": "alpha.epub",
+                "pipeline": "book_epub",
+            }],
+        })
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        child_slug = f"{mega_task['slug']}_alpha"
+        failed_id = create_task(
+            conn,
+            str(epub_path),
+            "book_epub",
+            child_slug,
+            ["extract_text", "synthesize_note"],
+            status="failed",
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'failed', output = 'boom' WHERE task_id = ?",
+            (failed_id,),
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'done', output = ? "
+            "WHERE task_id = ? AND name = 'classify_content'",
+            (classify_json, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        mega_task["id"] = parent_id
+        result = json.loads(step_delegate_books(mega_task, config))
+        assert result["child_tasks_created"] == 1
+        assert result["created"][0]["task_id"] == failed_id
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        rows = conn.execute(
+            "SELECT id, status FROM tasks WHERE slug = ? AND content_type = 'book_epub'",
+            (child_slug,),
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert rows[0][0] == failed_id
+        assert rows[0][1] == "pending"
+
+    def test_delegate_redelgates_completed_child_only_when_source_changes(
+        self, config, mega_task, tmp_path,
+    ):
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        sub_a = dl_dir / "pack_a"
+        sub_b = dl_dir / "pack_b"
+        sub_a.mkdir(parents=True)
+        sub_b.mkdir(parents=True)
+        epub_v1 = sub_a / "alpha.epub"
+        epub_v2 = sub_b / "alpha.epub"
+        epub_v1.write_text("v1")
+        epub_v2.write_text("v2")
+
+        child_slug = f"{mega_task['slug']}_alpha"
+        classify_v1 = json.dumps({
+            "books": [{
+                "path": str(epub_v1),
+                "filename": "alpha.epub",
+                "pipeline": "book_epub",
+            }],
+        })
+        classify_v2 = json.dumps({
+            "books": [{
+                "path": str(epub_v2),
+                "filename": "alpha.epub",
+                "pipeline": "book_epub",
+            }],
+        })
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        done_id = create_task(
+            conn,
+            str(epub_v1),
+            "book_epub",
+            child_slug,
+            ["extract_text"],
+            status="completed",
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'done', output = ? "
+            "WHERE task_id = ? AND name = 'classify_content'",
+            (classify_v1, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        mega_task["id"] = parent_id
+        json.loads(step_delegate_books(mega_task, config))
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        row = conn.execute(
+            "SELECT status, source_url FROM tasks WHERE id = ?",
+            (done_id,),
+        ).fetchone()
+        assert row[0] == "completed"
+        assert Path(row[1]).resolve() == epub_v1.resolve()
+
+        conn.execute(
+            "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'classify_content'",
+            (classify_v2, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        json.loads(step_delegate_books(mega_task, config))
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        row = conn.execute(
+            "SELECT status, source_url FROM tasks WHERE id = ?",
+            (done_id,),
+        ).fetchone()
+        conn.close()
+        assert row[0] == "pending"
+        assert Path(row[1]).resolve() == epub_v2.resolve()
+
+
+class TestBookChildSlug:
+    def test_truncated_child_slugs_differ_by_path_hash(self):
+        from agent.core.slugify import SLUG_MAX_LEN
+
+        parent = "p" * (SLUG_MAX_LEN - 5)
+        path_a = f"/tmp/{'a' * 80}.epub"
+        path_b = f"/tmp/{'b' * 80}.epub"
+        slug_a = _book_child_slug(parent, path_a)
+        slug_b = _book_child_slug(parent, path_b)
+        assert len(slug_a) <= SLUG_MAX_LEN
+        assert len(slug_b) <= SLUG_MAX_LEN
+        assert slug_a != slug_b
+
+
+class TestBookVaultSourceUrl:
+    def test_vault_redacts_local_path_and_mega_fragment(self):
+        local = "/secret/downloads/mybook.epub"
+        assert _vault_frontmatter_source_url(local) == "mybook.epub"
+        mega = "https://mega.nz/file/abc123#super-secret-key"
+        assert "#" not in _vault_frontmatter_source_url(mega)
+        assert "super-secret-key" not in _vault_frontmatter_source_url(mega)
+
+
+class TestMegadlArchiveExtraction:
+    @patch("agent.pipelines.books.subprocess.run")
+    def test_megadl_logs_skipped_rar_when_unar_fails(self, mock_run, config, mega_task):
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "megadl":
+                dl_path = Path(cmd[cmd.index("--path") + 1])
+                (dl_path / "bundle.rar").write_bytes(b"fake")
+                return MagicMock(returncode=0, stderr="", stdout="")
+            return MagicMock(returncode=1, stderr="unar failed", stdout="")
+
+        mock_run.side_effect = fake_run
+        result = json.loads(step_megadl_download(mega_task, config))
+        assert result["file_count"] == 0
+        assert any(call.args[0][0] == "unar" for call in mock_run.call_args_list)
 
 
 # ── MinIO upload source resolution ─────────────────────────────────────────────

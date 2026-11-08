@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
-from agent.detection import _curl_netscape_cookie_config
+from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_sidecar
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -109,10 +109,9 @@ def _assert_threads_video_cdn_url_allowed(url: str) -> None:
 
 def _download_artifact_stem(task: dict) -> str:
     """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    if task.get("_batch_ingest"):
-        return task["id"]
-    slug = task.get("slug", task["id"][:8])
-    return _slug_path(slug)
+    from agent.pipelines.video_common import _artifact_stem
+
+    return _artifact_stem(task)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -152,27 +151,32 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
             step_name="curl_threads",
         ) from exc
 
-    result = subprocess.run(
-        [
-            "curl", "-s", "--max-time", str(timeout),
-            *_curl_netscape_cookie_config(cookie_path),
-            "-H", f"User-Agent: {GOOGLEBOT_UA}",
-            "-H", "Accept: text/html,application/xhtml+xml",
-            "-H", "Accept-Language: en-US,en;q=0.9",
-            "-L", "--max-redirs", "0",
-            url,
-        ],
-        capture_output=True, text=True, timeout=timeout + 10,
-    )
-
-    if result.returncode != 0:
-        raise StepError(
-            f"Threads curl failed (exit {result.returncode}): {result.stderr.strip()[:200]}",
-            error_type=ErrorType.RETRY,
-            step_name="curl_threads",
+    conf_path: Path | None = None
+    try:
+        cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
+        result = subprocess.run(
+            [
+                "curl", "-s", "--max-time", str(timeout),
+                *cookie_args,
+                "-H", f"User-Agent: {GOOGLEBOT_UA}",
+                "-H", "Accept: text/html,application/xhtml+xml",
+                "-H", "Accept-Language: en-US,en;q=0.9",
+                "-L", "--max-redirs", "0",
+                url,
+            ],
+            capture_output=True, text=True, timeout=timeout + 10,
         )
 
-    return result.stdout
+        if result.returncode != 0:
+            raise StepError(
+                f"Threads curl failed (exit {result.returncode}): {result.stderr.strip()[:200]}",
+                error_type=ErrorType.RETRY,
+                step_name="curl_threads",
+            )
+
+        return result.stdout
+    finally:
+        _unlink_curl_netscape_sidecar(conf_path)
 
 
 def _has_video_versions(html: str) -> bool:

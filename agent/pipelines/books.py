@@ -11,12 +11,14 @@ Supports:
 - MinIO upload of source + extracted full text
 """
 
+import hashlib
 import json
 import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
@@ -149,12 +151,34 @@ def step_megadl_download(task: dict, config: Config) -> str:
             if f.suffix.lower() in archive_extensions:
                 extract_dir = dl_dir / f"extracted_{f.stem}"
                 extract_dir.mkdir(parents=True, exist_ok=True)
-                if f.suffix.lower() == ".zip":
+                suffix = f.suffix.lower()
+                if suffix == ".zip":
                     subprocess.run(
                         ["unzip", "-o", str(f), "-d", str(extract_dir)],
                         capture_output=True, timeout=120,
                     )
-                # .rar/.7z not handled in v1 — logged
+                elif suffix == ".rar":
+                    result = subprocess.run(
+                        ["unar", "-no-directory", "-o", str(extract_dir), str(f)],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if result.returncode != 0:
+                        _log.warning(
+                            "megadl_download: skipped .rar archive %s (unar: %s)",
+                            f.name,
+                            (result.stderr or result.stdout or "failed").strip()[:200],
+                        )
+                elif suffix == ".7z":
+                    result = subprocess.run(
+                        ["7z", "x", str(f), f"-o{extract_dir}", "-y"],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if result.returncode != 0:
+                        _log.warning(
+                            "megadl_download: skipped .7z archive %s (7z: %s)",
+                            f.name,
+                            (result.stderr or result.stdout or "failed").strip()[:200],
+                        )
 
         # Find all book files
         all_files = list(dl_dir.rglob("*"))
@@ -272,14 +296,117 @@ def step_classify_content(task: dict, config: Config) -> str:
     })
 
 
+def _book_child_slug(parent_slug: str, file_path: str) -> str:
+    """Deterministic child slug; hash suffix avoids truncation collisions."""
+    from agent.core.slugify import SLUG_MAX_LEN
+
+    stem = Path(file_path).stem
+    base = f"{parent_slug}_{stem}"
+    if len(base) <= SLUG_MAX_LEN:
+        return base
+    digest = hashlib.sha256(str(file_path).encode("utf-8")).hexdigest()[:10]
+    prefix_len = SLUG_MAX_LEN - len(digest) - 1
+    return f"{base[:prefix_len]}_{digest}"
+
+
+def _vault_frontmatter_source_url(source_url: str) -> str:
+    """Vault-safe source_url: redact local paths and Mega decryption fragments."""
+    from agent.core.status import redact_source_url_for_display
+
+    redacted = redact_source_url_for_display(source_url or "")
+    if not redacted:
+        return redacted
+    parsed = urlparse(redacted.strip())
+    if parsed.fragment and (
+        parsed.scheme in ("http", "https")
+        or "mega.nz" in (parsed.netloc or "").lower()
+    ):
+        return redacted.split("#", 1)[0]
+    return redacted
+
+
+def _reset_delegate_child_task(
+    conn, task_id: str, file_path: str,
+) -> None:
+    """Re-queue a delegate child for ingestion (failed terminal or source generation change)."""
+    with conn:
+        conn.execute(
+            """
+            UPDATE task_steps
+            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET source_url = ?, status = 'pending', error = NULL, retries = 0,
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (file_path, task_id),
+        )
+
+
+def _resolve_delegate_child_task(
+    conn,
+    child_slug: str,
+    pipeline: str,
+    file_path: str,
+    steps: list[str],
+    tags,
+) -> str:
+    from agent.db import create_task, find_active_task
+
+    existing_id = find_active_task(conn, child_slug, pipeline)
+    if existing_id:
+        row = conn.execute(
+            "SELECT status, source_url FROM tasks WHERE id = ?",
+            (existing_id,),
+        ).fetchone()
+        status = row[0]
+        src = row[1]
+        same_source = Path(src or "").resolve() == Path(file_path).resolve()
+        if status in ("done", "completed"):
+            if same_source:
+                return existing_id
+            _reset_delegate_child_task(conn, existing_id, file_path)
+            return existing_id
+        if not same_source:
+            conn.execute(
+                "UPDATE tasks SET source_url = ?, updated_at = datetime('now') WHERE id = ?",
+                (file_path, existing_id),
+            )
+        return existing_id
+
+    failed_row = conn.execute(
+        "SELECT id FROM tasks WHERE slug = ? AND content_type = ? AND status = 'failed' "
+        "ORDER BY created_at ASC, id ASC LIMIT 1",
+        (child_slug, pipeline),
+    ).fetchone()
+    if failed_row:
+        task_id = failed_row[0]
+        _reset_delegate_child_task(conn, task_id, file_path)
+        return task_id
+
+    return create_task(
+        conn,
+        file_path,
+        pipeline,
+        child_slug,
+        steps,
+        tags=tags,
+    )
+
+
 def step_delegate_books(task: dict, config: Config) -> str:
     """Create one child task per classified book using its registered pipeline.
 
     Reads the classify_content step output from agent.db and enqueues pending
     tasks for each book whose pipeline is registered (e.g. book_epub, book_pdf).
     """
-    from agent.core.slugify import SLUG_MAX_LEN
-    from agent.db import AGENT_SCHEMA, create_task, find_active_task, init_db
+    from agent.db import AGENT_SCHEMA, init_db
     from agent.pipelines import PIPELINES, get_pipeline_names, import_all_pipelines
 
     import_all_pipelines()
@@ -340,21 +467,11 @@ def step_delegate_books(task: dict, config: Config) -> str:
                 })
                 continue
 
-            stem = Path(file_path).stem
-            child_slug = f"{parent_slug}_{stem}"[:SLUG_MAX_LEN]
+            child_slug = _book_child_slug(parent_slug, file_path)
             steps = get_pipeline_names(pipeline, "")
-            existing_id = find_active_task(conn, child_slug, pipeline)
-            if existing_id:
-                child_id = existing_id
-            else:
-                child_id = create_task(
-                    conn,
-                    file_path,
-                    pipeline,
-                    child_slug,
-                    steps,
-                    tags=tags,
-                )
+            child_id = _resolve_delegate_child_task(
+                conn, child_slug, pipeline, file_path, steps, tags,
+            )
             created.append({
                 "task_id": child_id,
                 "slug": child_slug,
@@ -1004,7 +1121,7 @@ def step_synthesize_book(task: dict, config: Config) -> str:
 topic: [books/{slug[:30]}]
 date: {_today()}
 source: {author} — *{title}* (book)
-source_url: {task.get("source_url", "")}
+source_url: {_vault_frontmatter_source_url(task.get("source_url", ""))}
 source_files:
   text: <filled by archival step>
 confidence: plausible

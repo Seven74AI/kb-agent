@@ -584,15 +584,20 @@ def step_cleanup_temp(task: dict, config: Config) -> str:
     Returns:
         Status message.
     """
-    slug = task.get("slug", task["id"][:8])
+    stem = _artifact_stem(task)
     removed = []
 
-    for suffix in [f"{slug}_8k.wav", f"{slug}_16k.wav",
-                    f"{slug}_diarization.json"]:
+    for suffix in [f"{stem}_8k.wav", f"{stem}_16k.wav",
+                    f"{stem}_diarization.json"]:
         path = Path(config.temp_dir) / suffix
         if path.exists():
             path.unlink()
             removed.append(suffix)
+
+    ytdlp_xdg = Path(config.temp_dir) / "ytdlp_xdg"
+    if ytdlp_xdg.exists():
+        shutil.rmtree(ytdlp_xdg, ignore_errors=True)
+        removed.append("ytdlp_xdg")
 
     return f"Cleaned up: {', '.join(removed)}"
 
@@ -615,18 +620,19 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
     Raises:
         StepError: If synthesis fails.
     """
-    slug = task.get("slug", task["id"][:8])
+    stem = _artifact_stem(task)
+    display_slug = task.get("slug", task["id"][:8])
     source_url = task.get("source_url", "")
 
     # Load merged transcript
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     if not merged_path.exists():
         raise FileNotFoundError(f"Merged transcript not found: {merged_path}")
 
     merged = json.loads(merged_path.read_text())
 
     # Load metadata
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if meta_path.exists():
         metadata = json.loads(meta_path.read_text())
     else:
@@ -650,16 +656,16 @@ def step_synthesize_youtube(task: dict, config: Config) -> str:
 
     # Pass 1: Extract concepts
     concepts = _pass1_extract_concepts(
-        transcript_text, target_concepts, llm, slug, config,
+        transcript_text, target_concepts, llm, display_slug, config,
     )
 
     # Pass 2: Build full note
     note_content = _pass2_build_note(
-        transcript_text, concepts, metadata, merged, source_url, slug, config, llm,
+        transcript_text, concepts, metadata, merged, source_url, display_slug, config, llm,
     )
 
     # Write note to vault
-    note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
+    note_path = config.vault_path / "Knowledge base" / "videos" / f"{display_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(note_content, encoding="utf-8")
     append_note_tags(note_path, task.get("tags"))
@@ -940,13 +946,14 @@ def step_minio_upload(task: dict, config: Config) -> str:
     Uploads .mp4, extracted .mp3, and transcript JSON. Delegates upload to
     archival.upload_file_to_minio and updates note frontmatter with MinIO URLs.
     """
-    slug = task.get("slug", task["id"][:8])
-    video_path = Path(config.temp_dir) / f"{slug}.mp4"
+    stem = _artifact_stem(task)
+    display_slug = task.get("slug", task["id"][:8])
+    video_path = Path(config.temp_dir) / f"{stem}.mp4"
 
-    uploaded = upload_video_artifacts(slug, config, video_path)
+    uploaded = upload_video_artifacts(stem, config, video_path)
 
     # Update note frontmatter with MinIO URLs
-    _update_note_minio_urls(slug, config, uploaded)
+    _update_note_minio_urls(display_slug, config, uploaded)
 
     return f"Uploaded: {', '.join(uploaded)}"
 

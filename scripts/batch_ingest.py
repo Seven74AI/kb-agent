@@ -2,7 +2,7 @@
 """Nightly batch collector — download + batch-transcribe videos, dispatch links.
 
 Reads the durable ingest_queue (status='queued'):
-- Non-video (web/books/substack/...) -> full pipeline task (submit_url).
+- Non-video (web/books/substack/...) -> full pipeline task (batch submit helper).
 - Video -> runs each pipeline's download-phase steps, then ONE batch Modal
   transcription run per content type (scripts/batch_transcribe.py), uploads
   video + transcript to MinIO, and dispatches a synthesize-only task.
@@ -54,7 +54,11 @@ from agent.db import (  # noqa: E402
 )
 from agent.notify import sanitize_visible_message  # noqa: E402
 from agent.core.batch_lock import acquire, release  # noqa: E402
-from agent.core.submit import dispatch_synthesize, submit_url  # noqa: E402
+from agent.core.submit import (  # noqa: E402
+    dispatch_synthesize,
+    plan_submission,
+    submit_plan,
+)
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
 
 # Reject staging huge images to Modal (GPU OOM / pixel bombs).
@@ -308,7 +312,10 @@ def _append_to_parent(
 def _parent_tags(conn, parent_slug: str):
     """Tags for the parent article (task row, else any sibling ingest row)."""
     row = conn.execute(
-        "SELECT tags FROM tasks WHERE slug = ? LIMIT 1",
+        "SELECT tags FROM tasks "
+        "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "ORDER BY created_at ASC, id ASC "
+        "LIMIT 1",
         (parent_slug,),
     ).fetchone()
     if row and row[0]:
@@ -605,6 +612,50 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
             _maybe_dispatch_parent_synthesize(conn, config, q["parent_slug"])
 
 
+def apply_standalone_non_video_result(
+    conn: sqlite3.Connection,
+    ingest_id: str,
+    r: dict,
+) -> str | None:
+    """Map a standalone non-video submit outcome onto ingest_queue status.
+
+    Returns ``dispatched``, ``failed``, or ``None`` when the row is requeued for a later batch.
+    """
+    status = r.get("status")
+    if status == "pending" and r.get("task_id"):
+        update_ingest_status(conn, ingest_id, "dispatched")
+        return "dispatched"
+    if status in ("paused", "skipped"):
+        update_ingest_status(conn, ingest_id, "queued")
+        return None
+    update_ingest_status(conn, ingest_id, "failed", error=str(r.get("error") or status))
+    return "failed"
+
+
+def submit_standalone_non_video_for_batch(
+    conn: sqlite3.Connection,
+    url: str,
+    config,
+    *,
+    tags=None,
+) -> dict:
+    """Classify and enqueue standalone non-video items from the batch collector.
+
+    Preflight pause requeues via :func:`apply_standalone_non_video_result` without
+    creating a paused task (batch will retry on a later nightly run).
+    """
+    plan = plan_submission(url, config, ignore_dedup=True)
+    if plan["status"] in ("error", "skipped"):
+        return plan
+    if plan["status"] == "paused":
+        return {
+            "status": "paused",
+            "reason": plan.get("reason"),
+            "platform": plan.get("platform"),
+        }
+    return submit_plan(conn, plan, tags=tags)
+
+
 def main() -> None:
     config = load_config()
     conn = None
@@ -671,20 +722,21 @@ def main() -> None:
 
         # 3. standalone non-video (existing flow)
         for q in non_video:
-            r = submit_url(q["url"], config, conn, ignore_dedup=True, tags=q.get("tags"))
-            status = r.get("status")
-            if status == "pending" and r.get("task_id"):
-                update_ingest_status(conn, q["id"], "dispatched")
+            r = submit_standalone_non_video_for_batch(
+                conn, q["url"], config, tags=q.get("tags"),
+            )
+            outcome = apply_standalone_non_video_result(conn, q["id"], r)
+            if outcome == "dispatched":
                 dispatched += 1
                 print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id')}")
-            elif status in ("skipped", "paused"):
-                print(f"  [skip-ingest] {q['slug']} ({q['content_type']}): {status} (left queued)")
-            else:
-                update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
+            elif outcome == "failed":
                 failed += 1
-                causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or status}")
-                err_detail = r.get("error") or status
+                causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or r.get('status')}")
+                err_detail = r.get("error") or r.get("status")
                 print(f"  [failed] {q['slug']} -> {_scrub_for_log(err_detail)}")
+            else:
+                detail = r.get("reason") or r.get("status") or "retry later"
+                print(f"  [requeue] {q['slug']} ({q['content_type']}): {detail}")
 
         _reconcile_deferred_parent_syntheses(conn, config)
 

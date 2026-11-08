@@ -20,6 +20,7 @@ from pathlib import Path
 from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.exceptions import ErrorType, StepError
+from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.quality import quality_gate_retry_loop, quality_gate_threads_video, quality_gate_youtube
 from agent.transcription import install_modal_outputs, is_modal_backend, transcribe_modal
@@ -226,7 +227,7 @@ def step_diarize(task: dict, config: Config) -> str:
                 "Pyannote model access denied — check HF_TOKEN",
                 error_type=ErrorType.PAUSE,
                 step_name="diarize",
-                details=stderr[:500],
+                details=sanitize_visible_message(stderr[:500]),
             )
         raise StepError(
             f"Diarization failed: {stderr[:200]}",
@@ -613,11 +614,12 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
     ``{temp_dir}/{slug}_merged.json`` so the content-type synthesize step can
     consume it exactly as if it had just merged locally.
     """
-    slug = task.get("slug", task["id"][:8])
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    stem = _artifact_stem(task)
+    storage_slug = _resolve_slug(task)
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     merged_path.parent.mkdir(parents=True, exist_ok=True)
 
-    dest = f"{config.minio_bucket}/transcripts/{slug}.json"
+    dest = f"{config.minio_bucket}/transcripts/{storage_slug}.json"
     alias = os.environ.get("STORAGE_ALIAS", "minio")
     result = subprocess.run(
         ["mc", "cp", f"{alias}/{dest}", str(merged_path)],
@@ -652,7 +654,7 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
             seg["end"] = nxt if nxt is not None else seg.get("start", 0) + 5.0
     merged_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if not meta_path.exists():
         meta_path.write_text(json.dumps({"duration": _duration_from_merged(data)}), encoding="utf-8")
 

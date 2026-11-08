@@ -15,7 +15,11 @@ from typing import NamedTuple
 from urllib.parse import urljoin, urlparse
 
 from agent.config import Config
-from agent.detection import _safe_url_for_log
+from agent.detection import (
+    _curl_netscape_cookie_config,
+    _safe_url_for_log,
+    _unlink_curl_netscape_sidecar,
+)
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
@@ -119,16 +123,6 @@ def _ingest_download_stem(task: dict) -> str:
     return _resolve_slug(task)
 
 
-def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
-    """Load Netscape cookie jar via curl --config (cookie path must not appear on argv/ps)."""
-    if not cookie_file.is_file():
-        return []
-    conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
-    conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
-    os.chmod(conf_path, 0o600)
-    return ["--config", str(conf_path)]
-
-
 # SSRF curl policy (web.py): ``--max-redirs 0`` on first-party Substack fetches whose
 # URL is validated up-front and must not chain off-origin (post HTML for metadata /
 # embedded-media discovery). The ``/api/v1/video/upload/<id>/src?type=mp4`` endpoint is
@@ -212,12 +206,17 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     domain = urlparse(url).netloc
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
-    cmd = [
-        "curl", "-s", "-L", "--max-redirs", "0",
-        "--max-time", "30", *_curl_netscape_cookie_config(cookie), url,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
-    html = result.stdout or ""
+    conf_path: Path | None = None
+    try:
+        cookie_args, conf_path = _curl_netscape_cookie_config(cookie)
+        cmd = [
+            "curl", "-s", "-L", "--max-redirs", "0",
+            "--max-time", "30", *cookie_args, url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        html = result.stdout or ""
+    finally:
+        _unlink_curl_netscape_sidecar(conf_path)
 
     fragment_id = urlparse(url).fragment
     if fragment_id and re.fullmatch(r"[a-f0-9-]+", fragment_id, re.IGNORECASE):
@@ -266,21 +265,25 @@ def step_substack_video_download(task: dict, config: Config) -> str:
     _assert_fetch_url_allowed(endpoint)
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
-    cookie_args = _curl_netscape_cookie_config(cookie)
-    mp4_url = _resolve_substack_video_mp4_redirect(endpoint, cookie_args)
-    cmd = [
-        "curl", "-s", "--max-redirs", "0", "--max-time", "600", "-o", str(output_path),
-        *cookie_args, mp4_url,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)
-    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
-        raise StepError(
-            f"Substack video download failed: {result.stderr.strip()[:200] or 'empty file'}",
-            error_type=ErrorType.RETRY, step_name="substack_video_download",
-        )
+    conf_path: Path | None = None
+    try:
+        cookie_args, conf_path = _curl_netscape_cookie_config(cookie)
+        mp4_url = _resolve_substack_video_mp4_redirect(endpoint, cookie_args)
+        cmd = [
+            "curl", "-s", "--max-redirs", "0", "--max-time", "600", "-o", str(output_path),
+            *cookie_args, mp4_url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=650)
+        if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
+            raise StepError(
+                f"Substack video download failed: {result.stderr.strip()[:200] or 'empty file'}",
+                error_type=ErrorType.RETRY, step_name="substack_video_download",
+            )
 
-    output_path = Path(ensure_h264(output_path))
-    return str(output_path)
+        output_path = Path(ensure_h264(output_path))
+        return str(output_path)
+    finally:
+        _unlink_curl_netscape_sidecar(conf_path)
 
 
 # Body-image dimension below this (both sides) is an avatar/icon, not content.
@@ -373,20 +376,24 @@ def _extract_native_video_ids(html: str) -> list[str]:
 
 def _fetch_substack_html(url: str, config: Config | None = None) -> str:
     _assert_fetch_url_allowed(url)
-    cookie_args: list[str] = []
-    if config is not None:
-        cookie_args = _curl_netscape_cookie_config(
-            Path(config.cookie_dir) / "substack_cookies.txt"
+    conf_path: Path | None = None
+    try:
+        cookie_args: list[str] = []
+        if config is not None:
+            cookie_args, conf_path = _curl_netscape_cookie_config(
+                Path(config.cookie_dir) / "substack_cookies.txt"
+            )
+        cmd = [
+            "curl", "-s", "-L", "--max-redirs", "0",
+            "--max-time", "20", *cookie_args, url,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=30,
         )
-    cmd = [
-        "curl", "-s", "-L", "--max-redirs", "0",
-        "--max-time", "20", *cookie_args, url,
-    ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True, text=True, timeout=30,
-    )
-    return result.stdout or ""
+        return result.stdout or ""
+    finally:
+        _unlink_curl_netscape_sidecar(conf_path)
 
 
 def _is_content_image(key: str) -> bool:

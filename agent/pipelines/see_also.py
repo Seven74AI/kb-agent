@@ -127,11 +127,12 @@ def step_see_also(task: dict, config: Config) -> str:
         note_content,
         flags=re.DOTALL,
     )
+    if updated == note_content:
+        updated = note_content.rstrip() + "\n\n" + see_also_content
 
     note_path.write_text(updated, encoding="utf-8")
 
-    # Count links added
-    link_count = see_also_content.count("[[")
+    link_count = _see_also_link_count(updated, see_also_header)
     return f"Added {link_count} See Also links to {slug}"
 
 

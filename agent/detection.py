@@ -19,6 +19,16 @@ from agent.router import SIMPLE_PLATFORMS, route_jev
 
 logger = logging.getLogger(__name__)
 
+_threads_subtype_fetch_failed = False
+
+
+def consume_threads_subtype_fetch_failed() -> bool:
+    """Return whether the last Threads subtype probe failed, then clear the flag."""
+    global _threads_subtype_fetch_failed
+    failed = _threads_subtype_fetch_failed
+    _threads_subtype_fetch_failed = False
+    return failed
+
 # ── URL Pattern Matching ────────────────────────────────────────────────────
 
 PLATFORM_PATTERNS: list[tuple[str, str]] = [
@@ -107,23 +117,31 @@ def _resolve_threads_cookie_path() -> Path:
     return _resolve_cookie_path("threads_cookies.txt")
 
 
-def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
-    """Load Netscape cookie jar via curl --config (cookie path must not appear on argv/ps)."""
+def _curl_netscape_cookie_config(cookie_file: Path) -> tuple[list[str], Path | None]:
+    """Write a transient curl --config sidecar; callers must unlink via ``_unlink_curl_netscape_sidecar``."""
     if not cookie_file.is_file():
-        return []
+        return [], None
     conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
     conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
     os.chmod(conf_path, 0o600)
-    return ["--config", str(conf_path)]
+    return ["--config", str(conf_path)], conf_path
+
+
+def _unlink_curl_netscape_sidecar(conf_path: Path | None) -> None:
+    if conf_path is None:
+        return
+    try:
+        if conf_path.is_file():
+            conf_path.unlink()
+    except OSError:
+        pass
 
 
 def _safe_url_for_log(url: str) -> str:
     """Log-safe URL: path only (no query) with credential-shaped segments redacted."""
-    parsed = urlparse(url)
-    if parsed.scheme and parsed.netloc:
-        path_only = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-        return redact_credential_shapes(path_only)
-    return redact_credential_shapes(url)
+    from agent.redact import url_for_display
+
+    return url_for_display(url)
 
 
 def _fetch_content(url: str, platform: str) -> str | None:
@@ -134,13 +152,15 @@ def _fetch_content(url: str, platform: str) -> str | None:
     """
     _assert_fetch_url_allowed(url)
     if platform == "threads":
+        conf_path: Path | None = None
         try:
             cookie_path = _resolve_threads_cookie_path()
+            cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
             cmd = [
                 "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "15",
                 "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
                 "-H", "Accept: text/html,application/xhtml+xml",
-                *_curl_netscape_cookie_config(cookie_path),
+                *cookie_args,
                 url,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
@@ -153,6 +173,8 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 exc_info=True,
             )
             return None
+        finally:
+            _unlink_curl_netscape_sidecar(conf_path)
     elif platform == "substack":
         try:
             result = subprocess.run(
@@ -208,6 +230,9 @@ def detect_content_subtype(url: str, platform: str) -> str:
         - substack -> 'substack_text' / 'substack_video' / 'substack_image'
         - mega -> 'mega_video' / 'book' / 'book_batch'
     """
+    global _threads_subtype_fetch_failed
+    _threads_subtype_fetch_failed = False
+
     # A comment deep-link (?comment_id=) is a comment ON a post — capture the
     # comment + parent, not the parent alone (Instagram only).
     parsed = urlparse(url)
@@ -262,14 +287,17 @@ def _detect_threads_subtype(url: str) -> str:
     Handles media_type=19 (Instagram video cross-post) — checks video_versions
     regardless of outer media type.
     """
+    global _threads_subtype_fetch_failed
     _assert_fetch_url_allowed(url)
+    conf_path: Path | None = None
     try:
         cookie_path = _resolve_threads_cookie_path()
+        cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
         cmd = [
             "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "15",
             "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
             "-H", "Accept: text/html,application/xhtml+xml",
-            *_curl_netscape_cookie_config(cookie_path),
+            *cookie_args,
             url,
         ]
 
@@ -281,10 +309,11 @@ def _detect_threads_subtype(url: str) -> str:
         return "threads_text"
     except subprocess.TimeoutExpired:
         logger.warning(
-            "Threads subtype fetch timed out for %s — cannot classify",
+            "Threads subtype fetch timed out for %s — defaulting to threads_text",
             _safe_url_for_log(url),
         )
-        return "unknown"
+        _threads_subtype_fetch_failed = True
+        return "threads_text"
     except Exception as exc:
         logger.warning(
             "Threads subtype fetch failed for %s: %s",
@@ -292,7 +321,10 @@ def _detect_threads_subtype(url: str) -> str:
             exc,
             exc_info=True,
         )
-        return "unknown"
+        _threads_subtype_fetch_failed = True
+        return "threads_text"
+    finally:
+        _unlink_curl_netscape_sidecar(conf_path)
 
 
 def _detect_substack_subtype(url: str) -> str:

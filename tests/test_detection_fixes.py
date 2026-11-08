@@ -215,8 +215,7 @@ def test_fetch_content_threads_uses_resolved_cookie_path(monkeypatch, tmp_path):
     assert "-b" not in cmd
     assert str(cookie) not in cmd
     conf_path = custom_dir / ".curl-threads_cookies.txt.conf"
-    assert conf_path.is_file()
-    assert oct(conf_path.stat().st_mode)[-3:] == "600"
+    assert not conf_path.exists(), "curl sidecar must not persist after fetch"
     assert "--max-redirs" in cmd
     assert cmd[cmd.index("--max-redirs") + 1] == "0"
 
@@ -263,8 +262,7 @@ def test_detect_threads_legacy_curl_disables_redirects_and_cookie_config(
     assert "-b" not in cmd
     assert str(cookie) not in cmd
     conf_path = custom_dir / ".curl-threads_cookies.txt.conf"
-    assert conf_path.is_file()
-    assert oct(conf_path.stat().st_mode)[-3:] == "600"
+    assert not conf_path.exists(), "curl sidecar must not persist after legacy subtype probe"
 
 
 def test_fetch_content_threads_logs_on_failure(monkeypatch, caplog):

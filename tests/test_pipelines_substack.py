@@ -358,8 +358,7 @@ class TestSubstackVideoMetadata:
         cookie_path = config.cookie_dir / "substack_cookies.txt"
         assert str(cookie_path) not in cmd
         conf_path = config.cookie_dir / ".curl-substack_cookies.txt.conf"
-        assert conf_path.is_file()
-        assert oct(conf_path.stat().st_mode)[-3:] == "600"
+        assert not conf_path.exists(), "curl sidecar must not persist after metadata fetch"
 
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")

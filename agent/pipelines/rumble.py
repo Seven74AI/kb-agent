@@ -26,7 +26,7 @@ from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import ensure_h264
+from agent.pipelines.video_common import _artifact_stem, ensure_h264
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -49,9 +49,7 @@ _RUMBLE_CDN_HOST_SUFFIXES = (".cdn.rumble.cloud", ".rumble.com")
 
 def _download_artifact_stem(task: dict) -> str:
     """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    if task.get("_batch_ingest"):
-        return task["id"]
-    return task.get("slug", task["id"][:8])
+    return _artifact_stem(task)
 
 
 def _assert_rumble_cdn_url_allowed(url: str) -> None:
