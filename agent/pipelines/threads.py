@@ -1142,7 +1142,14 @@ def step_threads_minio_upload(task: dict, config: Config) -> str:
         # Source-archival: video + transcript (matches the batch collector).
         storage_slug = _resolve_slug(task)
         video_path = resolve_threads_video_path(config, task)
-        uploaded = upload_video_source(storage_slug, config, video_path, "mp4", note_path)
+        uploaded = upload_video_source(
+            storage_slug,
+            config,
+            video_path,
+            "mp4",
+            note_path,
+            artifact_stem=_artifact_stem(task),
+        )
         return f"Uploaded: {', '.join(uploaded)}"
 
     if not note_path.exists():

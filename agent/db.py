@@ -67,11 +67,15 @@ def task_deferred_retry_preserves_embed_step(
     conn: sqlite3.Connection,
     task_id: str,
     slug: str | None,
+    *,
+    error: str | None = None,
 ) -> bool:
-    """True when ``retry_task`` must not rewind ``substack_embedded_media``."""
-    if slug and get_parent_media_deferral(conn, slug) is not None:
-        return True
-    return _substack_cleanup_output_signals_deferred_media(conn, task_id, slug)
+    """True when ``retry_task`` must not rewind ``substack_embedded_media``.
+
+    Matches :func:`task_in_deferred_media_cycle` exactly (deferral row, cleanup
+    marker, ``tasks.error``, or ``substack_embedded_media`` step output).
+    """
+    return task_in_deferred_media_cycle(conn, task_id, slug=slug, error=error)
 
 
 def task_in_deferred_media_cycle(
@@ -2259,7 +2263,6 @@ def reset_task_steps_for_retry(
     *,
     slug: str | None,
     error: str | None,
-    task_status: str,
 ) -> None:
     """Reset failed/paused/running steps when re-queueing a task.
 
@@ -2281,7 +2284,7 @@ def reset_task_steps_for_retry(
         ).fetchone()
         if embed is not None:
             preserve_embed = task_deferred_retry_preserves_embed_step(
-                conn, task_id, slug,
+                conn, task_id, slug, error=error,
             )
             step_filter = "step_order > ?" if preserve_embed else "step_order >= ?"
             conn.execute(
@@ -2338,7 +2341,7 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
                 (task_id,),
             )
             reset_task_steps_for_retry(
-                conn, task_id, slug=slug, error=error, task_status="paused",
+                conn, task_id, slug=slug, error=error,
             )
             resumed += 1
     return resumed
