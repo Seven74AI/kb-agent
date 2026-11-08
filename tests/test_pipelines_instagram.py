@@ -374,6 +374,33 @@ class TestCarouselMetadata:
         assert data["playlist_count"] == 5
         assert "carousel caption" in data.get("caption", "")
 
+    @patch("agent.pipelines.instagram._validate_ig_cookies")
+    @patch("subprocess.run")
+    def test_metadata_redacts_urls_in_caption(self, mock_run, mock_validate, config, post_task):
+        mock_validate.return_value = None
+        tracking = "https://link.example/promo?igsh=deadbeef&ref=track"
+        call_count = [0]
+
+        def fake_run(*args, **kwargs):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                result.stdout = "Title||testuser||1||2"
+            else:
+                result.stdout = f"See more at {tracking}"
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        mock_run.side_effect = fake_run
+
+        result = step_ig_carousel_metadata(post_task, config)
+        data = json.loads(Path(result).read_text(encoding="utf-8"))
+        caption = data.get("caption", "")
+        assert "igsh=" not in caption
+        assert "?" not in caption
+        assert "https://link.example/promo" in caption
+
 
 class TestCarouselExtract:
     """Tests for step_ig_carousel_extract."""

@@ -15,7 +15,7 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
-from agent.redact import scrub_vault_note_content, url_for_display
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -384,7 +384,9 @@ def step_synthesize_note(task: dict, config: Config) -> str:
     note_path = _note_path(config, display_slug)
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(
-        scrub_vault_note_content(strip_code_fence(response.content)),
+        scrub_vault_note_content(
+            redact_http_urls_in_text(strip_code_fence(response.content)),
+        ),
         encoding="utf-8",
     )
     append_note_tags(note_path, task.get("tags"))

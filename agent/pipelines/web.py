@@ -1037,7 +1037,10 @@ def step_synthesize_web(task: dict, config: Config) -> str:
             source_content, source_url, slug, config, llm
         )
 
-    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 

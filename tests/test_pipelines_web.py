@@ -27,6 +27,8 @@ from agent.pipelines.web import (
 )
 from agent.pipelines.see_also import step_see_also, _extract_keywords
 
+TOKENIZED_TRACKING = "https://cdn.example.com/article?token=secret&expires=999"
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -375,6 +377,67 @@ def test_build_synthesis_prompt_uses_display_safe_source_url(config):
 
 
 # ── step_synthesize_web tests ─────────────────────────────────────────────────
+
+def test_step_synthesize_web_redacts_tracking_urls_in_body(
+    config, task_dict, sample_source,
+):
+    """Synthesize vault writes must redact http(s) URLs in LLM body text, not only frontmatter."""
+    mock_response = LLMResponse(
+        content=f"""---
+date: 2026-06-19
+source: example.com
+source_url: {TOKENIZED_TRACKING}
+confidence: plausible
+tags: [web]
+---
+
+# Article
+
+## Summary
+Full story at {TOKENIZED_TRACKING}.
+
+## Key Claims
+### 1. Claim
+> "Quote" — source
+
+## Section-by-Section Analysis
+### Intro
+Context.
+
+## Context
+Published 2026.
+
+## Critical Analysis
+N/A
+
+## Nuances
+N/A
+
+## Reliability
+plausible
+
+## Sources
+- {TOKENIZED_TRACKING}
+
+## See Also
+- (filled later)
+""",
+        tokens_in=100,
+        tokens_out=80,
+        model="test-model",
+    )
+
+    with patch("agent.pipelines.web.get_llm_client") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.call.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        note_path = step_synthesize_web(task_dict, config)
+
+    written = Path(note_path).read_text(encoding="utf-8")
+    assert "token=secret" not in written
+    assert "https://cdn.example.com/article" in written
+
 
 def test_step_synthesize_web_single_pass(config, task_dict, sample_source):
     """Test synthesis with a small source (single pass)."""

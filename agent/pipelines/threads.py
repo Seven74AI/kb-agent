@@ -26,7 +26,7 @@ from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.redact import scrub_vault_note_content, url_for_display
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
 from agent.llm import get_llm_client
 from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
@@ -803,7 +803,10 @@ Incorporate the post description as a source alongside the transcript."""
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -896,7 +899,10 @@ The confidence level is '{confidence}' — be appropriately cautious if it's 'un
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)

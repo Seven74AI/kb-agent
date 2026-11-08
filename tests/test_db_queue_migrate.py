@@ -2162,8 +2162,10 @@ def test_maybe_dispatch_unlocks_when_expected_total_grows(tmp_path, monkeypatch)
         firecrawl_url="http://localhost:3002/v2/scrape",
     )
     config.temp_dir.mkdir(parents=True, exist_ok=True)
+    # Gate growth is owned by deferral writers (e.g. web embed step), not batch manifest url.
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
     (config.temp_dir / f"{parent}_media.json").write_text(
-        json.dumps({"url": url, "content_type": "substack_text", "total": 2}),
+        json.dumps({"content_type": "substack_text", "total": 2}),
         encoding="utf-8",
     )
     _stamp_parent_raw_media(conn, config.temp_dir, parent)
@@ -2197,6 +2199,7 @@ def test_maybe_dispatch_unlocks_when_expected_total_grows(tmp_path, monkeypatch)
 
 def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path, monkeypatch):
     import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral
 
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -2219,8 +2222,11 @@ def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path
         firecrawl_url="http://localhost:3002/v2/scrape",
     )
     config.temp_dir.mkdir(parents=True, exist_ok=True)
+    ensure_parent_media_deferral(
+        conn, parent, "https://blog.substack.com/p/x", "substack_text", 2,
+    )
     (config.temp_dir / f"{parent}_media.json").write_text(
-        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 2}',
+        '{"content_type": "substack_text", "total": 2}',
         encoding="utf-8",
     )
 
@@ -2237,7 +2243,7 @@ def test_maybe_dispatch_parent_synthesize_manifest_count_and_idempotent(tmp_path
     assert calls == []
 
     (config.temp_dir / f"{parent}_media.json").write_text(
-        '{"url": "https://blog.substack.com/p/x", "content_type": "substack_text", "total": 1}',
+        '{"content_type": "substack_text", "total": 1}',
         encoding="utf-8",
     )
     assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False

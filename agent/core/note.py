@@ -5,7 +5,7 @@ from pathlib import Path
 
 from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.core.slugify import SLUG_MAX_LEN
-from agent.redact import scrub_vault_note_content
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
 
 
 def _vault_folder(content_type: str) -> str:
@@ -64,6 +64,8 @@ def get_note(
             return {
                 "slug": path.stem,
                 "path": str(rel),
-                "content": scrub_vault_note_content(raw_content),
+                "content": scrub_vault_note_content(
+                    redact_http_urls_in_text(raw_content),
+                ),
             }
     return None

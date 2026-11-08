@@ -38,7 +38,6 @@ from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
     bootstrap_parent_media_deferral_from_manifest,
     claim_ingest_items,
-    ensure_parent_media_deferral,
     finish_batch_run,
     get_parent_media_deferral,
     has_completed_parent_synthesis,
@@ -380,6 +379,24 @@ def _supersede_deferred_parent_task(conn, parent_slug: str, *, synthesize_task_i
         )
 
 
+def _record_parent_deferral_dispatch_failure(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    err: str,
+) -> None:
+    """Persist a scrubbed deferred-synthesis dispatch error on the paused parent task."""
+    reason = f"deferred synthesis dispatch failed: {_scrub_for_log(err)}"
+    with conn:
+        conn.execute(
+            """
+            UPDATE tasks SET error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type NOT GLOB '*_synthesize'
+            AND status IN ('paused', 'pending', 'in_progress')
+            """,
+            (reason, parent_slug),
+        )
+
+
 def refresh_parent_media_manifest(conn, config, parent_slug: str) -> None:
     """Rewrite on-disk manifest from the DB gate (keeps authoritative expected_total)."""
     deferral = get_parent_media_deferral(conn, parent_slug)
@@ -407,17 +424,10 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
         return False
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
     if manifest_path.exists():
-        manifest, manifest_err = _read_json_file(manifest_path, "manifest")
+        _manifest, manifest_err = _read_json_file(manifest_path, "manifest")
         if manifest_err:
             print(f"  [skip] {parent_slug}: {_scrub_for_log(manifest_err)}")
             return False
-        total = manifest.get("total")
-        url = manifest.get("url")
-        content_type = manifest.get("content_type")
-        if total is not None and url and content_type:
-            ensure_parent_media_deferral(
-                conn, parent_slug, url, content_type, int(total),
-            )
     deferral = get_parent_media_deferral(conn, parent_slug)
     if deferral is None:
         bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, config.temp_dir)
@@ -455,6 +465,7 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     )
     if rr.get("status") == "error":
         err = rr.get("error") or "dispatch_synthesize failed"
+        _record_parent_deferral_dispatch_failure(conn, parent_slug, err)
         print(f"  [warn] {parent_slug}: dispatch failed ({_scrub_for_log(err)})")
         return False
     if rr.get("duplicate"):
