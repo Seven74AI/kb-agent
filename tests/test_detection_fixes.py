@@ -15,6 +15,7 @@ from agent.detection import (
     _resolve_threads_cookie_path,
     dedup_check,
     detect_content_subtype,
+    detect_platform,
     preflight_health,
 )
 from agent.redact import url_for_display
@@ -498,3 +499,20 @@ def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):
     assert any("Jev routing failed" in rec.message for rec in caplog.records)
     assert "jevleak" not in combined
     assert "token=" not in combined
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://cdn.example/foo.pdf?token=signed", "book"),
+        ("https://cdn.example/foo.pdf#frag", "book"),
+        ("https://cdn.example/foo.pdf", "book"),
+        ("https://cdn.example/foo.html?x=.epub", "web"),
+        ("https://files.example.org/book.mobi?dl=1", "book"),
+        ("https://archive.example/azw3/Dune.azw3?ref=share", "book"),
+        ("https://library.example/title.epub?sig=abc&exp=999", "book"),
+    ],
+)
+def test_detect_platform_book_matches_path_not_query(url, expected):
+    """Book extension regex must use URL path, not query/fragment (signed CDN links)."""
+    assert detect_platform(url) == expected

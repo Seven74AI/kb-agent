@@ -90,11 +90,21 @@ def normalize_url(url: str) -> str:
     return url
 
 
+def _platform_match_target(url: str) -> str:
+    """URL form for PLATFORM_PATTERNS: scheme/netloc/path only (no query or fragment)."""
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
 def detect_platform(url: str) -> str:
     """Classify a URL by platform using regex patterns.
 
     Order matters — YouTube is checked before generic web patterns.
     Returns 'web' if no specific platform matches.
+
+    Patterns match on the URL path (and scheme/netloc where present), not on
+    query strings or fragments — so signed CDN links like ``foo.pdf?token=…``
+    still classify as ``book``.
 
     Args:
         url: The URL to classify.
@@ -103,8 +113,9 @@ def detect_platform(url: str) -> str:
         Platform string: youtube, threads, instagram_reel, instagram_post,
         substack, mega, wikispooks, book, or web.
     """
+    match_target = _platform_match_target(url)
     for pattern, platform in PLATFORM_PATTERNS:
-        if re.search(pattern, url, re.IGNORECASE):
+        if re.search(pattern, match_target, re.IGNORECASE):
             return platform
     return "web"
 

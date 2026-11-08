@@ -140,6 +140,6 @@ def notify_batch(config: Config, failed: int, total: int, dispatched: int, cause
         head = f"⚠️ Batch run: {failed}/{total} failed · {dispatched} dispatched"
     lines = [head]
     if causes:
-        scrubbed = [scrub_outbound_visible_message(c) for c in dict.fromkeys(causes[:3])]
+        scrubbed = [scrub_outbound_visible_message(c) for c in dict.fromkeys(causes)]
         lines.append("cause: " + "; ".join(scrubbed))
     send_message(config, "\n".join(lines))

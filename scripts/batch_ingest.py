@@ -363,7 +363,8 @@ def _parent_tags(conn, parent_slug: str):
     if row and row[0]:
         return normalize_tags(row[0])
     row = conn.execute(
-        "SELECT tags FROM ingest_queue WHERE parent_slug = ? AND tags IS NOT NULL LIMIT 1",
+        "SELECT tags FROM ingest_queue WHERE parent_slug = ? AND tags IS NOT NULL "
+        "ORDER BY created_at ASC, id ASC LIMIT 1",
         (parent_slug,),
     ).fetchone()
     if row and row[0]:
@@ -384,6 +385,7 @@ def _record_parent_deferral_dispatch_failure(
             SELECT error FROM tasks
             WHERE slug = ? AND content_type NOT GLOB '*_synthesize'
             AND status IN ('paused', 'pending', 'in_progress')
+            ORDER BY created_at ASC, id ASC
             LIMIT 1
             """,
             (parent_slug,),

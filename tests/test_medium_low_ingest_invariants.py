@@ -406,3 +406,30 @@ def test_kb_ocr_registers_heif_and_avif_openers():
     assert "pillow_avif" in text
     assert "_sanitize_emit" in text
     assert "sanitize_visible_message" in text
+
+
+@patch("agent.pipelines.books.subprocess.run")
+def test_megadl_download_temp_dir_uses_artifact_stem_under_batch(mock_run, config):
+    """LOCAL mega_* dirs use ingest id when slug differs under _batch_ingest."""
+    from agent.pipelines.books import step_megadl_download
+
+    ingest_id = "batch-ingest-book-parent-001"
+    task = {
+        "id": ingest_id,
+        "slug": "human_readable_slug",
+        "_batch_ingest": True,
+        "source_url": "https://mega.nz/file/abc123",
+    }
+    megadl_paths: list[Path] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "megadl":
+            dl_path = Path(cmd[cmd.index("--path") + 1])
+            megadl_paths.append(dl_path)
+            (dl_path / "sample.epub").write_bytes(b"epub")
+            return MagicMock(returncode=0, stderr="", stdout="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    mock_run.side_effect = fake_run
+    step_megadl_download(task, config)
+    assert megadl_paths == [config.temp_dir / f"mega_{ingest_id}"]

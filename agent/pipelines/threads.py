@@ -704,10 +704,11 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
 
     _assert_threads_video_cdn_url_allowed(video_url)
 
+    display_url = url_for_display(url)
     result = subprocess.run(
         [
             "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "300",
-            "-H", f"Referer: {url}",
+            "-H", f"Referer: {display_url}",
             "-H", f"User-Agent: {GOOGLEBOT_UA}",
             "-o", str(output_path),
             video_url,

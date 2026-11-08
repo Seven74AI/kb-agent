@@ -1346,6 +1346,27 @@ class TestBookVaultSourceUrl:
         assert "super-secret-key" not in _vault_frontmatter_source_url(mega)
 
 
+TOKENIZED_TOOL_STDERR = (
+    "https://cdn.example.com/book.zip?token=secret&expires=999"
+)
+
+
+class TestBooksMegadlFailureSanitization:
+    @patch("agent.pipelines.books.subprocess.run")
+    def test_megadl_step_error_redacts_url_in_subprocess_output(self, mock_run, config, mega_task):
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stderr=f"download failed: {TOKENIZED_TOOL_STDERR}",
+            stdout="",
+        )
+        with pytest.raises(StepError) as excinfo:
+            step_megadl_download(mega_task, config)
+        msg = str(excinfo.value)
+        assert "token=secret" not in msg
+        assert TOKENIZED_TOOL_STDERR not in msg
+        assert "megadl download failed" in msg
+
+
 class TestMegadlZeroArtifacts:
     @patch("agent.pipelines.books.subprocess.run")
     def test_megadl_fails_when_no_book_files_after_download(self, mock_run, config, mega_task):

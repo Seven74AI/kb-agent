@@ -4396,3 +4396,193 @@ def test_create_delegate_task_concurrent_single_active_child(tmp_path):
     ).fetchone()[0]
     assert in_flight == 1
     verify.close()
+
+
+def test_terminal_probes_return_valid_when_superseded_row_is_older(tmp_path):
+    """INVARIANT: terminal probes filter superseded rows before LIMIT 1 (older superseded first)."""
+    from agent.db import (
+        _non_superseded_parent_terminal,
+        _parent_terminal_after_anchor,
+        _synthesize_terminal_after_anchor,
+        ensure_parent_media_deferral,
+        get_parent_media_deferral,
+    )
+    from agent.redact import url_for_display
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = url_for_display("https://blog.substack.com/p/term-order")
+    slug = "term_sup_first"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    conn.execute(
+        "UPDATE parent_media_deferral SET updated_at = '2024-01-01 00:00:00' WHERE parent_slug = ?",
+        (slug,),
+    )
+    deferral = get_parent_media_deferral(conn, slug)
+    anchor = deferral["updated_at"]
+
+    bad_parent = create_task(
+        conn, url, "substack_text", slug, ["synthesize_note"], status="completed",
+    )
+    good_parent = create_task(
+        conn, url, "substack_text", slug, ["synthesize_note"], status="completed",
+    )
+    bad_syn = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    good_syn = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ?, created_at = '2024-01-01 00:00:01', "
+        "updated_at = '2024-01-02 00:00:01' WHERE id IN (?, ?)",
+        ("superseded by deferral media cycle", bad_parent, bad_syn),
+    )
+    conn.execute(
+        "UPDATE tasks SET error = NULL, created_at = '2024-01-01 00:00:02', "
+        "updated_at = '2024-01-02 00:00:02' WHERE id IN (?, ?)",
+        (good_parent, good_syn),
+    )
+    conn.commit()
+
+    assert has_completed_synthesize_task(conn, slug) is True
+    assert _non_superseded_parent_terminal(conn, slug) is True
+    assert _parent_terminal_after_anchor(conn, slug, anchor) is True
+    assert _synthesize_terminal_after_anchor(conn, slug, anchor) is True
+
+
+def test_terminal_probes_return_valid_when_superseded_row_is_newer(tmp_path):
+    """INVARIANT: superseded row must not win when a valid terminal exists (newer superseded)."""
+    from agent.db import _non_superseded_parent_terminal
+    from agent.redact import url_for_display
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = url_for_display("https://blog.substack.com/p/term-newer-bad")
+    slug = "term_sup_last"
+    good_parent = create_task(
+        conn, url, "substack_text", slug, ["synthesize_note"], status="completed",
+    )
+    bad_parent = create_task(
+        conn, url, "substack_text", slug, ["synthesize_note"], status="completed",
+    )
+    good_syn = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    bad_syn = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = NULL, created_at = '2024-01-01 00:00:01', "
+        "updated_at = '2024-01-02 00:00:01' WHERE id IN (?, ?)",
+        (good_parent, good_syn),
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ?, created_at = '2024-01-01 00:00:02', "
+        "updated_at = '2024-01-02 00:00:02' WHERE id IN (?, ?)",
+        ("superseded by deferral media cycle", bad_parent, bad_syn),
+    )
+    conn.commit()
+
+    assert has_completed_synthesize_task(conn, slug) is True
+    assert _non_superseded_parent_terminal(conn, slug) is True
+
+
+def test_bootstrap_parent_media_deferral_manifest_preserves_media_changed(tmp_path):
+    from agent.db import (
+        bootstrap_parent_media_deferral_from_manifest,
+        get_parent_media_deferral,
+    )
+
+    conn = init_db(tmp_path / "agent.db", AGENT_SCHEMA)
+    slug = "manifest_media_changed"
+    manifest = tmp_path / f"{slug}_media.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "total": 2,
+                "url": "https://blog.substack.com/p/post",
+                "content_type": "substack_text",
+                "media_changed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    bootstrap_parent_media_deferral_from_manifest(conn, slug, tmp_path)
+    row = get_parent_media_deferral(conn, slug)
+    assert row is not None
+    assert int(row["media_changed"]) == 1
+
+
+def test_bootstrap_parent_media_deferral_normalizes_manifest_url(tmp_path):
+    from agent.db import (
+        bootstrap_parent_media_deferral_from_manifest,
+        get_parent_media_deferral,
+    )
+    from agent.redact import url_for_display
+
+    conn = init_db(tmp_path / "agent.db", AGENT_SCHEMA)
+    slug = "manifest_url_norm"
+    raw_url = "https://user:sekret@blog.substack.com/p/post?token=SECRET#frag"
+    manifest = tmp_path / f"{slug}_media.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "url": raw_url,
+                "content_type": "substack_text",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bootstrap_parent_media_deferral_from_manifest(conn, slug, tmp_path)
+    row = get_parent_media_deferral(conn, slug)
+    assert row is not None
+    assert row["source_url"] == url_for_display(raw_url)
+    assert "sekret" not in row["source_url"]
+    assert "?" not in row["source_url"]
+
+
+def test_resume_tasks_by_reason_skips_active_deferral_resumes_stale_row(tmp_path):
+    """Bulk resume: active cycle (pending media) blocked; stale deferral row may resume."""
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://blog.substack.com/p/resume-stale"
+    active_slug = "bulk_resume_active"
+    stale_slug = "bulk_resume_stale"
+    pause_reason = "firecrawl rate limit — retry after cooldown"
+
+    ensure_parent_media_deferral(conn, active_slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/pending.png", "substack_image", "pend",
+        parent_slug=active_slug, media_kind="image",
+    )
+    ensure_parent_media_deferral(conn, stale_slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/done.png", "substack_image", "done",
+        parent_slug=stale_slug, media_kind="image", status="dispatched",
+    )
+
+    active_id = create_task(
+        conn, url, "substack_text", active_slug,
+        ["substack_cleanup", "synthesize_note"], status="paused",
+    )
+    stale_id = create_task(
+        conn, url, "substack_text", stale_slug,
+        ["substack_cleanup", "synthesize_note"], status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id IN (?, ?)",
+        (pause_reason, active_id, stale_id),
+    )
+    conn.commit()
+
+    assert resume_tasks_by_reason(conn, "%firecrawl%") == 1
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (active_id,),
+    ).fetchone()[0] == "paused"
+    assert conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (stale_id,),
+    ).fetchone()[0] == "pending"
