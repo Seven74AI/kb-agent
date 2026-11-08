@@ -9,7 +9,6 @@ Usage:
 --language is given), then merges diarization + transcription into a
 speaker-attributed <name>.json per input.
 """
-import json
 import os
 import shutil
 import subprocess
@@ -24,6 +23,8 @@ _bootstrap_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_bootstrap_root))
 sys.path.insert(0, "/root/kb-agent")
 from agent.notify import sanitize_visible_message  # noqa: E402
+from agent.redact import write_merged_transcript_json  # noqa: E402
+from agent.transcription import merge_speakers_from_paths  # noqa: E402
 
 MODAL = "/root/modal"
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
@@ -61,20 +62,6 @@ def extract_wav(video_path: str, wav_path: str) -> subprocess.CompletedProcess:
         ],
         timeout=FFMPEG_TIMEOUT,
     )
-
-
-def merge_speakers(diar_path, trans_path):
-    d = json.load(open(diar_path))["segments"]
-    t = json.load(open(trans_path))["segments"]
-    out = []
-    for seg in t:
-        best, spk = -1, "SPEAKER_00"
-        for s in d:
-            ov = min(seg["end"], s["end"]) - max(seg["start"], s["start"])
-            if ov > best:
-                best, spk = ov, s["speaker"]
-        out.append({"time": round(seg["start"], 1), "speaker": spk, "text": seg["text"]})
-    return {"segments": out}
 
 
 def main():
@@ -147,8 +134,9 @@ def main():
         if not (os.path.exists(diar) and os.path.exists(trans)):
             print(f"[warn] {n}: missing Modal output")
             continue
-        mpath = os.path.join(out_dir, f"{n}.json")
-        json.dump(merge_speakers(diar, trans), open(mpath, "w"), ensure_ascii=False)
+        mpath = Path(out_dir) / f"{n}.json"
+        merged = merge_speakers_from_paths(diar, trans)
+        write_merged_transcript_json(mpath, merged, indent=None)
         made.append(n)
     print("MERGED: " + ", ".join(made))
     return 0

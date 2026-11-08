@@ -11,7 +11,7 @@ from typing import Any
 
 from agent.config import Config
 from agent.core.slugify import slugify
-from agent.redact import url_for_display
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
 from agent.quality import (
     count_fact_checks,
     quality_gate_book,
@@ -209,7 +209,7 @@ def compare_url_pair(
 ) -> dict[str, Any]:
     """Compare kb-agent and Hermes notes for one URL."""
     return {
-        "url": url,
+        "url": url_for_display(url),
         "content_type": content_type,
         "slug": _safe_slug(url, content_type=content_type),
         "kb_agent": evaluate_note(kb_note, content_type=content_type, config=config),
@@ -304,7 +304,7 @@ def build_review_html(entries: list[dict[str, Any]]) -> str:
         "<p>Quality-gate metrics per note; scroll each column for side-by-side review.</p>",
     ]
     for entry in entries:
-        url = html.escape(entry["url"])
+        url = html.escape(url_for_display(entry["url"]))
         ct = html.escape(entry.get("content_type") or "web")
         parts.append(f"<section><h2 class='url'>{url} <small>({ct})</small></h2>")
         for side, label in (("kb_agent", "KB Agent"), ("hermes", "Hermes")):
@@ -325,8 +325,14 @@ def build_review_html(entries: list[dict[str, Any]]) -> str:
                 f"<span class='{status}'>{status.upper()}</span> — "
                 f"{html.escape(metric_bits)}{fail_html}</div>"
             )
-        kb_body = html.escape(entry["kb_agent"].get("content") or "(missing)")
-        hermes_body = html.escape(entry["hermes"].get("content") or "(missing)")
+        kb_raw = entry["kb_agent"].get("content") or "(missing)"
+        hermes_raw = entry["hermes"].get("content") or "(missing)"
+        kb_body = html.escape(
+            scrub_vault_note_content(redact_http_urls_in_text(kb_raw)),
+        )
+        hermes_body = html.escape(
+            scrub_vault_note_content(redact_http_urls_in_text(hermes_raw)),
+        )
         parts.append(
             "<div class='grid'>"
             f"<div class='col'><h3>KB Agent</h3><pre>{kb_body}</pre></div>"

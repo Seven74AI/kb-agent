@@ -21,6 +21,7 @@ DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
     "deferred to batch synthesis",
     "batch synthesis dispatched or completed",
     "deferred synthesis paused",
+    "deferred synthesis dispatch failed",
     "media gate",
     "media_deferred:",
 )
@@ -37,6 +38,35 @@ def is_deferred_media_pause(reason: str | None) -> bool:
         return False
     low = reason.lower()
     return any(marker in low for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
+
+
+def task_in_deferred_media_cycle(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    slug: str | None = None,
+    error: str | None = None,
+) -> bool:
+    """True when the parent task must stay in the deferred-media gate (retry/resume).
+
+    Uses ``tasks.error``, ``parent_media_deferral``, and ``substack_embedded_media``
+    step output so a scrubbed dispatch-failure note cannot drop the deferral signal.
+    """
+    if is_deferred_media_pause(error):
+        return True
+    if slug and get_parent_media_deferral(conn, slug) is not None:
+        return True
+    row = conn.execute(
+        """
+        SELECT output FROM task_steps
+        WHERE task_id = ? AND name = 'substack_embedded_media'
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if row and is_deferred_media_pause(row[0]):
+        return True
+    return False
 
 
 def _deferred_media_resume_sql_exclusion() -> tuple[str, tuple[str, ...]]:
@@ -275,6 +305,76 @@ def _migrate_ingest_queue_url_parent_unique(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_ACTIVE_SYNTHESIZE_SLUG_INDEX = "idx_tasks_one_active_synthesize_per_slug"
+_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES = "'pending', 'in_progress', 'paused'"
+
+
+def _migrate_dedupe_in_flight_synthesize_owners(conn: sqlite3.Connection) -> None:
+    """Fail duplicate in-flight *_synthesize rows per slug before the unique index."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "tasks" not in tables:
+        return
+    slugs = conn.execute(
+        f"""
+        SELECT slug FROM tasks
+        WHERE content_type GLOB '*_synthesize'
+          AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+        GROUP BY slug HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    supersede_error = "superseded: duplicate active synthesize owner"
+    for row in slugs:
+        slug = row[0]
+        keep = conn.execute(
+            f"""
+            SELECT id FROM tasks
+            WHERE slug = ? AND content_type GLOB '*_synthesize'
+              AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            (slug,),
+        ).fetchone()
+        if keep is None:
+            continue
+        conn.execute(
+            f"""
+            UPDATE tasks
+            SET status = 'failed', error = ?, updated_at = datetime('now')
+            WHERE slug = ? AND content_type GLOB '*_synthesize'
+              AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+              AND id != ?
+            """,
+            (supersede_error, slug, keep[0]),
+        )
+
+
+def _migrate_active_synthesize_slug_unique(conn: sqlite3.Connection) -> None:
+    """Enforce exactly one in-flight *_synthesize task row per slug (DB invariant)."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "tasks" not in tables:
+        return
+    existing = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?",
+        (_ACTIVE_SYNTHESIZE_SLUG_INDEX,),
+    ).fetchone()
+    if existing:
+        return
+    _migrate_dedupe_in_flight_synthesize_owners(conn)
+    conn.execute(
+        f"""
+        CREATE UNIQUE INDEX {_ACTIVE_SYNTHESIZE_SLUG_INDEX}
+        ON tasks(slug)
+        WHERE content_type GLOB '*_synthesize'
+          AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+        """
+    )
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing on pre-existing databases (idempotent, schema-safe).
 
@@ -293,6 +393,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 continue
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
     _migrate_ingest_queue_url_parent_unique(conn)
+    _migrate_active_synthesize_slug_unique(conn)
     conn.commit()
 
 
@@ -325,6 +426,28 @@ def init_db(db_path: Path, schema: str) -> sqlite3.Connection:
     return conn
 
 
+def _insert_task_with_steps(
+    conn: sqlite3.Connection,
+    task_id: str,
+    url: str,
+    content_type: str,
+    slug: str,
+    steps: list[str],
+    *,
+    status: str = "pending",
+    tags=None,
+) -> None:
+    conn.execute(
+        "INSERT INTO tasks (id, source_url, content_type, slug, status, tags) VALUES (?, ?, ?, ?, ?, ?)",
+        (task_id, url, content_type, slug, status, serialize_tags(tags)),
+    )
+    for i, step_name in enumerate(steps):
+        conn.execute(
+            "INSERT INTO task_steps (task_id, step_order, name, status) VALUES (?, ?, ?, 'pending')",
+            (task_id, i, step_name),
+        )
+
+
 def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str,
                 steps: list[str], status: str = "pending", tags=None) -> str:
     """Create a new task with its pipeline steps.
@@ -344,16 +467,54 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
     import uuid
     task_id = str(uuid.uuid4())
     with conn:
-        conn.execute(
-            "INSERT INTO tasks (id, source_url, content_type, slug, status, tags) VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, url, content_type, slug, status, serialize_tags(tags)),
+        _insert_task_with_steps(
+            conn, task_id, url, content_type, slug, steps, status=status, tags=tags,
         )
-        for i, step_name in enumerate(steps):
-            conn.execute(
-                "INSERT INTO task_steps (task_id, step_order, name, status) VALUES (?, ?, ?, 'pending')",
-                (task_id, i, step_name),
-            )
     return task_id
+
+
+def create_synthesize_task(
+    conn: sqlite3.Connection,
+    url: str,
+    content_type: str,
+    slug: str,
+    steps: list[str],
+    tags=None,
+) -> tuple[str, bool]:
+    """Atomically ensure at most one in-flight *_synthesize owner per slug.
+
+    Uses ``BEGIN IMMEDIATE`` plus a partial unique index on in-flight synthesize
+    rows. ``find_active_task`` semantics (deferral generation, oldest-row
+    preference) are preserved.
+
+    Returns:
+        ``(task_id, created_new)``. When ``created_new`` is False, *task_id* is
+        the existing owner and dispatch is a duplicate.
+    """
+    import uuid
+
+    if not is_synthesize_content_type(content_type):
+        return create_task(conn, url, content_type, slug, steps, tags=tags), True
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing_id = find_active_task(conn, slug, content_type)
+        if existing_id:
+            conn.commit()
+            return existing_id, False
+
+        task_id = str(uuid.uuid4())
+        _insert_task_with_steps(
+            conn, task_id, url, content_type, slug, steps, status="pending", tags=tags,
+        )
+        conn.commit()
+        return task_id, True
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        existing_id = find_active_task(conn, slug, content_type)
+        if existing_id:
+            return existing_id, False
+        raise
 
 
 def _reset_dispatched_parent_siblings_if_deferral_cycle(

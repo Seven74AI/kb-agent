@@ -3,17 +3,19 @@
 transcribe in ONE batch Modal run, upload transcripts, and dispatch one synthesize task
 per new video. Runs as a --no-agent cron; stdout is delivered to the user.
 """
-import json
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 sys.path.insert(0, "/root/kb-agent")
 from agent.config import load_config  # noqa: E402
 from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
 from agent.notify import sanitize_visible_message  # noqa: E402
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
+from agent.redact import ensure_merged_transcript_file_redacted, write_merged_transcript_json  # noqa: E402
+from agent.transcription import merge_speakers_from_paths  # noqa: E402
 
 MAIN = "https://www.terragrandir.com/conferences-tdah-adulte-2026/"
 CDN = "https://vz-46d29c85-ed.b-cdn.net"
@@ -87,20 +89,6 @@ def _finalize_video_dispatch(page_url, config, conn, slug):
     return rr.get("task_id", "?")
 
 
-def merge_speakers(diar_path, trans_path):
-    d = json.load(open(diar_path))["segments"]
-    t = json.load(open(trans_path))["segments"]
-    out = []
-    for seg in t:
-        best, spk = -1, "SPEAKER_00"
-        for s in d:
-            ov = min(seg["end"], s["end"]) - max(seg["start"], s["start"])
-            if ov > best:
-                best, spk = ov, s["speaker"]
-        out.append({"time": round(seg["start"], 1), "speaker": spk, "text": seg["text"]})
-    return {"segments": out}
-
-
 def main():
     os.makedirs(TMP, exist_ok=True)
     config = load_config()
@@ -163,10 +151,12 @@ def main():
         if not (os.path.exists(diar) and os.path.exists(trans)):
             print(f"  [warn] {ns}: missing Modal output")
             continue
-        mpath = os.path.join(TMP, f"{ns}.json")
-        json.dump(merge_speakers(diar, trans), open(mpath, "w"), ensure_ascii=False)
+        mpath = Path(TMP) / f"{ns}.json"
+        merged = merge_speakers_from_paths(diar, trans)
+        write_merged_transcript_json(mpath, merged, indent=None)
+        ensure_merged_transcript_file_redacted(mpath)
         sh(["mc", "cp", mp4, f"{VB}/{ns}.mp4"])
-        sh(["mc", "cp", mpath, f"{TB}/{ns}.json"])
+        sh(["mc", "cp", str(mpath), f"{TB}/{ns}.json"])
 
         page_url = f"https://www.terragrandir.com/{ns.replace('tdah-adulte-2026-', 'tdah-adulte-')}/"
         task_id = _finalize_video_dispatch(page_url, config, conn, ns)

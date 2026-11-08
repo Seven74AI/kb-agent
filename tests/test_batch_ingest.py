@@ -388,6 +388,12 @@ class TestDeferredSynthesizeTags:
             ["substack_cleanup"],
             status="paused",
         )
+        prior_pause = "awaiting media: 1 images enqueued"
+        conn.execute(
+            "UPDATE tasks SET error = ? WHERE id = ?",
+            (prior_pause, parent_id),
+        )
+        conn.commit()
         ingest_id, _ = queue_ingest(
             conn,
             "https://example.com/i1.png",
@@ -426,6 +432,7 @@ class TestDeferredSynthesizeTags:
         ).fetchone()
         assert row["status"] == "paused"
         assert "parent ingestion superseded" not in (row["error"] or "")
+        assert prior_pause in (row["error"] or "")
         assert "deferred synthesis dispatch failed" in (row["error"] or "")
         assert "unknown content_type: substack_text_synthesize" in (row["error"] or "")
 

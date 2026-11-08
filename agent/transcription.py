@@ -2,15 +2,43 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Union
 
 from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 
 MODAL_RUN_TIMEOUT_SECS = 3600
+
+
+def merge_speakers_from_paths(
+    diar_path: Union[str, Path],
+    trans_path: Union[str, Path],
+) -> dict:
+    """Merge diarization + transcript JSON into batch-style ``{segments: [...]}``."""
+    with open(diar_path, encoding="utf-8") as df:
+        d = json.load(df)["segments"]
+    with open(trans_path, encoding="utf-8") as tf:
+        t = json.load(tf)["segments"]
+    out = []
+    for seg in t:
+        best, spk = -1, "SPEAKER_00"
+        for s in d:
+            ov = min(seg["end"], s["end"]) - max(seg["start"], s["start"])
+            if ov > best:
+                best, spk = ov, s["speaker"]
+        out.append(
+            {
+                "time": round(seg["start"], 1),
+                "speaker": spk,
+                "text": seg["text"],
+            },
+        )
+    return {"segments": out}
 
 
 def is_modal_backend(config: Config) -> bool:

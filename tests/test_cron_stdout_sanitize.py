@@ -69,7 +69,7 @@ def test_tdah_modal_output_tail_sanitized(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(
         mod,
-        "merge_speakers",
+        "merge_speakers_from_paths",
         lambda *_a, **_k: {"segments": []},
     )
     monkeypatch.setattr(
