@@ -28,9 +28,7 @@ def config(tmp_path):
         vault_path=tmp_path / "vault",
         temp_dir=temp_dir,
         cookie_dir=tmp_path / "cookies",
-        minio_bucket="kb-agent-archive",
-        minio_endpoint="http://localhost:9000",
-    )
+        storage_bucket="kb-agent-archive",    )
 
 
 def test_step_fetch_transcript_writes_metadata_from_segments(config):
@@ -58,7 +56,7 @@ def test_step_fetch_transcript_writes_metadata_from_segments(config):
 
 
 @patch("agent.pipelines.video_common.subprocess.run")
-@patch("agent.archival.upload_file_to_minio")
+@patch("agent.archival.upload_object")
 def test_upload_video_artifacts_redacts_merged_segment_text(
     mock_upload, mock_run, config
 ):
@@ -86,9 +84,9 @@ def test_upload_video_artifacts_redacts_merged_segment_text(
 
 
 @patch("agent.pipelines.video_common.subprocess.run")
-@patch("agent.archival.upload_file_to_minio")
+@patch("agent.archival.upload_object")
 def test_upload_video_artifacts_non_batch_keys_match_slug(mock_upload, mock_run, config):
-    """Non-batch mode: MinIO keys use the slug (same as legacy single-arg behavior)."""
+    """Non-batch mode: object storage keys use the slug (same as legacy single-arg behavior)."""
 
     def _fake_ffmpeg(cmd, **kwargs):
         Path(cmd[-1]).write_bytes(b"mp3")
@@ -108,15 +106,15 @@ def test_upload_video_artifacts_non_batch_keys_match_slug(mock_upload, mock_run,
         "videos/channel_video.mp3",
         "transcripts/channel_video.json",
     ]
-    minio_paths = [str(c.args[1]) for c in mock_upload.call_args_list]
-    assert all(f"/videos/{slug}" in p or f"/transcripts/{slug}" in p for p in minio_paths)
+    storage_paths = [str(c.args[1]) for c in mock_upload.call_args_list]
+    assert all(f"/videos/{slug}" in p or f"/transcripts/{slug}" in p for p in storage_paths)
     assert (config.temp_dir / f"{slug}.mp3").exists()
 
 
 @patch("agent.pipelines.video_common.subprocess.run")
-@patch("agent.archival.upload_file_to_minio")
+@patch("agent.archival.upload_object")
 def test_upload_video_artifacts_batch_stem_vs_storage_slug(mock_upload, mock_run, config):
-    """Batch ingest: temp files use task id; MinIO keys use human slug."""
+    """Batch ingest: temp files use task id; object storage keys use human slug."""
 
     def _fake_ffmpeg(cmd, **kwargs):
         Path(cmd[-1]).write_bytes(b"mp3")
@@ -145,7 +143,7 @@ def test_upload_video_artifacts_batch_stem_vs_storage_slug(mock_upload, mock_run
     assert not (config.temp_dir / f"{slug}.mp3").exists()
 
 
-@patch("agent.archival.upload_file_to_minio", return_value="articles/slug.md")
+@patch("agent.archival.upload_object", return_value="articles/slug.md")
 def test_upload_note_archive_redacts_note_body(mock_upload, config):
     slug = "ig_post"
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{slug}.md"

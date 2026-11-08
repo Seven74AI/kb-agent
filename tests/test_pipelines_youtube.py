@@ -1,6 +1,6 @@
 """Tests for the YouTube video pipeline.
 
-Covers all mechanical steps (1-9), LLM synthesis, quality gates, MinIO archival,
+Covers all mechanical steps (1-9), LLM synthesis, quality gates, object storage archival,
 and Git push. Uses mocks for external dependencies (yt-dlp, ffmpeg, pyannote,
 faster-whisper, LLM)."""
 
@@ -37,7 +37,7 @@ from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_synthesize_youtube,
     step_quality_gate,
-    step_minio_upload,
+    step_storage_upload,
     step_git_push,
     _youtube_cookies_path,
     YOUTUBE_DENSITY_MIN,
@@ -63,9 +63,7 @@ def config(tmp_path):
         cookie_dir=tmp_path / "cookies",
         youtube_min_concepts=2,    # Lower for testing
         youtube_min_key_points=3,  # Lower for testing
-        minio_bucket="kb-agent-archive",
-        minio_endpoint="http://localhost:9000",
-    )
+        storage_bucket="kb-agent-archive",    )
 
 
 @pytest.fixture
@@ -789,9 +787,9 @@ date: 2026-06-19
 source: youtube.com (Test Channel)
 source_url: https://www.youtube.com/watch?v=dQw4w9WgXcQ
 source_files:
-  video: minio://kb-agent-archive/videos/test_channel_test-video.mp4
-  audio: minio://kb-agent-archive/videos/test_channel_test-video.mp3
-  transcript: minio://kb-agent-archive/videos/test_channel_test-video.json
+  video: storage://kb-agent-archive/videos/test_channel_test-video.mp4
+  audio: storage://kb-agent-archive/videos/test_channel_test-video.mp3
+  transcript: storage://kb-agent-archive/videos/test_channel_test-video.json
 confidence: plausible
 tags: [ai, technology]
 ---
@@ -945,10 +943,10 @@ def test_check_density_passing(config, task_dict, sample_metadata):
     _check_density(note_path, config)
 
 
-# ── MinIO upload tests ──────────────────────────────────────────────────────
+# ── object storage upload tests ──────────────────────────────────────────────────────
 
-def test_step_minio_upload(config, task_dict):
-    """Test MinIO upload of video, audio, and transcript."""
+def test_step_storage_upload(config, task_dict):
+    """Test object storage upload of video, audio, and transcript."""
     slug = task_dict["slug"]
     
     # Create mock files
@@ -975,7 +973,7 @@ source_files:
         result.returncode = 0
         mock_run.return_value = result
         
-        out = step_minio_upload(task_dict, config)
+        out = step_storage_upload(task_dict, config)
     
     assert "Uploaded" in out
     assert "videos" in out
@@ -1039,7 +1037,7 @@ def test_pipeline_registered():
     assert "cleanup_temp" in step_names
     assert "synthesize_youtube" in step_names
     assert "quality_gate" in step_names
-    assert "minio_upload" in step_names
+    assert "storage_upload" in step_names
     assert "see_also" in step_names
     assert "git_push" in step_names
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """#101: migrate note media URLs -> object keys (idempotent).
 
-Strips the MinIO host prefix from `source_files` (and any other media field)
+Strips the object storage host prefix from `source_files` (and any other media field)
 so notes reference portable keys (videos/x.mp4) instead of a deployment-specific
 host URL. Dry-run by default; pass --apply to write.
 

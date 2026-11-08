@@ -1,5 +1,5 @@
 """Web article pipeline — Firecrawl extraction, LLM synthesis, quality gates,
-MinIO archival, and Git push.
+object storage archival, and Git push.
 
 The simplest pipeline. No cookies, no video. Verifies the entire architecture.
 """
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
 from agent.quality import quality_gate_web, quality_gate_retry_loop
 from agent.archival import append_note_tags
-from agent.archival import step_minio_upload as archival_minio_upload
+from agent.archival import step_storage_upload as archival_storage_upload
 from agent.archival import step_git_push as archival_git_push
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -48,7 +48,7 @@ from agent.pipelines.youtube import (
     step_fetch_transcript as _yt_fetch_transcript,
     step_git_push as _yt_git_push,
     step_merge_and_identify as _yt_merge_and_identify,
-    step_minio_upload as _yt_minio_upload,
+    step_storage_upload as _yt_storage_upload,
     step_quality_gate as _yt_quality_gate,
     step_synthesize_youtube as _yt_synthesize,
     step_transcribe as _yt_transcribe,
@@ -1598,24 +1598,24 @@ def step_quality_gate(task: dict, config: Config) -> str:
     return "passed"
 
 
-# ── MinIO Upload Step (wraps archival.py) ─────────────────────────────────────
+# ── object storage Upload Step (wraps archival.py) ─────────────────────────────────────
 
-def step_minio_upload(task: dict, config: Config) -> str:
-    """Upload source content to MinIO and add source_files: field to note frontmatter.
+def step_storage_upload(task: dict, config: Config) -> str:
+    """Upload source content to object storage and add source_files: field to note frontmatter.
 
-    Wraps archival.step_minio_upload and adds the source_files URL to the note.
+    Wraps archival.step_storage_upload and adds the source_files URL to the note.
 
     Args:
         task: Task dict with id, slug, content_type, source_url.
         config: Config dataclass.
 
     Returns:
-        MinIO object URL for the archived file.
+        object storage object URL for the archived file.
     """
     slug = task.get("slug", task["id"][:8])
 
     # Upload the raw source
-    minio_url = archival_minio_upload(task, config)
+    storage_url = archival_storage_upload(task, config)
 
     # Add source_files: field to the note's frontmatter
     note_path = config.vault_path / "Knowledge base" / "articles" / f"{slug}.md"
@@ -1629,12 +1629,12 @@ def step_minio_upload(task: dict, config: Config) -> str:
                 if re.search(r'^source_files:', frontmatter, re.MULTILINE):
                     # Replace the raw: placeholder with the real URL
                     content = re.sub(
-                        r'^  raw:.*$', f'  raw: {minio_url}',
+                        r'^  raw:.*$', f'  raw: {storage_url}',
                         content, flags=re.MULTILINE
                     )
                 else:
                     # No source_files: field — insert after the opening ---
-                    content = content[:3] + "\nsource_files:\n  raw: " + minio_url + content[3:]
+                    content = content[:3] + "\nsource_files:\n  raw: " + storage_url + content[3:]
                 write_vault_note(note_path, content)
 
         # Write the real archive URL into the Sources section (before See Also).
@@ -1642,12 +1642,12 @@ def step_minio_upload(task: dict, config: Config) -> str:
         # already carries the URL.
         content = re.sub(
             r'^## See Also\s*$',
-            f'- Raw source archived: `{minio_url}`\n\n## See Also',
+            f'- Raw source archived: `{storage_url}`\n\n## See Also',
             content, flags=re.MULTILINE, count=1,
         )
         write_vault_note(note_path, content)
 
-    return minio_url
+    return storage_url
 
 
 # ── Git Push Step (wraps archival.py) ─────────────────────────────────────────
@@ -1673,7 +1673,7 @@ register_pipeline("web", [
     Step(name="firecrawl_extract", fn=step_firecrawl_extract, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])
@@ -1685,7 +1685,7 @@ register_pipeline("substack", [
     Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])
@@ -1696,7 +1696,7 @@ register_pipeline("substack_text", [
     Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])
@@ -1711,7 +1711,7 @@ register_pipeline("substack_video", [
     Step(name="cleanup_temp", fn=_yt_cleanup_temp, on_error="fail"),
     Step(name="synthesize_youtube", fn=_yt_synthesize, on_error="retry"),
     Step(name="quality_gate", fn=_yt_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=_yt_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=_yt_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=_yt_git_push, on_error="retry"),
 ])
@@ -1730,7 +1730,7 @@ register_pipeline("substack_image", [
     Step(name="substack_embedded_media", fn=step_substack_embedded_media, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])
@@ -1741,7 +1741,7 @@ register_pipeline("substack_image", [
 register_pipeline("substack_text_synthesize", [
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])
@@ -1749,7 +1749,7 @@ register_pipeline("substack_text_synthesize", [
 register_pipeline("substack_image_synthesize", [
     Step(name="synthesize_note", fn=step_synthesize_web, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])

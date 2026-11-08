@@ -1302,7 +1302,7 @@ class TestVideoStagingUsesQueueId:
             (i,),
         ).fetchone()["status"] == "dispatched" for i in (id_a, id_b))
 
-    def test_two_standalone_native_videos_same_slug_distinct_minio_and_dispatch_keys(
+    def test_two_standalone_native_videos_same_slug_distinct_storage_and_dispatch_keys(
         self, config, conn, monkeypatch, tmp_path,
     ):
         import scripts.batch_ingest as batch_ingest
@@ -1342,10 +1342,10 @@ class TestVideoStagingUsesQueueId:
 
         upload_keys: list[str] = []
 
-        def track_upload(_src, dest_key):
+        def track_upload(_src, dest_key, _config, **_kw):
             upload_keys.append(dest_key)
 
-        monkeypatch.setattr(batch_ingest, "upload_file_to_minio", track_upload)
+        monkeypatch.setattr(batch_ingest, "upload_object", track_upload)
 
         dispatch_slugs: list[str] = []
 
@@ -1860,7 +1860,7 @@ class TestChildProcessLogScrubbing:
                 return MagicMock(returncode=0, stdout="", stderr=sensitive)
             return MagicMock(returncode=0)
 
-        monkeypatch.setattr(batch_ingest, "upload_file_to_minio", lambda *_a, **_k: None)
+        monkeypatch.setattr(batch_ingest, "upload_object", lambda *_a, **_k: None)
         monkeypatch.setattr(
             batch_ingest,
             "dispatch_synthesize",
@@ -1987,9 +1987,9 @@ class TestChildProcessLogScrubbing:
         def flaky_upload(*_a, **_k):
             upload_calls["n"] += 1
             if upload_calls["n"] == 1:
-                raise _UploadExc("minio: /root/.minio/creds token=upload_leak")
+                raise _UploadExc("storage: /root/.storage/creds token=upload_leak")
 
-        monkeypatch.setattr(batch_ingest, "upload_file_to_minio", flaky_upload)
+        monkeypatch.setattr(batch_ingest, "upload_object", flaky_upload)
 
         ingest_dispatch = queue_ingest(
             conn, "https://www.youtube.com/watch?v=disfail", "youtube", "yt_dispatch_scrub",

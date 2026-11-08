@@ -40,7 +40,7 @@ def test_get_pipeline_names_known_synthesize_still_resolves():
 
     steps = get_pipeline_names("substack_text_synthesize", "substack")
     assert steps is not None
-    assert steps == ["synthesize_note", "quality_gate", "minio_upload", "see_also", "git_push"]
+    assert steps == ["synthesize_note", "quality_gate", "storage_upload", "see_also", "git_push"]
     assert "firecrawl_extract" not in steps
     assert "substack_embedded_media" not in steps
 

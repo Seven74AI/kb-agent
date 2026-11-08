@@ -8,6 +8,7 @@ must never reintroduce.
 
 import pytest
 
+from agent.config import Config
 from agent import detection
 from agent.pipelines.instagram import _shortcode_to_media_id
 from agent.pipelines.threads import _extract_json_array_after_key, _extract_video_url
@@ -377,8 +378,7 @@ def test_write_source_files_block_emits_keys(tmp_path):
     )
 
     class _Cfg:
-        minio_tailscale_base = "http://old-host"
-        minio_bucket = "knowledge-base"
+        storage_bucket = "knowledge-base"
 
     write_source_files_block(note, ["videos/x.mp4", "transcripts/x.json"], _Cfg())
     content = note.read_text(encoding="utf-8")
@@ -387,15 +387,16 @@ def test_write_source_files_block_emits_keys(tmp_path):
     assert "http://old-host" not in content
 
 
-def test_upload_file_to_minio_returns_key(tmp_path):
-    """upload_file_to_minio returns the bucket-stripped object key."""
+def test_upload_object_returns_key(tmp_path):
+    """upload_object returns the bucket-stripped object key."""
     from unittest.mock import MagicMock, patch
 
-    from agent.archival import upload_file_to_minio
+    from agent.archival import upload_object
 
     src = tmp_path / "raw.md"
     src.write_text("# hi", encoding="utf-8")
     with patch("agent.archival.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        key = upload_file_to_minio(src, "knowledge-base/articles/slug.md")
+        cfg = Config(storage_bucket="knowledge-base", storage_alias="tigris")
+        key = upload_object(src, "knowledge-base/articles/slug.md", cfg)
     assert key == "articles/slug.md"

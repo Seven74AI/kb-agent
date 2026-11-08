@@ -214,7 +214,7 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
     """Dispatch a synthesize-only task with an explicit content type + slug.
 
     Used by batch collectors that have already downloaded, transcribed, and
-    archived the source (video + transcript in MinIO). The task starts at the
+    archived the source (video + transcript in object storage). The task starts at the
     synthesize step, using the content type to select the right note template.
     """
     raw = (url or "").strip()

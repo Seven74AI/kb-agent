@@ -141,7 +141,7 @@ class TestWikispooksPipelineRegistration:
             "firecrawl_extract",
             "synthesize_note",
             "quality_gate",
-            "minio_upload",
+            "storage_upload",
             "see_also",
             "git_push",
         ]

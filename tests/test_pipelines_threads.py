@@ -34,7 +34,7 @@ from agent.pipelines.threads import (
     step_threads_text_synthesize,
     step_threads_quality_gate,
     step_threads_cleanup,
-    step_threads_minio_upload,
+    step_threads_storage_upload,
     step_threads_git_push,
     GOOGLEBOT_UA,
 )
@@ -62,10 +62,7 @@ def config(tmp_path):
         cookie_dir=tmp_path / "cookies",
         threads_text_min_quotes=2,
         threads_text_min_size=100,  # Low for testing
-        minio_bucket="kb-agent-archive",
-        minio_endpoint="http://localhost:9000",
-        minio_tailscale_base="http://minio.test/base",
-    )
+        storage_bucket="kb-agent-archive",    )
 
 
 @pytest.fixture
@@ -830,13 +827,13 @@ class TestCleanup:
             assert not Path(config.temp_dir / f"testuser_abc123{ext}").exists()
 
 
-# ── Step Tests: MinIO ────────────────────────────────────────────────────────
+# ── Step Tests: object storage ────────────────────────────────────────────────────────
 
-class TestMinIO:
-    """Tests for step_threads_minio_upload."""
+class TestStorage:
+    """Tests for step_threads_storage_upload."""
 
     @patch("subprocess.run")
-    def test_minio_upload_text_note_archival(self, mock_run, config, task_dict):
+    def test_storage_upload_text_note_archival(self, mock_run, config, task_dict):
         slug = task_dict["slug"]
         note_path = Path(config.vault_path) / "Knowledge base" / "threads" / f"{slug}.md"
         note_path.write_text("""---
@@ -847,7 +844,7 @@ raw: <filled by archival step>
 # Content""")
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
-        result = step_threads_minio_upload(task_dict, config)
+        result = step_threads_storage_upload(task_dict, config)
         assert result.startswith("threads/")
 
         content = note_path.read_text()
@@ -855,7 +852,7 @@ raw: <filled by archival step>
         assert "<filled by archival step>" not in content
 
     @patch("subprocess.run")
-    def test_minio_upload_video_source_archival(self, mock_run, config):
+    def test_storage_upload_video_source_archival(self, mock_run, config):
         video_task = {
             "id": "test-threads-video-12345",
             "source_url": "https://www.threads.net/@testuser/post/VID123",
@@ -876,7 +873,7 @@ source_files:
         Path(config.temp_dir / f"{slug}_merged.json").write_text("{}")
 
         mock_run.return_value = MagicMock(returncode=0, stderr="")
-        result = step_threads_minio_upload(video_task, config)
+        result = step_threads_storage_upload(video_task, config)
         assert result.startswith("Uploaded:")
         assert f"videos/{slug}.mp4" in result
         assert f"transcripts/{slug}.json" in result

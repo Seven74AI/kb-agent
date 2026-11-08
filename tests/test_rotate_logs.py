@@ -1,4 +1,4 @@
-"""Tests for log rotation — archiving step_logs + llm_archives to MinIO."""
+"""Tests for log rotation — archiving step_logs + llm_archives to object storage."""
 
 import gzip
 import json
@@ -15,6 +15,7 @@ import pytest
 _here = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_here))
 
+from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from scripts.rotate_logs import (
     BATCH_SIZE,
@@ -255,6 +256,9 @@ def test_rebuild_fts_after_deletion(logs_conn):
     logs_conn.commit()
 
 
+_ROTATE_STORAGE_CFG = Config(storage_bucket="kb-agent-archive", storage_alias="storage")
+
+
 # ── Integration tests: main() ─────────────────────────────────────────────────
 
 
@@ -291,7 +295,7 @@ def test_main_nothing_to_rotate(mock_run, logs_db_path):
 
 @patch("scripts.rotate_logs.subprocess.run")
 def test_main_archive_export_scrubs_sensitive_content(mock_run, logs_db_path):
-    """MinIO export must not contain raw paths or credentials from archived rows."""
+    """object storage export must not contain raw paths or credentials from archived rows."""
     mock_run.return_value = MagicMock(returncode=0, stderr="")
 
     old = _old_date(60)
@@ -311,9 +315,10 @@ def test_main_archive_export_scrubs_sensitive_content(mock_run, logs_db_path):
     conn.commit()
     conn.close()
 
-    with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
-        with patch("pathlib.Path.unlink", return_value=None):
-            assert main() == 0
+    with patch("scripts.rotate_logs.load_config", return_value=_ROTATE_STORAGE_CFG):
+        with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
+            with patch("pathlib.Path.unlink", return_value=None):
+                assert main() == 0
 
     tmp_gz = Path(mock_run.call_args[0][0][2])
     with gzip.open(tmp_gz, "rb") as f:
@@ -351,9 +356,10 @@ def test_main_archives_and_deletes_old_rows(mock_run, logs_db_path, tmp_path):
     conn.commit()
     conn.close()
 
-    with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
-        with patch("pathlib.Path.unlink", return_value=None):  # Don't delete temp files
-            result = main()
+    with patch("scripts.rotate_logs.load_config", return_value=_ROTATE_STORAGE_CFG):
+        with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
+            with patch("pathlib.Path.unlink", return_value=None):  # Don't delete temp files
+                result = main()
 
     assert result == 0
 
@@ -362,7 +368,8 @@ def test_main_archives_and_deletes_old_rows(mock_run, logs_db_path, tmp_path):
     call_args = mock_run.call_args[0][0]
     assert call_args[0] == "mc"
     assert call_args[1] == "cp"
-    assert "minio/kb-agent-archive/logs/" in call_args[3]  # 4th arg: minio path
+    assert call_args[3].startswith("storage/kb-agent-archive/logs/")
+    assert call_args[3].endswith(".json.gz")
 
     # Verify uploaded file contains both table types
     tmp_gz = Path(call_args[2])
@@ -388,10 +395,10 @@ def test_main_archives_and_deletes_old_rows(mock_run, logs_db_path, tmp_path):
 
 @patch("scripts.rotate_logs.subprocess.run")
 def test_main_upload_failure_preserves_rows(mock_run, logs_db_path):
-    """When MinIO upload fails, rows are NOT deleted (retry next run)."""
+    """When object storage upload fails, rows are NOT deleted (retry next run)."""
     mock_run.return_value = MagicMock(
         returncode=1,
-        stderr="mc: <ERROR> Unable to connect to MinIO",
+        stderr="mc: <ERROR> Unable to connect to object storage",
     )
 
     old = _old_date(60)
@@ -403,8 +410,9 @@ def test_main_upload_failure_preserves_rows(mock_run, logs_db_path):
     conn.commit()
     conn.close()
 
-    with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
-        result = main()
+    with patch("scripts.rotate_logs.load_config", return_value=_ROTATE_STORAGE_CFG):
+        with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
+            result = main()
 
     assert result == 1  # Upload failure
 
@@ -433,8 +441,9 @@ def test_main_handles_both_tables_independently(mock_run, logs_db_path):
     conn.commit()
     conn.close()
 
-    with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
-        result = main()
+    with patch("scripts.rotate_logs.load_config", return_value=_ROTATE_STORAGE_CFG):
+        with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
+            result = main()
 
     assert result == 0
 
@@ -518,8 +527,9 @@ def test_main_large_batch_splits_deletes(mock_run, logs_db_path):
     conn.commit()
     conn.close()
 
-    with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
-        result = main()
+    with patch("scripts.rotate_logs.load_config", return_value=_ROTATE_STORAGE_CFG):
+        with patch("scripts.rotate_logs.LOGS_DB", logs_db_path):
+            result = main()
 
     assert result == 0
     assert mock_run.call_count == 1

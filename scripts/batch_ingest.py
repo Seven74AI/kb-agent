@@ -5,7 +5,7 @@ Reads the durable ingest_queue (status='queued'):
 - Non-video (web/books/substack/...) -> full pipeline task (batch submit helper).
 - Video -> runs each pipeline's download-phase steps, then ONE batch Modal
   transcription run per content type (scripts/batch_transcribe.py), uploads
-  video + transcript to MinIO, and dispatches a synthesize-only task.
+  video + transcript to object storage, and dispatches a synthesize-only task.
 
 Runs as a --no-agent cron. Idempotent: a link is marked 'dispatched' only after
 its task is created; a crash re-runs cleanly next night.
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_bootstrap_root))
 # for non-default installs.
 sys.path.insert(0, "/root/kb-agent")
 
-from agent.archival import upload_file_to_minio  # noqa: E402
+from agent.archival import upload_object  # noqa: E402
 from agent.config import load_config  # noqa: E402
 
 sys.path.insert(0, str(load_config().kb_agent_dir))
@@ -304,14 +304,16 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
             if q["content_type"] == "threads_video":
                 copy_threads_raw_for_synthesize(config, q, storage_slug)
             try:
-                upload_file_to_minio(
+                upload_object(
                     vdest,
-                    f"{config.minio_bucket}/videos/{storage_slug}{vdest.suffix.lower()}",
+                    f"{config.storage_bucket}/videos/{storage_slug}{vdest.suffix.lower()}",
+                    config,
                 )
                 ensure_merged_transcript_file_redacted(merged)
-                upload_file_to_minio(
+                upload_object(
                     merged,
-                    f"{config.minio_bucket}/transcripts/{storage_slug}.json",
+                    f"{config.storage_bucket}/transcripts/{storage_slug}.json",
+                    config,
                 )
             except Exception as exc:  # noqa: BLE001
                 update_ingest_status(conn, q["id"], "failed", error=f"upload failed: {exc}")

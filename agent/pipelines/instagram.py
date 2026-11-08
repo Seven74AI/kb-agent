@@ -2,9 +2,9 @@
 
 Routing:
 - /reel/ → video pipeline (yt-dlp download → dual audio → diarize →
-  transcribe → merge → synthesize → quality → MinIO → Git)
+  transcribe → merge → synthesize → quality → object storage → Git)
 - /p/ → carousel pipeline (yt-dlp metadata → Playwright alt text extraction →
-  LLM synthesis → quality → MinIO → Git)
+  LLM synthesis → quality → object storage → Git)
 
 Pitfalls handled:
 - Cookie validation: grep -c sessionid >= 1
@@ -438,7 +438,7 @@ TASK: Write a note that:
 4. Describes what can be observed from the transcript (if any words were detected)
 
 OUTPUT FORMAT:
-- YAML frontmatter: date, source: instagram.com, source_url: {display_source_url}, minio placeholder,
+- YAML frontmatter: date, source: instagram.com, source_url: {display_source_url}, storage placeholder,
   confidence: low (music-only reel), tags: [instagram, reel, music]
 - Note sections: Title, Summary, Post Description (verbatim caption), Caption Analysis,
   Transcript Notes, Reliability (note music-only limitation)"""
@@ -982,10 +982,10 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
     return f"Cleaned up: {', '.join(removed)}" if removed else "Nothing to clean up"
 
 
-# ── MinIO Upload ──────────────────────────────────────────────────────────────
+# ── object storage Upload ──────────────────────────────────────────────────────────────
 
-def step_ig_minio_upload(task: dict, config: Config) -> str:
-    """Upload the generated reel/post artifacts to MinIO.
+def step_ig_storage_upload(task: dict, config: Config) -> str:
+    """Upload the generated reel/post artifacts to object storage.
 
     Reel: source-archival (video + transcript). Post/carousel: note-archival.
     """
@@ -1327,7 +1327,7 @@ Write the note following the template."""
 
 # ── Pipeline Registration ────────────────────────────────────────────────────
 
-# Instagram reel pipeline: validate → download → audio → diarize → transcribe → merge → synthesize → quality → cleanup → minio → git
+# Instagram reel pipeline: validate → download → audio → diarize → transcribe → merge → synthesize → quality → cleanup → storage → git
 register_pipeline("instagram_reel", [
     Step(name="ig_reel_validate", fn=step_ig_reel_validate, on_error="pause"),
     Step(name="ig_reel_download", fn=step_ig_reel_download, on_error="retry"),
@@ -1337,7 +1337,7 @@ register_pipeline("instagram_reel", [
     Step(name="merge_and_identify", fn=step_ig_reel_merge, on_error="retry"),
     Step(name="ig_reel_synthesize", fn=step_ig_reel_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
-    Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_storage_upload", fn=step_ig_storage_upload, on_error="retry"),
     Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
@@ -1351,25 +1351,25 @@ register_pipeline("instagram_reel_synthesize", [
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])
 
-# Instagram carousel pipeline: validate → metadata → extract → synthesize → quality → minio → git
+# Instagram carousel pipeline: validate → metadata → extract → synthesize → quality → storage → git
 register_pipeline("instagram_post", [
     Step(name="ig_reel_validate", fn=step_ig_reel_validate, on_error="pause"),
     Step(name="ig_carousel_metadata", fn=step_ig_carousel_metadata, on_error="retry"),
     Step(name="ig_carousel_extract", fn=step_ig_carousel_extract, on_error="retry"),
     Step(name="ig_carousel_synthesize", fn=step_ig_carousel_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
-    Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_storage_upload", fn=step_ig_storage_upload, on_error="retry"),
     Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),
 ])
 
-# Instagram comment pipeline: fetch comment + parent caption → synthesize → quality → minio → git
+# Instagram comment pipeline: fetch comment + parent caption → synthesize → quality → storage → git
 register_pipeline("instagram_comment", [
     Step(name="ig_comment_fetch", fn=step_ig_comment_fetch, on_error="retry"),
     Step(name="ig_comment_synthesize", fn=step_ig_comment_synthesize, on_error="retry"),
     Step(name="ig_quality_gate", fn=step_ig_quality_gate, on_error="retry"),
-    Step(name="ig_minio_upload", fn=step_ig_minio_upload, on_error="retry"),
+    Step(name="ig_storage_upload", fn=step_ig_storage_upload, on_error="retry"),
     Step(name="ig_cleanup", fn=step_ig_cleanup, on_error="fail"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="ig_git_push", fn=step_ig_git_push, on_error="retry"),

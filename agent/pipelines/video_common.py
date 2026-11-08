@@ -1,13 +1,13 @@
 """Shared helpers for video pipelines.
 
 Holds the duplicated video-handler steps once: audio extraction, diarization,
-transcription, speaker-merge, transcript formatting, quality gates, and MinIO
+transcription, speaker-merge, transcript formatting, quality gates, and object storage
 archival. Each content-type pipeline (youtube, bunny_stream, instagram, threads,
 mega_video) imports the generic implementations and keeps only its
 platform-specific download / synthesis / note-path logic.
 
 Also includes the synthesize-only (batch) path: fetch a pre-uploaded merged
-transcript from MinIO and normalize it for downstream density checks.
+transcript from object storage and normalize it for downstream density checks.
 """
 
 import json
@@ -649,7 +649,7 @@ def strip_code_fence(content: str) -> str:
     return content + "\n"
 
 
-# ── MinIO Upload ─────────────────────────────────────────────────────────────
+# ── object storage Upload ─────────────────────────────────────────────────────────────
 
 def upload_video_artifacts(
     artifact_stem: str,
@@ -657,21 +657,21 @@ def upload_video_artifacts(
     config: Config,
     video_path: Path,
 ) -> list[str]:
-    """Upload the video, an extracted MP3, and the merged transcript to MinIO.
+    """Upload the video, an extracted MP3, and the merged transcript to object storage.
 
-    ``artifact_stem`` names local temp artifacts; ``storage_slug`` keys MinIO objects.
+    ``artifact_stem`` names local temp artifacts; ``storage_slug`` keys object storage objects.
 
     Returns the list of uploaded object keys (relative to the bucket).
     """
-    from agent.archival import upload_file_to_minio
+    from agent.archival import upload_object
 
-    bucket = config.minio_bucket
+    bucket = config.storage_bucket
     uploaded = []
 
     ext = video_path.suffix.lower()
     if video_path.exists():
-        upload_file_to_minio(
-            video_path, f"{bucket}/videos/{storage_slug}{ext}", timeout=120,
+        upload_object(
+            video_path, f"{bucket}/videos/{storage_slug}{ext}", config, timeout=120,
         )
         uploaded.append(f"videos/{storage_slug}{ext}")
 
@@ -683,16 +683,16 @@ def upload_video_artifacts(
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0 and mp3_path.exists():
-            upload_file_to_minio(
-                mp3_path, f"{bucket}/videos/{storage_slug}.mp3", timeout=120,
+            upload_object(
+                mp3_path, f"{bucket}/videos/{storage_slug}.mp3", config, timeout=120,
             )
             uploaded.append(f"videos/{storage_slug}.mp3")
 
     merged_path = Path(config.temp_dir) / f"{artifact_stem}_merged.json"
     if merged_path.exists():
         ensure_merged_transcript_file_redacted(merged_path)
-        upload_file_to_minio(
-            merged_path, f"{bucket}/transcripts/{storage_slug}.json", timeout=120,
+        upload_object(
+            merged_path, f"{bucket}/transcripts/{storage_slug}.json", config, timeout=120,
         )
         uploaded.append(f"transcripts/{storage_slug}.json")
 
@@ -704,25 +704,25 @@ def upload_video_source(storage_slug: str, config: Config, video_path: Path,
                         artifact_stem: str) -> list[str]:
     """Upload a video source + merged transcript, then rewrite note source_files.
 
-    ``artifact_stem`` names local temp artifacts; ``storage_slug`` keys MinIO objects
+    ``artifact_stem`` names local temp artifacts; ``storage_slug`` keys object storage objects
     (see ``step_fetch_transcript`` for the same split).
     """
-    from agent.archival import upload_file_to_minio, write_source_files_block
+    from agent.archival import upload_object, write_source_files_block
 
-    bucket = config.minio_bucket
+    bucket = config.storage_bucket
     uploaded = []
 
     if video_path.exists():
-        upload_file_to_minio(
-            video_path, f"{bucket}/videos/{storage_slug}.{dest_ext}", timeout=120,
+        upload_object(
+            video_path, f"{bucket}/videos/{storage_slug}.{dest_ext}", config, timeout=120,
         )
         uploaded.append(f"videos/{storage_slug}.{dest_ext}")
 
     merged = Path(config.temp_dir) / f"{artifact_stem}_merged.json"
     if merged.exists():
         ensure_merged_transcript_file_redacted(merged)
-        upload_file_to_minio(
-            merged, f"{bucket}/transcripts/{storage_slug}.json", timeout=120,
+        upload_object(
+            merged, f"{bucket}/transcripts/{storage_slug}.json", config, timeout=120,
         )
         uploaded.append(f"transcripts/{storage_slug}.json")
 
@@ -731,22 +731,22 @@ def upload_video_source(storage_slug: str, config: Config, video_path: Path,
 
 
 def upload_note_archive(slug: str, config: Config, note_path: Path, folder: str) -> str:
-    """Upload a synthesized note for archival and link its MinIO URL in frontmatter."""
-    from agent.archival import upload_file_to_minio
+    """Upload a synthesized note for archival and link its object storage URL in frontmatter."""
+    from agent.archival import upload_object
 
-    bucket = config.minio_bucket
+    bucket = config.storage_bucket
     note_key = f"{folder}/{slug}.md"
-    minio_url = upload_file_to_minio(note_path, f"{bucket}/{note_key}")
+    storage_url = upload_object(note_path, f"{bucket}/{note_key}", config)
 
     content = note_path.read_text(encoding="utf-8")
     updated = re.sub(
         r"raw:\s*<filled by archival step>",
-        f"raw: {minio_url}",
+        f"raw: {storage_url}",
         content,
     )
     write_vault_note(note_path, updated)
 
-    return minio_url
+    return storage_url
 
 
 # ── Synthesize-only (batch) path ─────────────────────────────────────────────
@@ -778,9 +778,9 @@ def _duration_from_merged(merged: dict) -> float:
 
 
 def step_fetch_transcript(task: dict, config: Config) -> str:
-    """Fetch the pre-uploaded merged transcript from MinIO (synthesize-only path).
+    """Fetch the pre-uploaded merged transcript from object storage (synthesize-only path).
 
-    Reads ``{minio_bucket}/transcripts/{slug}.json`` and writes it to
+    Reads ``{storage_bucket}/transcripts/{slug}.json`` and writes it to
     ``{temp_dir}/{slug}_merged.json`` so the content-type synthesize step can
     consume it exactly as if it had just merged locally.
     """
@@ -789,8 +789,8 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
     merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     merged_path.parent.mkdir(parents=True, exist_ok=True)
 
-    dest = f"{config.minio_bucket}/transcripts/{storage_slug}.json"
-    alias = os.environ.get("STORAGE_ALIAS", "minio")
+    dest = f"{config.storage_bucket}/transcripts/{storage_slug}.json"
+    alias = config.storage_alias
     result = subprocess.run(
         ["mc", "cp", f"{alias}/{dest}", str(merged_path)],
         capture_output=True,

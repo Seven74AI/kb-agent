@@ -1,5 +1,5 @@
 """Book pipeline — Mega.nz, ePub/PDF extraction, 3-tier pre-flight,
-chapter-level synthesis, quality gates, MinIO archival, and Git push.
+chapter-level synthesis, quality gates, object storage archival, and Git push.
 
 Supports:
 - Mega.nz archive download + batch book classification
@@ -8,7 +8,7 @@ Supports:
 - 3-tier PDF quality scoring (scanned vs degraded vs clean)
 - Book note synthesis from book-note-template.md
 - Quality gates: line count, quote count, size, fact-checks, chapter coverage
-- MinIO upload of source + extracted full text
+- object storage upload of source + extracted full text
 """
 
 import hashlib
@@ -1513,12 +1513,12 @@ def step_book_quality_gate(task: dict, config: Config) -> str:
     })
 
 
-# ── MinIO Upload (Books) ──────────────────────────────────────────────────────
+# ── object storage Upload (Books) ──────────────────────────────────────────────────────
 
-def step_book_minio_upload(task: dict, config: Config) -> str:
-    """Upload book source and extracted full text to MinIO.
+def step_book_storage_upload(task: dict, config: Config) -> str:
+    """Upload book source and extracted full text to object storage.
 
-    Delegates to archival.upload_file_to_minio for each file.
+    Delegates to archival.upload_object for each file.
 
     Uploads:
     - Source epub/PDF → kb-agent-archive/books/{slug}.epub (or .pdf)
@@ -1529,36 +1529,36 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
         config: Config dataclass.
 
     Returns:
-        JSON string with MinIO URLs.
+        JSON string with object storage URLs.
     """
-    from agent.archival import upload_file_to_minio
+    from agent.archival import upload_object
 
     slug = task.get("slug", task["id"][:8])
     full_text_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
 
     if not full_text_path.exists():
         raise StepError(
-            f"Full text not found for MinIO upload: {full_text_path}",
+            f"Full text not found for object storage upload: {full_text_path}",
             error_type=ErrorType.FAIL,
-            step_name="book_minio_upload",
+            step_name="book_storage_upload",
         )
 
     uploaded = []
 
     # Upload full text
-    txt_dest = f"{config.minio_bucket}/books/{slug}.txt"
-    upload_file_to_minio(full_text_path, txt_dest)
+    txt_dest = f"{config.storage_bucket}/books/{slug}.txt"
+    upload_object(full_text_path, txt_dest, config)
     uploaded.append(f"books/{slug}.txt")
 
     source_suffixes = {".epub", ".pdf", ".mobi", ".azw3"}
     source_upload_error: StepError | None = None
     try:
         sf = _resolve_local_book_path(
-            task, config, source_suffixes, "book_minio_upload",
+            task, config, source_suffixes, "book_storage_upload",
         )
-        sf_dest = f"{config.minio_bucket}/books/{slug}{sf.suffix.lower()}"
+        sf_dest = f"{config.storage_bucket}/books/{slug}{sf.suffix.lower()}"
         try:
-            upload_file_to_minio(sf, sf_dest, timeout=120)
+            upload_object(sf, sf_dest, config, timeout=120)
             uploaded.append(f"books/{slug}{sf.suffix.lower()}")
         except StepError as exc:
             source_upload_error = exc
@@ -1567,9 +1567,9 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
 
     if source_upload_error is not None:
         raise StepError(
-            f"Source book MinIO upload failed: {source_upload_error}",
+            f"Source book object storage upload failed: {source_upload_error}",
             error_type=source_upload_error.error_type,
-            step_name="book_minio_upload",
+            step_name="book_storage_upload",
         ) from source_upload_error
 
 
@@ -1638,7 +1638,7 @@ register_pipeline("book", [
     Step(name="extract_text", fn=step_extract_epub, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_book_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
@@ -1650,7 +1650,7 @@ register_pipeline("book_epub", [
     Step(name="extract_text", fn=step_extract_epub, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_book_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
@@ -1659,7 +1659,7 @@ register_pipeline("book_pdf", [
     Step(name="extract_text", fn=step_extract_pdf, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_book_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
@@ -1668,7 +1668,7 @@ register_pipeline("book_mobi", [
     Step(name="extract_text", fn=step_extract_mobi, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_book_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
@@ -1677,7 +1677,7 @@ register_pipeline("book_scanned", [
     Step(name="extract_text", fn=step_extract_pdf_scanned, on_error="pause"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_book_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
@@ -1686,7 +1686,7 @@ register_pipeline("book_degraded", [
     Step(name="extract_text", fn=step_extract_pdf_degraded, on_error="fail"),
     Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
     Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_book_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])

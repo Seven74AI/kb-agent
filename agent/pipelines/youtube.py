@@ -2,7 +2,7 @@
 
 Full pipeline: yt-dlp metadata + download → ffmpeg dual WAV extraction →
 pyannote diarization → faster-whisper transcription → merge + speaker ID +
-chapter generation → LLM two-pass synthesis → quality gates → MinIO archival
+chapter generation → LLM two-pass synthesis → quality gates → object storage archival
 → Git push.
 
 Uses canonical scripts at /root/kb-agent/scripts/ (symlinked to
@@ -940,13 +940,13 @@ def step_quality_gate(task: dict, config: Config) -> str:
     return "passed"
 
 
-# ── MinIO Upload ─────────────────────────────────────────────────────────────
+# ── object storage Upload ─────────────────────────────────────────────────────────────
 
-def step_minio_upload(task: dict, config: Config) -> str:
-    """Upload video, audio, and transcript to MinIO.
+def step_storage_upload(task: dict, config: Config) -> str:
+    """Upload video, audio, and transcript to object storage.
 
     Uploads .mp4, extracted .mp3, and transcript JSON. Delegates upload to
-    archival.upload_file_to_minio and updates note frontmatter with MinIO URLs.
+    archival.upload_object and updates note frontmatter with object storage URLs.
     """
     stem = resolve_artifact_stem(task)
     storage_slug = _resolve_slug(task)
@@ -955,14 +955,14 @@ def step_minio_upload(task: dict, config: Config) -> str:
 
     uploaded = upload_video_artifacts(stem, storage_slug, config, video_path)
 
-    # Update note frontmatter with MinIO URLs
-    _update_note_minio_urls(display_slug, config, uploaded)
+    # Update note frontmatter with object storage URLs
+    _update_note_storage_urls(display_slug, config, uploaded)
 
     return f"Uploaded: {', '.join(uploaded)}"
 
 
-def _update_note_minio_urls(slug: str, config: Config, uploaded: list) -> None:
-    """Update note frontmatter with actual MinIO URLs."""
+def _update_note_storage_urls(slug: str, config: Config, uploaded: list) -> None:
+    """Update note frontmatter with actual object storage URLs."""
     note_path = config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
     if not note_path.exists():
         return
@@ -1028,7 +1028,7 @@ register_pipeline("youtube", [
     Step(name="cleanup_temp", fn=step_cleanup_temp, on_error="fail"),
     Step(name="synthesize_youtube", fn=step_synthesize_youtube, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
-    Step(name="minio_upload", fn=step_minio_upload, on_error="retry"),
+    Step(name="storage_upload", fn=step_storage_upload, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),
 ])

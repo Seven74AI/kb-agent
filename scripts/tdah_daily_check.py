@@ -22,8 +22,8 @@ CDN = "https://vz-46d29c85-ed.b-cdn.net"
 REF = "Referer: https://player.mediadelivery.net/"
 MODAL = "/root/modal"
 TMP = "/tmp/tdah_daily"
-VB = "minio/kb-agent-archive/videos"       # mc alias 'minio'
-TB = "minio/kb-agent-archive/transcripts"
+VB = "storage/kb-agent-archive/videos"       # mc alias 'storage'
+TB = "storage/kb-agent-archive/transcripts"
 
 UUID_RE = re.compile(
     r"player\.mediadelivery\.net/embed/\d+/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"
@@ -99,7 +99,7 @@ def main():
     url_slugs = set(re.findall(r"/tdah-adulte-(j\d+-[a-z0-9-]+)/", html))
     note_slugs = {f"tdah-adulte-2026-{s}" for s in url_slugs}
 
-    # 2. already-processed = MinIO videos
+    # 2. already-processed = object storage videos
     r = sh(["mc", "ls", VB])
     existing = set(re.findall(r"(tdah-adulte-2026-j\d+-[a-z0-9-]+)\.mp4", r.stdout))
     new = sorted(note_slugs - existing)

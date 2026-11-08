@@ -32,8 +32,8 @@ from agent.pipelines.video_common import (
     threads_raw_path,
     step_fetch_transcript,
 )
-from agent.pipelines.instagram import step_ig_cleanup, step_ig_minio_upload
-from agent.pipelines.threads import step_threads_cleanup, step_threads_minio_upload
+from agent.pipelines.instagram import step_ig_cleanup, step_ig_storage_upload
+from agent.pipelines.threads import step_threads_cleanup, step_threads_storage_upload
 from agent.pipelines.youtube import _ytdlp_subprocess_env, step_cleanup_temp
 
 
@@ -58,7 +58,7 @@ def config(tmp_path):
         vault_path=vault,
         temp_dir=temp,
         cookie_dir=cookies,
-        minio_bucket="kb-agent-archive",
+        storage_bucket="kb-agent-archive",
     )
 
 
@@ -210,7 +210,7 @@ def test_carousel_extract_sanitizes_subprocess_details(config, monkeypatch):
 
 
 @patch("subprocess.run")
-def test_ig_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
+def test_ig_storage_upload_batch_uses_artifact_stem_video(mock_run, config):
     task_id = "batch-reel-uuid-1234"
     slug = "owner_reel_abc"
     task = {
@@ -228,7 +228,7 @@ def test_ig_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
     (config.temp_dir / f"{task_id}.mp4").write_bytes(b"video-bytes")
     (config.temp_dir / f"{task_id}_merged.json").write_text("{}", encoding="utf-8")
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    result = step_ig_minio_upload(task, config)
+    result = step_ig_storage_upload(task, config)
     assert result.startswith("Uploaded:")
     assert f"videos/{slug}.mp4" in result
     assert f"transcripts/{slug}.json" in result
@@ -251,7 +251,7 @@ def test_ig_cleanup_batch_removes_id_keyed_reel_mp4(config):
 
 
 @patch("subprocess.run")
-def test_threads_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
+def test_threads_storage_upload_batch_uses_artifact_stem_video(mock_run, config):
     task_id = "batch-threads-uuid"
     slug = "user_post"
     task = {
@@ -269,7 +269,7 @@ def test_threads_minio_upload_batch_uses_artifact_stem_video(mock_run, config):
     (config.temp_dir / f"{task_id}.mp4").write_bytes(b"video")
     (config.temp_dir / f"{task_id}_merged.json").write_text("{}", encoding="utf-8")
     mock_run.return_value = MagicMock(returncode=0, stderr="")
-    result = step_threads_minio_upload(task, config)
+    result = step_threads_storage_upload(task, config)
     assert result.startswith("Uploaded:")
     assert f"videos/{slug}.mp4" in result
     assert f"transcripts/{slug}.json" in result
