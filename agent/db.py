@@ -7,6 +7,17 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.deferral_fsm import (
+    DEFERRED_MEDIA_PAUSE_MARKERS,
+    REQUEUE_SUPERSEDE_GUARD,
+    SUPERSEDE_DEFERRED_PARENT_REASON,
+    SYNTHESIZE_IN_FLIGHT_STATUSES,
+    deferral_cycle_cmp,
+    embed_step_output_terminal_success,
+    is_deferred_media_pause,
+    is_superseded_parent_error,
+    is_synthesize_content_type,
+)
 from agent.redact import redact_http_urls_in_text, url_for_display
 
 _ALLOWED_INGEST_SCHEMES = frozenset({"http", "https"})
@@ -14,47 +25,10 @@ _ALLOWED_INGEST_SCHEMES = frozenset({"http", "https"})
 # Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``).
 INGEST_MAX_MEDIA_ATTEMPTS = 3
 
-# Substrings in task/step pause reasons that mean deferred media still blocks synthesis.
-DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
-    "awaiting media",
-    "awaiting substack cookies",
-    "deferred to batch synthesis",
-    "batch synthesis dispatched or completed",
-    "deferred synthesis paused",
-    "deferred synthesis dispatch failed",
-    "media gate",
-    "media_deferred:",
-    "unsupported embed",
-)
-
 _EMBEDDED_MEDIA_AWAITING_RE = re.compile(
     r"awaiting media:\s*(\d+)\s*images\s*\+\s*(\d+)\s*videos",
     re.IGNORECASE,
 )
-
-_EMBED_STEP_TERMINAL_SUCCESS_HEADS = (
-    "no embedded media",
-    "media ready — deferred to batch",
-)
-
-
-def is_deferred_media_pause(reason: str | None) -> bool:
-    """True when a pause reason signals the parent must not pass ``synthesize_note``."""
-    if not reason:
-        return False
-    low = reason.lower()
-    return any(marker in low for marker in DEFERRED_MEDIA_PAUSE_MARKERS)
-
-
-def _embed_step_output_terminal_success(output: str | None) -> bool:
-    """True when ``substack_embedded_media`` finished with a non-pause terminal message."""
-    if not output:
-        return False
-    head = output.split("\n", 1)[0].strip()
-    if head == _EMBED_STEP_TERMINAL_SUCCESS_HEADS[0]:
-        return True
-    return head.startswith(_EMBED_STEP_TERMINAL_SUCCESS_HEADS[1])
-
 
 def _substack_cleanup_output_signals_deferred_media(
     conn: sqlite3.Connection,
@@ -110,7 +84,7 @@ def task_deferred_retry_preserves_embed_step(
         return False
     status, output = row[0], row[1]
 
-    if _embed_step_output_terminal_success(output):
+    if embed_step_output_terminal_success(output):
         return False
 
     if status in ("failed", "paused"):
@@ -1089,11 +1063,6 @@ def count_pending_media(conn: sqlite3.Connection, parent_slug: str) -> int:
     return row["n"]
 
 
-def is_synthesize_content_type(content_type: str) -> bool:
-    """True when *content_type* is a deferred synthesize-only pipeline variant."""
-    return (content_type or "").endswith("_synthesize")
-
-
 def normalize_deferral_parent_content_type(content_type: str) -> str:
     """Map legacy bare ``substack`` parent rows to ``substack_text`` for deferral/dispatch."""
     ct = (content_type or "").strip()
@@ -1166,14 +1135,6 @@ def find_active_task(
     return task_id
 
 
-_SYNTHESIZE_IN_FLIGHT_STATUSES = "'pending', 'in_progress', 'paused'"
-
-
-_REQUEUE_SUPERSEDE_GUARD = (
-    "AND (error IS NULL OR instr(LOWER(COALESCE(error, '')), 'superseded') = 0)"
-)
-
-
 def may_reset_parent_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -1198,7 +1159,7 @@ def may_reset_parent_task(
             error = row[0]
         if content_type is None:
             content_type = row[1]
-    if _is_superseded_parent_error(error):
+    if is_superseded_parent_error(error):
         return False
     if slug and content_type and not is_synthesize_content_type(content_type):
         if has_active_synthesize_task(conn, slug):
@@ -1222,7 +1183,7 @@ def requeue_task_for_retry_cas(
         SET status = 'pending', error = NULL, retries = 0, updated_at = datetime('now')
         WHERE id = ?
           AND status IN ({status_sql})
-          {_REQUEUE_SUPERSEDE_GUARD}
+          {REQUEUE_SUPERSEDE_GUARD}
         """,
         (task_id,),
     )
@@ -1235,10 +1196,10 @@ def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     deferral = get_parent_media_deferral(conn, slug)
     if deferral is not None:
         anchor = deferral["updated_at"]
-        op = _deferral_cycle_cmp(deferral)
+        op = deferral_cycle_cmp(deferral)
         row = conn.execute(
             f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-            f"AND status IN ({_SYNTHESIZE_IN_FLIGHT_STATUSES}) "
+            f"AND status IN ({SYNTHESIZE_IN_FLIGHT_STATUSES}) "
             f"AND datetime(updated_at) {op} datetime(?) "
             "ORDER BY created_at ASC, id ASC "
             "LIMIT 1",
@@ -1247,7 +1208,7 @@ def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
         return row is not None
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        f"AND status IN ({_SYNTHESIZE_IN_FLIGHT_STATUSES}) "
+        f"AND status IN ({SYNTHESIZE_IN_FLIGHT_STATUSES}) "
         "ORDER BY created_at ASC, id ASC "
         "LIMIT 1",
         (slug,),
@@ -1271,36 +1232,17 @@ def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     return row is not None
 
 
-def _is_superseded_parent_error(error: str | None) -> bool:
-    return bool(error and "superseded" in error.lower())
-
-
 _TERMINAL_SUPERSEDE_FILTER = (
     "AND (error IS NULL OR instr(LOWER(COALESCE(error, '')), 'superseded') = 0)"
 )
 _TERMINAL_PROBE_ORDER = "ORDER BY created_at ASC, id ASC"
 
 
-SUPERSEDE_DEFERRED_PARENT_REASON = (
-    "deferred synthesis dispatched; parent ingestion superseded"
-)
-
-
-def _deferral_cycle_cmp(deferral: dict) -> str:
-    """SQL comparison operator for deferral-generation freshness.
-
-    Invariant: a task created at or after ``deferral.updated_at`` is never stale.
-    SQLite ``datetime('now')`` is second-resolution, so strict ``>`` would mark
-    same-second rows stale when ``media_changed`` is set.
-    """
-    return ">="
-
-
 def _deferral_terminal_parent_fresh(conn: sqlite3.Connection, slug: str, deferral: dict) -> bool:
     """Inline parent synthesis finished in the current deferral generation."""
     conn.row_factory = sqlite3.Row
     anchor = deferral["updated_at"]
-    op = _deferral_cycle_cmp(deferral)
+    op = deferral_cycle_cmp(deferral)
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
@@ -1315,7 +1257,7 @@ def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, def
     """Batch *_synthesize finished in the current deferral generation."""
     conn.row_factory = sqlite3.Row
     anchor = deferral["updated_at"]
-    op = _deferral_cycle_cmp(deferral)
+    op = deferral_cycle_cmp(deferral)
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
@@ -1332,7 +1274,7 @@ def _deferral_synthesize_task_fresh(
     """True when a *_synthesize task row belongs to the current deferral generation."""
     conn.row_factory = sqlite3.Row
     anchor = deferral["updated_at"]
-    op = _deferral_cycle_cmp(deferral)
+    op = deferral_cycle_cmp(deferral)
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE id = ? AND datetime(updated_at) {op} datetime(?)",
         (task_id, anchor),
@@ -2323,7 +2265,7 @@ def task_execution_aborted(conn: sqlite3.Connection, task_id: str) -> bool:
         return True
     status = row["status"] if hasattr(row, "keys") else row[0]
     err = row["error"] if hasattr(row, "keys") else row[1]
-    if _is_superseded_parent_error(err):
+    if is_superseded_parent_error(err):
         return True
     return status in ("failed", "completed", "done")
 
