@@ -38,7 +38,6 @@ from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
     bootstrap_parent_media_deferral_from_manifest,
     claim_ingest_items,
-    count_pending_media,
     ensure_parent_media_deferral,
     finish_batch_run,
     get_parent_media_deferral,

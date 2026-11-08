@@ -45,18 +45,20 @@ def load_url_set(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _safe_slug(url: str) -> str:
-    return slugify(url)
+def _safe_slug(url: str, *, content_type: str | None = None) -> str:
+    return slugify(url, content_type=content_type)
 
 
 def resolve_note_in_dir(
     url: str,
     notes_dir: Path,
+    *,
+    content_type: str | None = None,
 ) -> Path | None:
     """Find a staged note file for a URL under ``notes_dir/{slug}.md``."""
     if not notes_dir.is_dir():
         return None
-    slug = _safe_slug(url)
+    slug = _safe_slug(url, content_type=content_type)
     for name in (f"{slug}.md", f"{url.split('/')[-1]}.md"):
         candidate = notes_dir / name
         if candidate.is_file():
@@ -194,7 +196,7 @@ def compare_url_pair(
     return {
         "url": url,
         "content_type": content_type,
-        "slug": _safe_slug(url),
+        "slug": _safe_slug(url, content_type=content_type),
         "kb_agent": evaluate_note(kb_note, content_type=content_type, config=config),
         "hermes": evaluate_note(hermes_note, content_type=content_type, config=config),
     }
@@ -212,8 +214,8 @@ def compare_from_staging(
     for row in url_rows:
         url = row["url"]
         content_type = row.get("content_type") or "web"
-        kb_path = resolve_note_in_dir(url, kb_agent_dir)
-        hermes_path = resolve_note_in_dir(url, hermes_dir)
+        kb_path = resolve_note_in_dir(url, kb_agent_dir, content_type=content_type)
+        hermes_path = resolve_note_in_dir(url, hermes_dir, content_type=content_type)
         entries.append(
             compare_url_pair(
                 url,

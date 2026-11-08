@@ -1502,6 +1502,15 @@ class TestBatchIngestLogScrubExemptions:
     (tdah_daily_check.py, watch_sources_poll.py, diarize.py usage hints).
     """
 
+    def test_exempt_operator_scripts_exist_on_disk(self):
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        for name in (
+            "rotate_logs.py",
+            "tdah_daily_check.py",
+            "watch_sources_poll.py",
+        ):
+            assert (scripts_dir / name).is_file(), name
+
 
 class TestCorruptJsonHandling:
     def test_corrupt_ocr_json_marks_failed(self, config, conn, monkeypatch):

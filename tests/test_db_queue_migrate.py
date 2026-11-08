@@ -1616,6 +1616,113 @@ def test_has_completed_parent_synthesis_standalone_terminal(tmp_path):
     assert has_completed_parent_synthesis(conn, slug) is True
 
 
+def test_has_completed_parent_synthesis_manifest_no_deferral_stale_terminal(
+    tmp_path,
+):
+    """Manifest-only embedded context: stale unscoped *_synthesize must not complete."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "manifest_stale_syn"
+    url = "https://blog.substack.com/p/manifest-stale"
+    media_tmp = tmp_path / "media_tmp"
+    media_tmp.mkdir(parents=True)
+    (media_tmp / f"{slug}_media.json").write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
+        encoding="utf-8",
+    )
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now', '-2 days') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(conn, slug, temp_dir=media_tmp) is False
+
+
+def test_has_completed_parent_synthesis_manifest_reconciled_fresh_terminal(
+    tmp_path,
+):
+    """Manifest bootstraps deferral; verified raw + fresh terminal counts as complete."""
+    from agent.db import bootstrap_parent_media_deferral_from_manifest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "manifest_reconciled"
+    url = "https://blog.substack.com/p/manifest-recon"
+    vault = tmp_path / "vault"
+    media_tmp = tmp_path / "media_tmp"
+    media_tmp.mkdir(parents=True)
+    (media_tmp / f"{slug}_media.json").write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
+        encoding="utf-8",
+    )
+    queue_ingest(
+        conn, "https://example.com/ok.png", "substack_image", "ok",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    bootstrap_parent_media_deferral_from_manifest(conn, slug, media_tmp)
+    conn.commit()
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is True
+
+
+def test_has_completed_parent_synthesis_genuine_complete_idempotent(tmp_path):
+    """A fully complete parent stays complete across repeated guard checks."""
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "idempotent_complete"
+    url = "https://blog.substack.com/p/idempotent"
+    vault = tmp_path / "vault"
+    media_tmp = tmp_path / "media_tmp"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/ok.png", "substack_image", "ok",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    kwargs = {"vault_path": vault, "temp_dir": media_tmp}
+    assert has_completed_parent_synthesis(conn, slug, **kwargs) is True
+    assert has_completed_parent_synthesis(conn, slug, **kwargs) is True
+
+
 @patch("agent.pipelines.web._fetch_substack_html")
 def test_step_substack_embedded_media_ensures_deferral_on_enqueue(
     mock_fetch, tmp_path,

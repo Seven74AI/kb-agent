@@ -87,7 +87,7 @@ def _flaresolverr_get(url: str) -> str:
     _assert_fetch_url_allowed(url)
     result = subprocess.run(
         [
-            "curl", "-s", "-X", "POST", FLARESOLVERR_URL,
+            "curl", "-s", "--max-redirs", "0", "-X", "POST", FLARESOLVERR_URL,
             "-H", "Content-Type: application/json",
             "-d", json.dumps({"cmd": "request.get", "url": url, "maxTimeout": 60000}),
             "--max-time", "70",
