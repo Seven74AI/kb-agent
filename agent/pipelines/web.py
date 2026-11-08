@@ -10,6 +10,7 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urljoin, urlparse
 
 from agent.config import Config
@@ -22,7 +23,7 @@ from agent.archival import step_minio_upload as archival_minio_upload
 from agent.archival import step_git_push as archival_git_push
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import ensure_h264
+from agent.pipelines.video_common import _resolve_slug, ensure_h264
 from agent.pipelines.youtube import (
     step_cleanup_temp as _yt_cleanup_temp,
     step_diarize as _yt_diarize,
@@ -103,8 +104,14 @@ def step_substack_cleanup(task: dict, config: Config) -> str:
 
 
 def _ingest_download_stem(task: dict) -> str:
-    """Filesystem stem for per-ingest download artifacts (queue/task id, not slug)."""
-    return task["id"]
+    """Temp-dir stem for substack_video download/metadata (matches later pipeline steps).
+
+    Consumer path names artifacts by slug so ``_find_video_file`` / extract_audio find them;
+    ingest id only when ``_batch_ingest`` (embedded siblings share a parent slug).
+    """
+    if task.get("_batch_ingest"):
+        return task["id"]
+    return _resolve_slug(task)
 
 
 def _curl_netscape_cookie_config(cookie_file: Path) -> list[str]:
@@ -186,7 +193,7 @@ def _resolve_substack_video_mp4_redirect(endpoint: str, cookie_args: list[str]) 
 
 
 def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
-    """Find the native ``videoUpload.id`` and write ``{id}_metadata.json``.
+    """Find the native ``videoUpload.id`` and write ``{stem}_metadata.json``.
 
     Native Substack video is NOT Mux/signed-JWT-gated — the public endpoint
     ``/api/v1/video/upload/<id>/src?type=mp4`` 307-redirects to a CloudFront-
@@ -463,9 +470,20 @@ def _extract_rumble_urls(html: str) -> list[str]:
     return out
 
 
+class EmbeddedMediaEnqueueStats(NamedTuple):
+    """Per-pass enqueue outcomes for the parent media deferral gate."""
+
+    success_count: int
+    queue_count: int
+
+
+def _submit_embed_succeeded(result: dict) -> bool:
+    return result.get("status") not in (None, "error")
+
+
 def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],
                             rumble_urls: list[str], native_video_ids: list[str],
-                            post_url: str, config: Config, tags) -> int:
+                            post_url: str, config: Config, tags) -> EmbeddedMediaEnqueueStats:
     """Enqueue embedded images + videos into the nightly batch, linked to the parent.
 
     Each media item carries ``parent_slug`` + ``media_kind`` so the nightly batch
@@ -474,40 +492,62 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
     download or OCR here — media is batch-processed at night (scripts/batch_ingest.py).
     Lazy-imports to avoid a circular import with agent.pipelines.
 
-    Returns the number of ingest_queue rows for ``parent_slug`` (after dedup).
+    Returns successful submit count and ingest_queue row count for ``parent_slug``.
     """
     if not images and not youtube_ids and not rumble_urls and not native_video_ids:
-        return 0
+        return EmbeddedMediaEnqueueStats(0, 0)
     from agent.core.submit import submit_ingest
     from agent.db import AGENT_SCHEMA, init_db
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    success_count = 0
     try:
         for img_url in images:
-            submit_ingest(
-                img_url, config, conn, content_type="substack_image", tags=tags,
-                parent_slug=parent_slug, media_kind="image",
-            )
+            try:
+                result = submit_ingest(
+                    img_url, config, conn, content_type="substack_image", tags=tags,
+                    parent_slug=parent_slug, media_kind="image",
+                )
+            except Exception:
+                continue
+            if _submit_embed_succeeded(result):
+                success_count += 1
         for vid in youtube_ids:
-            submit_ingest(
-                f"https://www.youtube.com/watch?v={vid}", config, conn, tags=tags,
-                parent_slug=parent_slug, media_kind="video",
-            )
+            try:
+                result = submit_ingest(
+                    f"https://www.youtube.com/watch?v={vid}", config, conn, tags=tags,
+                    parent_slug=parent_slug, media_kind="video",
+                )
+            except Exception:
+                continue
+            if _submit_embed_succeeded(result):
+                success_count += 1
         for url in rumble_urls:
-            submit_ingest(
-                url, config, conn, content_type="rumble", tags=tags,
-                parent_slug=parent_slug, media_kind="video",
-            )
+            try:
+                result = submit_ingest(
+                    url, config, conn, content_type="rumble", tags=tags,
+                    parent_slug=parent_slug, media_kind="video",
+                )
+            except Exception:
+                continue
+            if _submit_embed_succeeded(result):
+                success_count += 1
         for vid in native_video_ids:
-            submit_ingest(
-                f"{post_url}#{vid}", config, conn, content_type="substack_video", tags=tags,
-                parent_slug=parent_slug, media_kind="video",
-            )
+            try:
+                result = submit_ingest(
+                    f"{post_url}#{vid}", config, conn, content_type="substack_video", tags=tags,
+                    parent_slug=parent_slug, media_kind="video",
+                )
+            except Exception:
+                continue
+            if _submit_embed_succeeded(result):
+                success_count += 1
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
             (parent_slug,),
         ).fetchone()
-        return row["n"] if hasattr(row, "keys") else row[0]
+        queue_count = row["n"] if hasattr(row, "keys") else row[0]
+        return EmbeddedMediaEnqueueStats(success_count, int(queue_count))
     finally:
         conn.close()
 
@@ -647,19 +687,22 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     manifest_path = Path(config.temp_dir, f"{slug}_media.json")
     had_manifest = manifest_path.exists()
 
-    enqueued_total = _enqueue_embedded_media(
+    enqueue_stats = _enqueue_embedded_media(
         slug, images, youtube_ids, rumble_urls, native_video_ids, url, config, task.get("tags"),
     )
+    enqueued_success = enqueue_stats.success_count
 
-    gate_total = enqueued_total
+    prior_manifest_total = 0
     if had_manifest:
         try:
             prior = json.loads(manifest_path.read_text(encoding="utf-8"))
             prior_total = prior.get("total")
             if prior_total is not None:
-                gate_total = max(int(prior_total), enqueued_total)
+                prior_manifest_total = int(prior_total)
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pass
+
+    gate_total = max(extracted_total, enqueued_success, prior_manifest_total)
 
     manifest = {
         "url": url,
@@ -670,8 +713,38 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
     )
 
-    n_videos = len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
     from agent.db import AGENT_SCHEMA, count_pending_media, ensure_parent_media_deferral, init_db
+    from agent.notify import sanitize_visible_message
+
+    conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
+            (slug,),
+        ).fetchone()
+        queue_count = int(row["n"] if hasattr(row, "keys") else row[0])
+    finally:
+        conn.close()
+
+    if enqueued_success < extracted_total:
+        shortfall = sanitize_visible_message(
+            f"media gate: enqueue shortfall — extracted {extracted_total}, "
+            f"enqueued {enqueued_success}",
+        )
+        raise StepError(
+            shortfall,
+            error_type=ErrorType.PAUSE,
+            step_name="substack_embedded_media",
+        )
+
+    if queue_count != extracted_total:
+        raise StepError(
+            f"media gate: ingest rows {queue_count} != extracted total {extracted_total}",
+            error_type=ErrorType.PAUSE,
+            step_name="substack_embedded_media",
+        )
+
+    n_videos = len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
@@ -683,11 +756,6 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             gate_total,
         )
         pending = count_pending_media(conn, slug)
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
-            (slug,),
-        ).fetchone()
-        queue_count = row["n"] if hasattr(row, "keys") else row[0]
 
         if pending == 0:
             if gate_total != queue_count:

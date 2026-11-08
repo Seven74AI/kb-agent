@@ -83,6 +83,11 @@ def _print_scrubbed_child_tail(
         return
     print(sanitize_visible_message(raw[-tail_chars:]))
 
+
+def _scrub_for_log(fragment: object) -> str:
+    """Scrub exception/subprocess fragments before writing batch cron stdout."""
+    return sanitize_visible_message(str(fragment) if fragment is not None else "")
+
 # content_type -> download-phase step names (everything before the ffmpeg audio
 # extraction, which batch_transcribe.py does itself).
 VIDEO_DOWNLOAD_STEPS = {
@@ -208,7 +213,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
             update_ingest_status(conn, q["id"], "failed", error=err or "download failed")
             failed += 1
             causes.append(f"{q['slug']}: {err}")
-            print(f"  [failed] {q['slug']}: {err}")
+            print(f"  [failed] {q['slug']}: {_scrub_for_log(err)}")
             continue
         ctype = q["content_type"]
         bdir = base / "batch_videos" / run_tag / ctype
@@ -261,7 +266,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                 update_ingest_status(conn, q["id"], "failed", error=f"upload failed: {exc}")
                 failed += 1
                 causes.append(f"{q['slug']}: upload failed")
-                print(f"  [warn] {q['slug']}: upload failed ({exc}); marked failed")
+                print(f"  [warn] {q['slug']}: upload failed ({_scrub_for_log(exc)}); marked failed")
                 continue
             update_ingest_status(conn, q["id"], "dispatching")
             rr = dispatch_synthesize(
@@ -274,7 +279,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                 update_ingest_status(conn, q["id"], "failed", error=err)
                 failed += 1
                 causes.append(f"{q['slug']}: {err}")
-                print(f"  [warn] {q['slug']}: dispatch failed ({err})")
+                print(f"  [warn] {q['slug']}: dispatch failed ({_scrub_for_log(err)})")
                 continue
             update_ingest_status(conn, q["id"], "dispatched")
             dispatched += 1
@@ -365,7 +370,7 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     if manifest_path.exists():
         manifest, manifest_err = _read_json_file(manifest_path, "manifest")
         if manifest_err:
-            print(f"  [skip] {parent_slug}: {manifest_err}")
+            print(f"  [skip] {parent_slug}: {_scrub_for_log(manifest_err)}")
             return False
         total = manifest.get("total")
         url = manifest.get("url")
@@ -566,6 +571,7 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
              str(bdir), "--out-dir", str(out_dir)] + TRANSCRIBE_ARGS.get(ctype, []),
             capture_output=True, text=True, timeout=7200,
         )
+        _print_scrubbed_child_tail(r, tail_chars=1500)
         if r.returncode != 0:
             for q, _ in items:
                 update_ingest_status(conn, q["id"], "failed", error=f"batch_transcribe failed ({r.returncode})")
@@ -644,7 +650,7 @@ def main() -> None:
                 update_ingest_status(conn, q["id"], "failed", error=kind_err)
                 failed += 1
                 causes.append(f"{q['slug']}: {kind_err}")
-                print(f"  [failed] {q['slug']}: {kind_err}")
+                print(f"  [failed] {q['slug']}: {_scrub_for_log(kind_err)}")
                 continue
             if kind == "image":
                 img_items.append(q)
@@ -678,7 +684,8 @@ def main() -> None:
                 update_ingest_status(conn, q["id"], "failed", error=str(r.get("error") or status))
                 failed += 1
                 causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or status}")
-                print(f"  [failed] {q['slug']} -> {status}")
+                err_detail = r.get("error") or status
+                print(f"  [failed] {q['slug']} -> {_scrub_for_log(err_detail)}")
 
         _reconcile_deferred_parent_syntheses(conn, config)
 

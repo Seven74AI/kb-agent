@@ -8,6 +8,9 @@ import pytest
 from agent.config import Config
 from agent.detection import (
     DedupCheckError,
+    _check_firecrawl,
+    _check_flaresolverr,
+    _detect_substack_subtype,
     _fetch_content,
     _resolve_threads_cookie_path,
     dedup_check,
@@ -310,6 +313,96 @@ def test_fetch_content_failure_logs_redact_url_query(monkeypatch, caplog):
     assert "sekrit123" not in combined
     assert "sig=abcdef" not in combined
     assert "threads.net" in combined
+
+
+_SENSITIVE_SUBSTACK = (
+    "https://blog.substack.com/p/secret-post?token=leakme&download=1"
+)
+
+
+def test_detect_substack_subtype_failure_logs_redact_url_query(monkeypatch, caplog):
+    def boom(cmd, **kwargs):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    caplog.set_level(logging.WARNING)
+    assert _detect_substack_subtype(_SENSITIVE_SUBSTACK) == "substack_text"
+    combined = " ".join(rec.getMessage() for rec in caplog.records)
+    assert any("Substack subtype fetch/parse failed" in rec.message for rec in caplog.records)
+    assert "leakme" not in combined
+    assert "token=" not in combined
+    assert "blog.substack.com" in combined
+
+
+def test_detect_substack_subtype_failure_logs_exc_info(monkeypatch, caplog):
+    def boom(cmd, **kwargs):
+        raise RuntimeError("parse blew up")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", boom)
+    caplog.set_level(logging.WARNING)
+    _detect_substack_subtype("https://blog.substack.com/p/x")
+    warn = next(
+        r for r in caplog.records
+        if "Substack subtype fetch/parse failed" in r.message
+    )
+    assert warn.exc_info is not None
+    assert warn.exc_info[0] is RuntimeError
+
+
+def test_flaresolverr_health_curl_disables_redirects(monkeypatch):
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout='{"status":"ok"}', stderr="",
+        )
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, _ = _check_flaresolverr()
+    assert ok is True
+    cmd = captured[0]
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
+    assert any("localhost:8191" in str(part) for part in cmd)
+
+
+def test_firecrawl_health_curl_loopback_disables_redirects(monkeypatch):
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, _ = _check_firecrawl()
+    assert ok is True
+    cmd = captured[0]
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
+    assert "http://localhost:3002/v2/scrape" in cmd
+    assert not any(
+        str(part).startswith("http://") and "localhost" not in str(part)
+        for part in cmd
+    )
+
+
+def test_preflight_web_firecrawl_curl_invariant(monkeypatch, tmp_path):
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault")
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = preflight_health("web")
+    assert ok is True
+    assert reason == ""
+    cmd = captured[0]
+    assert "--max-redirs" in cmd
+    assert cmd[cmd.index("--max-redirs") + 1] == "0"
 
 
 def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):

@@ -15,6 +15,7 @@ sys.path.insert(0, str(WORKSPACE))
 from agent.config import Config
 from agent.detection import _detect_substack_subtype
 from agent.exceptions import ErrorType, StepError
+from agent.pipelines.video_common import _find_video_file
 from agent.pipelines.web import (
     step_substack_cleanup,
     step_substack_embedded_media,
@@ -23,6 +24,7 @@ from agent.pipelines.web import (
     _assert_substack_video_cdn_url_allowed,
     _extract_body_images,
     _extract_native_video_ids,
+    _ingest_download_stem,
     step_substack_video_download,
     _extract_rumble_urls,
     _extract_youtube_ids,
@@ -304,8 +306,9 @@ class TestSubstackVideoMetadata:
         )
         result = step_substack_video_extract_metadata(task_dict, config)
         assert "a7315fa8" in result
+        slug = task_dict["slug"]
         meta = json.loads(
-            (config.temp_dir / f"{task_dict['id']}_metadata.json").read_text(encoding="utf-8")
+            (config.temp_dir / f"{slug}_metadata.json").read_text(encoding="utf-8")
         )
         assert meta["video_id"] == "a7315fa8-8027-4432-a7e3-652479bc5275"
         assert meta["title"] == "I MADE A VLOG"
@@ -377,12 +380,14 @@ class TestSubstackVideoMetadata:
             "slug": slug,
             "source_url": f"{post}#{vid_a}",
             "content_type": "substack_video",
+            "_batch_ingest": True,
         }
         task_b = {
             "id": "ingest-row-bbb",
             "slug": slug,
             "source_url": f"{post}#{vid_b}",
             "content_type": "substack_video",
+            "_batch_ingest": True,
         }
         step_substack_video_extract_metadata(task_a, config)
         step_substack_video_extract_metadata(task_b, config)
@@ -400,6 +405,43 @@ class TestSubstackVideoMetadata:
         assert not (config.temp_dir / f"{slug}_metadata.json").exists()
         assert not (config.temp_dir / f"{slug}.mp4").exists()
 
+    def test_ingest_download_stem_batch_vs_consumer(self, task_dict):
+        consumer = dict(task_dict)
+        batch = {**task_dict, "id": "ingest-abc", "_batch_ingest": True}
+        assert _ingest_download_stem(consumer) == consumer["slug"]
+        assert _ingest_download_stem(batch) == "ingest-abc"
+
+    @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_consumer_substack_video_download_uses_slug_for_later_steps(
+        self, mock_run, _h264, config, task_dict,
+    ):
+        """Direct native substack_video must write {slug}.mp4 so extract_audio finds it."""
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        (config.temp_dir / f"{slug}_metadata.json").write_text(
+            json.dumps({"video_id": "vid-1", "domain": "testblog.substack.com"}),
+            encoding="utf-8",
+        )
+        cdn_mp4 = "https://dz8aopenkvv6s.cloudfront.net/native-video.mp4?signed=1"
+
+        def curl_side_effect(cmd, *args, **kwargs):
+            if "-I" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
+                    stderr="",
+                )
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = curl_side_effect
+        step_substack_video_download(task_dict, config)
+        assert (config.temp_dir / f"{slug}.mp4").is_file()
+        assert not (config.temp_dir / f"{task_dict['id']}.mp4").exists()
+        assert _find_video_file(config, slug) == config.temp_dir / f"{slug}.mp4"
+
     @patch("agent.pipelines.web.subprocess.run")
     def test_no_video_id_raises_pause(self, mock_run, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -412,7 +454,9 @@ class TestSubstackVideoMetadata:
     @patch("agent.pipelines.web._enqueue_embedded_media")
     def test_defers_synthesis_when_media_found(self, mock_enqueue, mock_fetch, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        mock_enqueue.return_value = 2
+        from agent.pipelines.web import EmbeddedMediaEnqueueStats
+
+        mock_enqueue.return_value = EmbeddedMediaEnqueueStats(2, 2)
         mock_fetch.return_value = (
             '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
             '<iframe src="https://www.youtube-nocookie.com/embed/xyzXYZ12345"></iframe>'
@@ -1207,13 +1251,52 @@ class TestSubstackVideoMetadata:
         assert "media gate" in str(exc.value)
         assert "ingest rows 1 != manifest total 2" in str(exc.value)
 
+    @patch("agent.core.submit.submit_ingest")
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_enqueue_shortfall_keeps_gate_total_and_pauses(
+        self, mock_fetch, mock_submit, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, get_parent_media_deferral, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        img_a = "https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"
+        img_b = "https://substack-post-media.s3.amazonaws.com/public/images/img2_1200x800.webp"
+        mock_fetch.return_value = (
+            f'<div data-attrs="{{&quot;src&quot;:&quot;{img_a}&quot;}}"></div>'
+            f'<div data-attrs="{{&quot;src&quot;:&quot;{img_b}&quot;}}"></div>'
+        )
+
+        def submit_side_effect(url, *args, **kwargs):
+            if "img1" in url:
+                return {"status": "queued", "http_status": 202, "ingest_id": "one"}
+            return {"status": "error", "http_status": 400, "error": "validation failed"}
+
+        mock_submit.side_effect = submit_side_effect
+
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "enqueue shortfall" in str(exc.value).lower()
+        manifest = json.loads(
+            (config.temp_dir / f"{task_dict['slug']}_media.json").read_text(encoding="utf-8")
+        )
+        assert manifest["total"] == 2
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            assert get_parent_media_deferral(conn, task_dict["slug"]) is None
+        finally:
+            conn.close()
+
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_download_follows_one_validated_cloudfront_hop(
         self, mock_run, _h264, config, task_dict, tmp_path,
     ):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        slug = task_dict["slug"]
+        meta_path = config.temp_dir / f"{slug}_metadata.json"
         meta_path.write_text(
             json.dumps({
                 "video_id": "vid-1",
@@ -1232,7 +1315,7 @@ class TestSubstackVideoMetadata:
                     stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
                     stderr="",
                 )
-            mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
+            mp4 = config.temp_dir / f"{slug}.mp4"
             mp4.write_bytes(b"\x00" * 2000)
             return MagicMock(returncode=0, stderr="", stdout="")
 
@@ -1255,7 +1338,8 @@ class TestSubstackVideoMetadata:
         self, mock_run, _h264, config, task_dict,
     ):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        slug = task_dict["slug"]
+        meta_path = config.temp_dir / f"{slug}_metadata.json"
         meta_path.write_text(
             json.dumps({
                 "video_id": "vid-1",
@@ -1294,7 +1378,8 @@ class TestSubstackVideoMetadata:
         config.cookie_dir.mkdir(parents=True, exist_ok=True)
         cookie_path = config.cookie_dir / "substack_cookies.txt"
         cookie_path.write_text("# Netscape\n", encoding="utf-8")
-        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        slug = task_dict["slug"]
+        meta_path = config.temp_dir / f"{slug}_metadata.json"
         meta_path.write_text(
             json.dumps({"video_id": "vid-1", "domain": "testblog.substack.com"}),
             encoding="utf-8",
@@ -1308,7 +1393,7 @@ class TestSubstackVideoMetadata:
                     stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
                     stderr="",
                 )
-            mp4 = config.temp_dir / f"{task_dict['id']}.mp4"
+            mp4 = config.temp_dir / f"{slug}.mp4"
             mp4.write_bytes(b"\x00" * 2000)
             return MagicMock(returncode=0, stderr="", stdout="")
 
@@ -1323,7 +1408,8 @@ class TestSubstackVideoMetadata:
     @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_download_rejects_blocked_endpoint(self, mock_run, config, task_dict):
         config.temp_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = config.temp_dir / f"{task_dict['id']}_metadata.json"
+        slug = task_dict["slug"]
+        meta_path = config.temp_dir / f"{slug}_metadata.json"
         meta_path.write_text(
             json.dumps({
                 "video_id": "vid-1",

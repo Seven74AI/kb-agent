@@ -11,9 +11,15 @@ Usage:
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 # Isolate from the Hermes runtime's py3.14 PYTHONPATH (cross-venv mismatch).
 os.environ.pop("PYTHONPATH", None)
+
+_bootstrap_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_bootstrap_root))
+sys.path.insert(0, "/root/kb-agent")
+from agent.notify import sanitize_visible_message  # noqa: E402
 
 MODAL = "/root/modal"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".avif")
@@ -21,6 +27,19 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".avif")
 
 def sh(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def _print_scrubbed_child_tail(
+    result: subprocess.CompletedProcess[str],
+    *,
+    tail_chars: int = 1500,
+) -> None:
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    raw = stdout or stderr
+    if not raw:
+        return
+    print(sanitize_visible_message(raw[-tail_chars:]))
 
 
 def main():
@@ -44,7 +63,7 @@ def main():
         if f.lower().endswith(IMAGE_EXTS)
     ]
     if not names:
-        print("no images found in", in_dir)
+        print("no images found in", sanitize_visible_message(in_dir))
         return 1
     print(f"batch: {len(names)} image(s) -> one Modal run")
 
@@ -53,7 +72,7 @@ def main():
         "--image-dir", in_dir, "--out-dir", out_dir,
     ]
     r = sh(cmd, cwd=MODAL, timeout=3600)
-    print((r.stdout or r.stderr)[-1500:])
+    _print_scrubbed_child_tail(r)
     return r.returncode
 
 
