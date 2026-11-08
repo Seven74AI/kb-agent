@@ -561,6 +561,15 @@ def test_build_synthesis_prompt_uses_display_safe_source_url(config):
     assert "token=secret" not in prompt
 
 
+def test_build_synthesis_prompt_source_domain_strips_userinfo(config):
+    cred_url = "https://subscriber:sekret@newsletter.substack.com/p/post"
+    prompt = _build_synthesis_prompt(cred_url, "post_slug", config)
+    assert "source: newsletter.substack.com" in prompt
+    assert "subscriber" not in prompt
+    assert "sekret" not in prompt
+    assert "@" not in prompt.split("source_url:")[0]
+
+
 # ── step_synthesize_web tests ─────────────────────────────────────────────────
 
 def test_step_synthesize_web_redacts_tracking_urls_in_body(

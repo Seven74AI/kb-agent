@@ -2296,15 +2296,15 @@ def reset_task_steps_for_retry(
                 """,
                 (task_id, embed[0]),
             )
-    else:
-        conn.execute(
-            """
-            UPDATE task_steps
-            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-            WHERE task_id = ? AND status IN ('failed', 'paused', 'running')
-            """,
-            (task_id,),
-        )
+            return
+    conn.execute(
+        """
+        UPDATE task_steps
+        SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+        WHERE task_id = ? AND status IN ('failed', 'paused', 'running')
+        """,
+        (task_id,),
+    )
 
 
 def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int:

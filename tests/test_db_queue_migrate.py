@@ -1153,6 +1153,49 @@ def test_retry_failed_deferral_cycle_preserves_embed_step(tmp_path):
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
 
 
+def test_retry_in_deferral_cycle_without_embed_step_resets_failed_steps(tmp_path):
+    """Open deferral on slug must not block step reset when task lacks embed step (slug collision)."""
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "deferral_slug_collision"
+    url = "https://blog.substack.com/p/collision"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    task_id = create_task(
+        conn,
+        "https://example.com/unrelated",
+        "web",
+        slug,
+        ["fetch", "clean", "synthesize_note"],
+        status="failed",
+    )
+    pause_reason = "awaiting media: 1 images enqueued"
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    failed_step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'clean'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'failed', output = 'err' WHERE id = ?",
+        (failed_step_id,),
+    )
+    conn.commit()
+    assert task_in_deferred_media_cycle(conn, task_id, slug=slug, error=pause_reason)
+
+    assert retry_task(conn, task_id) is True
+    row = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (failed_step_id,),
+    ).fetchone()
+    assert row[0] == "pending"
+    assert row[1] is None
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+
+
 def test_retry_failed_without_deferral_cycle_resets_steps(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)

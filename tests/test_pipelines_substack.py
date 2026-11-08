@@ -352,6 +352,73 @@ class TestSubstackVideoMetadata:
         assert meta["domain"] == "testblog.substack.com"
 
     @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_metadata_domain_strips_userinfo(self, mock_run, config, task_dict):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        cred_url = "https://leaker:sekret@testblog.substack.com/p/video-post"
+        task_dict["source_url"] = cred_url
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                '<title>Video</title>'
+                '"videoUpload":{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'
+            ),
+        )
+        step_substack_video_extract_metadata(task_dict, config)
+        slug = task_dict["slug"]
+        meta = json.loads(
+            (config.temp_dir / f"{slug}_metadata.json").read_text(encoding="utf-8")
+        )
+        assert meta["domain"] == "testblog.substack.com"
+        assert "leaker" not in meta["domain"]
+        assert "sekret" not in meta["domain"]
+
+    @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
+    @patch("agent.pipelines.web.subprocess.run")
+    def test_substack_video_download_endpoint_strips_userinfo_from_curl(
+        self, mock_run, _h264, config, task_dict, tmp_path,
+    ):
+        """Endpoint built from metadata domain must not embed urlparse userinfo."""
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        cred_url = "https://leaker:sekret@testblog.substack.com/p/video-post"
+        task_dict["source_url"] = cred_url
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                '<title>Video</title>'
+                '"videoUpload":{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'
+            ),
+        )
+        step_substack_video_extract_metadata(task_dict, config)
+
+        cdn_mp4 = "https://dz8aopenkvv6s.cloudfront.net/native-video.mp4?signed=1"
+        calls: list[list[str]] = []
+
+        def curl_side_effect(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            if "-I" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=f"HTTP/1.1 307 Temporary Redirect\r\nLocation: {cdn_mp4}\r\n",
+                    stderr="",
+                )
+            mp4 = config.temp_dir / f"{slug}.mp4"
+            mp4.write_bytes(b"\x00" * 2000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = curl_side_effect
+        step_substack_video_download(task_dict, config)
+
+        head_cmd = calls[0]
+        head_url = head_cmd[-1]
+        assert head_url.startswith(
+            "https://testblog.substack.com/api/v1/video/upload/"
+        )
+        assert "leaker" not in head_url
+        assert "sekret" not in head_url
+        assert "@" not in head_url
+
+    @patch("agent.pipelines.web.subprocess.run")
     def test_substack_video_extract_metadata_curl_disables_redirects_and_cookie_config(
         self, mock_run, config, task_dict,
     ):

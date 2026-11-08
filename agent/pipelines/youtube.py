@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.core.slugify import _netloc_without_userinfo
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -794,7 +795,7 @@ def _pass2_build_note(
 - **Speakers:** {', '.join(f'{s} ({speaker_names.get(s, "Unknown")})' for s in speaker_labels)}"""
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    source_domain = urlparse(source_url).netloc or "youtube.com"
+    source_domain = _netloc_without_userinfo(urlparse(source_url)) or "youtube.com"
     display_source_url = url_for_display(source_url)
 
     system_prompt = f"""You are a knowledge base curator specializing in video content synthesis.
