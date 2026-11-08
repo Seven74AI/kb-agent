@@ -19,6 +19,7 @@ from agent.detection import (
     _safe_url_for_log,
     _unlink_curl_netscape_sidecar,
 )
+from agent.core.slugify import _netloc_without_userinfo
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
@@ -203,7 +204,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     stem = _ingest_download_stem(task)
     url = task["source_url"]
     _assert_fetch_url_allowed(url)
-    domain = urlparse(url).netloc
+    domain = _netloc_without_userinfo(urlparse(url))
 
     cookie = Path(config.cookie_dir) / "substack_cookies.txt"
     conf_path: Path | None = None
@@ -1365,7 +1366,7 @@ def _build_synthesis_prompt(source_url: str, slug: str, config: Config) -> str:
     else:
         template = _fallback_template()
 
-    source_domain = urlparse(source_url).netloc or "unknown"
+    source_domain = _netloc_without_userinfo(urlparse(source_url)) or "unknown"
     display_source_url = url_for_display(source_url)
     date_str = datetime.now().strftime("%Y-%m-%d")
 

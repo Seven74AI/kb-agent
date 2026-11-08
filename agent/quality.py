@@ -307,6 +307,11 @@ def _resynthesize(note_path: Path, config, llm, failures: list[str]) -> bool:
     slug = note_path.stem
     source_path = Path(config.temp_dir) / f"{slug}_raw.md"
     if not source_path.exists():
+        logger.warning(
+            "Re-synthesize skipped for %s: raw source missing at %s",
+            slug,
+            source_path,
+        )
         return False
 
     source = source_path.read_text(encoding="utf-8")

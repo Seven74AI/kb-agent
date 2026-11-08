@@ -59,6 +59,13 @@ class TestWikispooksBypassUrl:
         assert result.startswith("https://wikispooks.com/w/welcome_back.php?goto=")
         assert "%2Fwiki%2FDocument%2F911" in result
 
+    def test_bypass_strips_netloc_userinfo(self):
+        direct = "https://user:pass@wikispooks.org/wiki/Secret_Page"
+        result = wikispooks_bypass_url(direct)
+        assert result.startswith("https://wikispooks.org/w/welcome_back.php?goto=")
+        assert "user" not in result
+        assert "pass" not in result
+
 
 class TestWikispooksFirecrawlExtract:
     @patch("agent.pipelines.wikispooks.step_firecrawl_extract")

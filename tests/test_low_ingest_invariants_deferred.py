@@ -252,6 +252,20 @@ def test_resynthesize_logs_on_llm_failure(tmp_path, config, caplog):
     assert any("Re-synthesize LLM call failed" in r.message for r in caplog.records)
 
 
+def test_resynthesize_logs_when_raw_source_missing(tmp_path, config, caplog):
+    caplog.set_level(logging.WARNING)
+    slug = "resynth_no_raw"
+    note_path = tmp_path / f"{slug}.md"
+    note_path.write_text("# Note\n", encoding="utf-8")
+    (Path(config.temp_dir)).mkdir(parents=True, exist_ok=True)
+
+    llm = MagicMock()
+
+    assert _resynthesize(note_path, config, llm, ["too short"]) is False
+    llm.call.assert_not_called()
+    assert any("raw source missing" in r.message for r in caplog.records)
+
+
 def test_artifact_stem_batch_uses_ingest_id_and_resolve_slug_otherwise():
     tid = "ingest-batch-uuid"
     task_batch = {"id": tid, "slug": "foo/bar", "_batch_ingest": True}

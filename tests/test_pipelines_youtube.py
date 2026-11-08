@@ -19,6 +19,7 @@ from agent.config import Config
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMResponse
 from agent.pipelines.youtube import (
+    _pass2_build_note,
     _pass1_extract_concepts,
     _ytdlp_subprocess_env,
     _validate_cookies,
@@ -744,6 +745,31 @@ def test_build_speaker_summary():
     assert "Alice" in summary
     assert "SPEAKER_01" in summary
     assert "Bob" in summary
+
+
+def test_pass2_build_note_source_domain_strips_userinfo(config):
+    cred_url = "https://viewer:tokensekret@www.youtube.com/watch?v=dQw4w9WgXcQ"
+    mock_llm = MagicMock()
+    mock_llm.call.return_value = LLMResponse(
+        content="---\ndate: 2026-01-01\nsource: youtube.com\n---\n\n# Note\n",
+        tokens_in=1,
+        tokens_out=1,
+        model="test",
+    )
+    _pass2_build_note(
+        transcript="hello",
+        concepts_json='[{"title":"x"}]',
+        metadata={"duration": 60, "uploader": "Ch"},
+        merged={"chapters": [], "speaker_names": {}},
+        source_url=cred_url,
+        slug="yt_slug",
+        config=config,
+        llm=mock_llm,
+    )
+    system_prompt = mock_llm.call.call_args.kwargs["system_prompt"]
+    assert "source: www.youtube.com" in system_prompt
+    assert "viewer" not in system_prompt
+    assert "tokensekret" not in system_prompt
 
 
 # ── Synthesis tests ──────────────────────────────────────────────────────────

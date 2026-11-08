@@ -3,6 +3,7 @@
 from urllib.parse import quote, urlparse
 
 from agent.config import Config
+from agent.core.slugify import _netloc_without_userinfo
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.web import (
@@ -26,7 +27,8 @@ def wikispooks_bypass_url(direct_url: str) -> str:
     if not wiki_path.startswith("/wiki/"):
         return direct_url
     encoded_path = quote(wiki_path, safe="")
-    return f"{parsed.scheme}://{parsed.netloc}/w/welcome_back.php?goto={encoded_path}"
+    host = _netloc_without_userinfo(parsed)
+    return f"{parsed.scheme}://{host}/w/welcome_back.php?goto={encoded_path}"
 
 
 def step_wikispooks_firecrawl_extract(task: dict, config: Config) -> str:
