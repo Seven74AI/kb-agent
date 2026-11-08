@@ -98,6 +98,23 @@ def register_step(name: str, fn, on_error: str = "retry"):
     STEP_REGISTRY[name] = (fn, on_error)
 
 
+def _resolve_step_entry(content_type: str, step_name: str) -> tuple[Any, str] | None:
+    """Resolve (fn, on_error) for a step from the content-type pipeline, then global registry."""
+    from agent.pipelines import get_pipeline
+
+    pipeline = get_pipeline(content_type)
+    if pipeline is None:
+        raise StepError(
+            f"No pipeline registered for content_type={content_type!r}",
+            error_type=ErrorType.FAIL,
+            step_name=step_name,
+        )
+    for s in pipeline:
+        if s.name == step_name:
+            return (s.fn, s.on_error)
+    return STEP_REGISTRY.get(step_name)
+
+
 def recover_orphan_tasks(conn: sqlite3.Connection, *, log_prefix: str = "[consumer]") -> None:
     """Reset in_progress tasks whose running step has no live subprocess PID."""
     from agent.db import may_reset_parent_task
@@ -496,8 +513,13 @@ class Consumer:
                     f"[consumer] Step '{step_name}' unhandled traceback:\n{tb_summary}",
                     flush=True,
                 )
-                # Fall back to step's on_error setting
-                _, default_on_error = STEP_REGISTRY.get(step_name, (None, "retry"))
+                # Fall back to step's on_error setting (content-type pipeline first)
+                content_type = task.get("content_type", "web")
+                try:
+                    resolved = _resolve_step_entry(content_type, step_name)
+                except StepError:
+                    resolved = None
+                default_on_error = resolved[1] if resolved else "retry"
                 self._log_error(
                     task_id,
                     step_name,
@@ -565,25 +587,8 @@ class Consumer:
         auto-kills children when the consumer process dies. No orphan
         subprocesses survive a consumer crash.
         """
-        # Resolve step from the task's pipeline first (avoids namespace collisions)
-        from agent.pipelines import get_pipeline
         content_type = task.get("content_type", "web")
-        pipeline = get_pipeline(content_type)
-        if pipeline is None:
-            raise StepError(
-                f"No pipeline registered for content_type={content_type!r}",
-                error_type=ErrorType.FAIL,
-                step_name=step_name,
-            )
-        entry = None
-        if pipeline:
-            for s in pipeline:
-                if s.name == step_name:
-                    entry = (s.fn, s.on_error)
-                    break
-        if entry is None:
-            # Fall back to global registry (backward compat)
-            entry = STEP_REGISTRY.get(step_name)
+        entry = _resolve_step_entry(content_type, step_name)
         if entry is None:
             raise StepError(
                 f"Unknown step: {step_name} (content_type={content_type})",
