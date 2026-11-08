@@ -294,8 +294,11 @@ def step_classify_content(task: dict, config: Config) -> str:
                 entry["pipeline"] = "book_scanned"
             elif tier == "degraded":
                 entry["pipeline"] = "book_degraded"
-            else:
+            elif tier == "text":
                 entry["pipeline"] = "book_pdf"
+            else:
+                # unreadable — no registered pipeline; delegate skips
+                entry["pipeline"] = ""
 
         classified.append(entry)
 
@@ -472,13 +475,18 @@ def _pdf_preflight(pdf_path: Path) -> tuple[str, int]:
 
     Returns:
         (classification, score) where classification is 'scanned',
-        'degraded', or 'text', and score is 0-100.
+        'degraded', 'text', or 'unreadable', and score is 0-100.
     """
     if not HAS_PYMUPDF:
         return "degraded", 0
 
     try:
         doc = pymupdf.open(str(pdf_path))
+    except Exception as exc:
+        _log.warning("PDF open failed for %s: %s", pdf_path, exc)
+        return "unreadable", 0
+
+    try:
         page_count = doc.page_count
 
         # Tier 1: Binary scan detection
@@ -486,21 +494,20 @@ def _pdf_preflight(pdf_path: Path) -> tuple[str, int]:
             len(doc[i].get_text().strip()) for i in range(page_count)
         )
         if total_chars < PDF_MIN_CHARS_SCANNED:
-            doc.close()
             return "scanned", 0
 
         # Tier 2: Quality scoring on 16 evenly-distributed pages
         score = _quality_score(doc, page_count)
-        doc.close()
 
         if score >= PDF_QUALITY_SCORE_THRESHOLD:
             return "text", score
-        else:
-            return "degraded", score
+        return "degraded", score
 
     except Exception as exc:
         _log.warning("PDF preflight failed for %s: %s", pdf_path, exc)
         return "degraded", 0
+    finally:
+        doc.close()
 
 
 def _resolve_local_book_path(
@@ -664,7 +671,7 @@ def _quality_score(doc, page_count: int) -> int:
             scores_count += 1
 
         except Exception:
-            scores_count += 1
+            continue
 
     if scores_count == 0:
         return 0
@@ -790,6 +797,13 @@ def step_extract_pdf(task: dict, config: Config) -> str:
 
         # Run pre-flight check first
         classification, score = _pdf_preflight(pdf_path)
+        if classification == "unreadable":
+            doc.close()
+            raise StepError(
+                f"PDF is unreadable — cannot open or parse: {pdf_path}",
+                error_type=ErrorType.FAIL,
+                step_name="extract_pdf",
+            )
         if classification != "text":
             doc.close()
             raise StepError(
@@ -986,6 +1000,19 @@ def step_extract_pdf_degraded(task: dict, config: Config) -> str:
         )
 
     tier, score = _pdf_preflight(pdf_path)
+    if tier == "unreadable":
+        raise StepError(
+            f"PDF is unreadable — cannot extract degraded text: {pdf_path}",
+            error_type=ErrorType.FAIL,
+            step_name="extract_pdf_degraded",
+        )
+    if tier == "scanned":
+        raise StepError(
+            f"PDF is scanned (score {score}/100) — use book_scanned pipeline, "
+            "not degraded extract",
+            error_type=ErrorType.PAUSE,
+            step_name="extract_pdf_degraded",
+        )
     warning = (
         f"Degraded PDF ingest (preflight={tier!r}, score={score}/100) — "
         "using existing text layer; quality may be poor"
@@ -1460,6 +1487,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
     uploaded.append(f"books/{slug}.txt")
 
     source_suffixes = {".epub", ".pdf", ".mobi", ".azw3"}
+    source_upload_error: StepError | None = None
     try:
         sf = _resolve_local_book_path(
             task, config, source_suffixes, "book_minio_upload",
@@ -1468,10 +1496,17 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
         try:
             upload_file_to_minio(sf, sf_dest, timeout=120)
             uploaded.append(f"books/{slug}{sf.suffix.lower()}")
-        except StepError:
-            pass  # Source file upload is best-effort
+        except StepError as exc:
+            source_upload_error = exc
     except StepError:
-        pass  # Source file upload is best-effort
+        pass  # No local source on disk — txt archival may still suffice
+
+    if source_upload_error is not None:
+        raise StepError(
+            f"Source book MinIO upload failed: {source_upload_error}",
+            error_type=source_upload_error.error_type,
+            step_name="book_minio_upload",
+        ) from source_upload_error
 
 
     # Update note frontmatter with source_files URLs

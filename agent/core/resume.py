@@ -4,9 +4,8 @@ import sqlite3
 
 from agent.db import (
     has_active_synthesize_task,
+    reset_task_steps_for_retry,
     resume_tasks_by_reason,
-    task_deferred_retry_preserves_embed_step,
-    task_in_deferred_media_cycle,
 )
 
 
@@ -57,45 +56,13 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
         return False
 
     with agent_conn:
-        slug = row[2]
-        in_cycle = task_in_deferred_media_cycle(
-            agent_conn, task_id, slug=slug, error=row[1],
+        reset_task_steps_for_retry(
+            agent_conn,
+            task_id,
+            slug=row[2],
+            error=row[1],
+            task_status=row[0],
         )
-        if row[0] == "paused" and in_cycle:
-            embed = agent_conn.execute(
-                """
-                SELECT step_order FROM task_steps
-                WHERE task_id = ? AND name = 'substack_embedded_media'
-                LIMIT 1
-                """,
-                (task_id,),
-            ).fetchone()
-            if embed is not None:
-                preserve_embed = task_deferred_retry_preserves_embed_step(
-                    agent_conn, task_id, slug,
-                )
-                if preserve_embed:
-                    step_filter = "step_order > ?"
-                else:
-                    step_filter = "step_order >= ?"
-                agent_conn.execute(
-                    f"""
-                    UPDATE task_steps
-                    SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-                    WHERE task_id = ? AND {step_filter}
-                    AND status IN ('failed', 'paused', 'running')
-                    """,
-                    (task_id, embed[0]),
-                )
-        else:
-            agent_conn.execute(
-                """
-                UPDATE task_steps
-                SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-                WHERE task_id = ? AND status IN ('failed', 'paused', 'running')
-                """,
-                (task_id,),
-            )
         agent_conn.execute(
             """
             UPDATE tasks

@@ -196,6 +196,8 @@ def test_enqueue_embedded_media_logs_submit_failures(config, caplog):
             )
 
     assert stats.success_count == 0
+    assert len(stats.failure_lines) == 1
+    assert "embedded media enqueue failed (image)" in stats.failure_lines[0]
     warns = [r for r in caplog.records if "embedded media enqueue failed" in r.message]
     assert len(warns) == 1
     assert warns[0].exc_info is not None
@@ -319,6 +321,8 @@ def test_enqueue_embedded_media_rejects_non_explicit_submit_result(
             )
 
     assert stats.success_count == 0
+    assert len(stats.failure_lines) == 1
+    assert "embedded media enqueue not accepted (image)" in stats.failure_lines[0]
     rejects = [r for r in caplog.records if "embedded media enqueue not accepted" in r.message]
     assert len(rejects) == 1
 
@@ -390,6 +394,56 @@ def test_enqueue_embedded_media_dead_failed_duplicate_not_counted(tmp_path):
         "https://example.com/post", cfg, None,
     )
     assert stats.success_count == 0
+
+
+@patch("agent.pipelines.web._fetch_substack_html")
+def test_step_substack_embedded_media_surfaces_enqueue_failures(
+    mock_fetch, config, task_dict, tmp_path,
+):
+    from agent.pipelines.web import step_substack_embedded_media
+
+    config.kb_agent_dir = tmp_path / "kb"
+    (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    mock_fetch.return_value = (
+        '<div data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp&quot;}"></div>'
+    )
+    with patch("agent.core.submit.submit_ingest", side_effect=RuntimeError("db locked")):
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+    body = str(exc.value)
+    assert "enqueue failures:" in body
+    assert "embedded media enqueue failed (image)" in body
+    assert exc.value.error_type == ErrorType.PAUSE
+
+
+def test_persist_parent_media_deferral_scrubs_output(tmp_path):
+    from agent.db import AGENT_SCHEMA, create_task, init_db
+    from agent.pipelines.web import _persist_parent_media_deferral
+
+    cfg = Config(kb_agent_dir=tmp_path / "kb", vault_path=tmp_path / "vault")
+    (cfg.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+    conn = init_db(cfg.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+    slug = "scrub-defer-parent"
+    task_id = create_task(
+        conn, "https://example.com/p", "substack_text", slug, ["substack_cleanup"],
+    )
+    leaky = "prior https://cdn.example.com/x?token=SECRET"
+    conn.execute(
+        "UPDATE task_steps SET output = ?, status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        (leaky, task_id),
+    )
+    conn.commit()
+    _persist_parent_media_deferral(conn, task_id, slug)
+    row = conn.execute(
+        "SELECT output FROM task_steps WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    ).fetchone()
+    conn.close()
+    assert row[0]
+    assert "SECRET" not in row[0]
+    assert "token=" not in row[0]
+    assert f"media_deferred:{slug}" in row[0]
 
 
 # ── _estimate_tokens tests ────────────────────────────────────────────────────

@@ -1474,6 +1474,118 @@ def test_retry_task_skips_when_synthesize_sibling_active(tmp_path):
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (parent_id,)).fetchone()[0] == "paused"
 
 
+def test_resume_tasks_by_reason_skips_when_synthesize_sibling_active(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "bulk_synth_guard_parent"
+    pause_reason = "firecrawl rate limit — retry after cooldown"
+    parent_id = create_task(
+        conn,
+        "https://author.substack.com/p/post",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, parent_id),
+    )
+    create_task(
+        conn,
+        "https://author.substack.com/p/post",
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="in_progress",
+    )
+    conn.commit()
+
+    assert resume_tasks_by_reason(conn, "%firecrawl%") == 0
+    assert (
+        conn.execute("SELECT status FROM tasks WHERE id = ?", (parent_id,)).fetchone()[0]
+        == "paused"
+    )
+
+
+def test_resume_tasks_by_reason_excludes_open_deferral_without_error_marker(tmp_path):
+    """Bulk resume must not bypass deferral when only cleanup marker / embed output signal it."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "bulk_deferral_marker_parent"
+    pause_reason = "firecrawl rate limit — retry after cooldown"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/bulk-defer",
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    embed_output = "awaiting media: 1 images + 0 videos"
+    conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (pause_reason, task_id))
+    conn.execute(
+        """
+        UPDATE task_steps SET status = 'completed', output = ?
+        WHERE task_id = ? AND name = 'substack_cleanup'
+        """,
+        (f"cleaned\nmedia_deferred:{slug}", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (embed_output, embed_id),
+    )
+    conn.commit()
+
+    assert task_in_deferred_media_cycle(conn, task_id, slug=slug, error=pause_reason)
+    assert resume_tasks_by_reason(conn, "%firecrawl%") == 0
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (embed_id,),
+    ).fetchone()
+    assert embed[0] == "paused"
+    assert embed[1] == embed_output
+
+
+def test_resume_tasks_by_reason_resets_running_steps_like_retry(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = "firecrawl rate limit — retry after cooldown"
+    task_id = create_task(
+        conn,
+        "https://example.com/article",
+        "web",
+        "web_bulk_running",
+        ["fetch", "clean", "synthesize_note"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.execute(
+        """
+        UPDATE task_steps SET status = 'paused', output = ?
+        WHERE task_id = ? AND name = 'fetch'
+        """,
+        (pause_reason, task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'running' WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    )
+    conn.commit()
+
+    assert resume_tasks_by_reason(conn, "%firecrawl%") == 1
+    steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["fetch"] == "pending"
+    assert steps["synthesize_note"] == "pending"
+
+
 def test_find_active_task_synthesize_slug_wide(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)

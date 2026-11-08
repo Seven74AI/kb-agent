@@ -107,6 +107,26 @@ def _download_artifact_stem(task: dict) -> str:
     return _artifact_stem(task)
 
 
+def _carousel_meta_path(config: Config, task: dict) -> Path:
+    """Canonical temp path for carousel metadata JSON (writers/readers/cleanup)."""
+    return Path(config.temp_dir) / f"{_artifact_stem(task)}_carousel_meta.json"
+
+
+def _carousel_slides_path(config: Config, task: dict) -> Path:
+    """Canonical temp path for carousel slides JSON (writers/readers/cleanup)."""
+    return Path(config.temp_dir) / f"{_artifact_stem(task)}_carousel_slides.json"
+
+
+def _carousel_playwright_script_path(config: Config, task: dict) -> Path:
+    """Ephemeral Playwright script path (carousel extract; cleaned in step)."""
+    return Path(config.temp_dir) / f"{_artifact_stem(task)}_playwright.py"
+
+
+def _ig_comment_sidecar_path(config: Config, task: dict) -> Path:
+    """Canonical temp path for ig_comment JSON (writers/readers/cleanup)."""
+    return Path(config.temp_dir) / f"{_artifact_stem(task)}_ig_comment.json"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _validate_ig_cookies(cookie_dir: Path | None = None) -> None:
@@ -500,8 +520,6 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     _validate_ig_cookies(cookie_dir=config.cookie_dir)
 
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
 
     try:
         _assert_fetch_url_allowed(url)
@@ -570,7 +588,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
         metadata["caption"] = redact_http_urls_in_text(caption_result.stdout.strip())
 
     # Write metadata
-    meta_path = Path(config.temp_dir) / f"{safe_slug}_carousel_meta.json"
+    meta_path = _carousel_meta_path(config, task)
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
 
     return str(meta_path)
@@ -590,8 +608,6 @@ def step_ig_carousel_extract(task: dict, config: Config) -> str:
         Path to extracted slides JSON file.
     """
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
 
     try:
         _assert_fetch_url_allowed(url)
@@ -651,7 +667,7 @@ async def main():
 asyncio.run(main())
 """
 
-    script_path = Path(config.temp_dir) / f"{safe_slug}_playwright.py"
+    script_path = _carousel_playwright_script_path(config, task)
     script_path.write_text(playwright_script)
 
     try:
@@ -679,7 +695,7 @@ asyncio.run(main())
             )
 
         # Write extracted slides
-        slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
+        slides_path = _carousel_slides_path(config, task)
         slides_persisted = [
             {
                 "slide": s["slide"],
@@ -721,14 +737,14 @@ def step_ig_carousel_synthesize(task: dict, config: Config) -> str:
     display_source_url = url_for_display(source_url)
 
     # Load carousel data
-    slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
+    slides_path = _carousel_slides_path(config, task)
     if not slides_path.exists():
         raise FileNotFoundError(f"Carousel slides not found: {slides_path}")
 
     slides_data = json.loads(slides_path.read_text())
 
     # Load metadata
-    meta_path = Path(config.temp_dir) / f"{safe_slug}_carousel_meta.json"
+    meta_path = _carousel_meta_path(config, task)
     caption = ""
     uploader = ""
     like_count = 0
@@ -906,8 +922,6 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
         resolve_instagram_reel_video,
     )
 
-    slug = task.get("slug", task["id"][:8])
-    safe_slug = _slug_path(slug)
     stem = _artifact_stem(task)
     content_type = task.get("content_type", "instagram_post")
 
@@ -929,7 +943,7 @@ def step_ig_cleanup(task: dict, config: Config) -> str:
                 paths_to_unlink.append(path)
     for ext in ["_playwright.py", "_carousel_slides.json", "_carousel_meta.json",
                 "_ig_comment.json"]:
-        path = Path(config.temp_dir) / f"{safe_slug}{ext}"
+        path = Path(config.temp_dir) / f"{stem}{ext}"
         if path.exists():
             paths_to_unlink.append(path)
 
@@ -1220,9 +1234,8 @@ def _ig_comment_sidecar_for_disk(info: dict) -> dict:
 def step_ig_comment_fetch(task: dict, config: Config) -> str:
     """Fetch the comment + parent reel context and write it to a raw JSON file."""
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
     info = _fetch_ig_comment(url, config)
-    raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_ig_comment.json"
+    raw_path = _ig_comment_sidecar_path(config, task)
     raw_path.write_text(
         json.dumps(_ig_comment_sidecar_for_disk(info), indent=2, ensure_ascii=False),
     )
@@ -1236,7 +1249,7 @@ def step_ig_comment_synthesize(task: dict, config: Config) -> str:
     source_url = task.get("source_url", "")
     display_source_url = url_for_display(source_url)
 
-    raw_path = Path(config.temp_dir) / f"{safe_slug}_ig_comment.json"
+    raw_path = _ig_comment_sidecar_path(config, task)
     if not raw_path.exists():
         raise FileNotFoundError(f"Comment raw not found: {raw_path}")
     info = json.loads(raw_path.read_text())

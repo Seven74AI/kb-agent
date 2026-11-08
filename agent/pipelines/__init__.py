@@ -71,7 +71,10 @@ def get_pipeline_names(content_type: str, platform: str = "") -> list[str] | Non
     """
     if not _all_imported:
         import_all_pipelines()
-    for key in (content_type, platform):
-        if key and key in PIPELINES:
-            return [s.name for s in PIPELINES[key]]
+    if content_type in PIPELINES:
+        return [s.name for s in PIPELINES[content_type]]
+    if (content_type or "").endswith("_synthesize"):
+        return None
+    if platform and platform in PIPELINES:
+        return [s.name for s in PIPELINES[platform]]
     return None
