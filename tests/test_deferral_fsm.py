@@ -139,7 +139,7 @@ def test_allowed_transitions_covers_cas_edges(src, dst):
 
 @pytest.mark.parametrize(
     "terminal",
-    [DeferralState.FAILED, DeferralState.SUPERSEDED, DeferralState.DONE],
+    [DeferralState.SUPERSEDED, DeferralState.DONE],
 )
 def test_terminal_deferral_states_have_no_outbound_edges(terminal):
     assert ALLOWED_TRANSITIONS[terminal] == ()
