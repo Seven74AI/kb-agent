@@ -336,6 +336,18 @@ class TestFetchIgCaptionSsrf:
             _fetch_ig_caption(METADATA_URL, config)
         mock_run.assert_not_called()
 
+    @patch("agent.pipelines.instagram.logger")
+    @patch("subprocess.run")
+    def test_fetch_caption_logs_scrubbed_warning_on_failure(self, mock_run, mock_log, config):
+        mock_run.side_effect = RuntimeError(
+            "yt-dlp failed for https://www.instagram.com/reel/X/?igsh=secret"
+        )
+        assert _fetch_ig_caption("https://www.instagram.com/reel/X/?igsh=secret", config) == ""
+        mock_log.warning.assert_called_once()
+        args = mock_log.warning.call_args[0]
+        assert "igsh=secret" not in args[1]
+        assert "https://www.instagram.com/reel/X/" in args[1]
+
 
 class TestCarouselMetadata:
     """Tests for step_ig_carousel_metadata."""

@@ -37,6 +37,7 @@ sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
     _clear_parent_media_changed_if_satisfied,
+    _persist_visible_error,
     bootstrap_parent_media_deferral_from_manifest,
     claim_ingest_items,
     finish_batch_run,
@@ -92,6 +93,11 @@ def _print_scrubbed_child_tail(
 def _scrub_for_log(fragment: object) -> str:
     """Scrub exception/subprocess fragments before writing batch cron stdout."""
     return sanitize_visible_message(str(fragment) if fragment is not None else "")
+
+
+def _persist_cause(fragment: object) -> str:
+    """Build a batch-run cause line safe for durable ``batch_runs.summary`` storage."""
+    return _persist_visible_error(str(fragment) if fragment is not None else "")
 
 # content_type -> download-phase step names (everything before the ffmpeg audio
 # extraction, which batch_transcribe.py does itself).
@@ -236,7 +242,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
         if vp is None:
             update_ingest_status(conn, q["id"], "failed", error=err or "download failed")
             failed += 1
-            causes.append(f"{q['slug']}: {err}")
+            causes.append(_persist_cause(f"{q['slug']}: {err}"))
             print(f"  [failed] {q['slug']}: {_scrub_for_log(err)}")
             continue
         ctype = q["content_type"]
@@ -317,7 +323,7 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                 err = rr.get("error") or "dispatch_synthesize failed"
                 update_ingest_status(conn, q["id"], "failed", error=err)
                 failed += 1
-                causes.append(f"{q['slug']}: {err}")
+                causes.append(_persist_cause(f"{q['slug']}: {err}"))
                 print(f"  [warn] {q['slug']}: dispatch failed ({_scrub_for_log(err)})")
                 continue
             update_ingest_status(conn, q["id"], "dispatched")
@@ -768,7 +774,7 @@ def main() -> None:
             if kind_err:
                 update_ingest_status(conn, q["id"], "failed", error=kind_err)
                 failed += 1
-                causes.append(f"{q['slug']}: {kind_err}")
+                causes.append(_persist_cause(f"{q['slug']}: {kind_err}"))
                 print(f"  [failed] {q['slug']}: {_scrub_for_log(kind_err)}")
                 continue
             if kind == "image":
@@ -800,7 +806,11 @@ def main() -> None:
                 print(f"  [dispatch] {q['slug']} ({q['content_type']}) -> {r.get('task_id')}")
             elif outcome == "failed":
                 failed += 1
-                causes.append(f"{q['slug']} ({q['content_type']}): {r.get('error') or r.get('status')}")
+                causes.append(
+                    _persist_cause(
+                        f"{q['slug']} ({q['content_type']}): {r.get('error') or r.get('status')}",
+                    ),
+                )
                 err_detail = r.get("error") or r.get("status")
                 print(f"  [failed] {q['slug']} -> {_scrub_for_log(err_detail)}")
             else:

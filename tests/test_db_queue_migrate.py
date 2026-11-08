@@ -371,6 +371,86 @@ def test_is_deferred_media_pause_media_gate_mismatch():
     assert is_deferred_media_pause(reason)
 
 
+def test_get_next_step_blocks_later_pending_on_non_deferred_paused_step(tmp_path):
+    """Paused steps are barriers for every pause reason, not only deferred media."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = "firecrawl rate limit — retry after cooldown"
+    task_id = create_task(
+        conn,
+        "https://example.com/article",
+        "web",
+        "web_slug",
+        ["fetch", "clean", "synthesize_note"],
+        status="pending",
+    )
+    fetch_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'fetch'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (pause_reason, fetch_id),
+    )
+    conn.commit()
+    assert not is_deferred_media_pause(pause_reason)
+
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "fetch"
+    assert nxt["status"] == "paused"
+
+
+def test_resume_tasks_by_reason_resets_paused_steps_before_later_pending(tmp_path):
+    """Bulk resume must not leave task pending while an earlier step stays paused."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = "firecrawl rate limit — retry after cooldown"
+    task_id = create_task(
+        conn,
+        "https://example.com/article",
+        "web",
+        "web_slug",
+        ["fetch", "clean", "synthesize_note"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    fetch_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'fetch'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (pause_reason, fetch_id),
+    )
+    conn.commit()
+
+    assert resume_tasks_by_reason(conn, "%firecrawl%") == 1
+    task_status = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    assert task_status[0] == "pending"
+    assert task_status[1] is None
+    fetch_status = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?", (fetch_id,),
+    ).fetchone()
+    assert fetch_status[0] == "pending"
+    assert fetch_status[1] is None
+
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "fetch"
+    assert nxt["status"] == "pending"
+    clean = conn.execute(
+        "SELECT status FROM task_steps WHERE task_id = ? AND name = 'clean'",
+        (task_id,),
+    ).fetchone()[0]
+    assert clean == "pending"
+
+
 def test_get_next_step_blocks_on_media_gate_pause(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -2648,6 +2728,37 @@ def test_update_ingest_status_stores_sanitized_error(tmp_path):
     ).fetchone()
     assert secret_path not in row["error"]
     assert len(row["error"]) < 400
+
+
+def test_update_ingest_status_redacts_urls_at_write(tmp_path):
+    from agent.db import finish_batch_run, record_batch_run, update_ingest_status
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    ingest_id, _ = queue_ingest(conn, "https://example.com/v.mp4", "youtube", "vid_url_scrub")
+    leaky = "GET https://cdn.example.com/seg.m3u8?sig=deadbeef failed"
+    update_ingest_status(conn, ingest_id, "failed", error=leaky)
+    row = conn.execute(
+        "SELECT error FROM ingest_queue WHERE id=?", (ingest_id,),
+    ).fetchone()
+    assert "sig=deadbeef" not in (row["error"] or "")
+    assert "?" not in (row["error"] or "")
+
+    run_id = record_batch_run(conn)
+    finish_batch_run(
+        conn,
+        run_id,
+        "failed",
+        1,
+        1,
+        0,
+        f"vid: {leaky}",
+    )
+    batch = conn.execute(
+        "SELECT summary FROM batch_runs WHERE id=?", (run_id,),
+    ).fetchone()
+    assert "sig=deadbeef" not in (batch["summary"] or "")
 
 
 def test_claim_task_fifo_by_created_at(tmp_path):

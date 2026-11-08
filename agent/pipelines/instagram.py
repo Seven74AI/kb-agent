@@ -14,6 +14,7 @@ Pitfalls handled:
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,7 @@ from agent.curl_config import (
     curl_config_header_line,
     curl_config_quoted_assignment,
 )
+from agent.detection import _safe_url_for_log
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
@@ -37,6 +39,9 @@ from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
+
+logger = logging.getLogger(__name__)
+
 from agent.pipelines.video_common import (
     _slug_path,
     ensure_h264,
@@ -182,8 +187,20 @@ def _fetch_ig_caption(url: str, config: Config) -> str:
             caption = result.stdout.strip()
             if caption and caption.lower() not in ("none", "null"):
                 return caption
-    except Exception:
-        pass
+        detail = sanitize_visible_message(
+            result.stderr.strip()[:500] or f"yt-dlp exit {result.returncode}",
+        )
+        logger.warning(
+            "IG caption fetch failed for %s: %s",
+            _safe_url_for_log(url),
+            detail,
+        )
+    except Exception as exc:
+        logger.warning(
+            "IG caption fetch failed for %s: %s",
+            _safe_url_for_log(url),
+            sanitize_visible_message(str(exc)),
+        )
     return ""
 
 

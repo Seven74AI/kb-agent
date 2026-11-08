@@ -28,6 +28,7 @@ from agent.pipelines.web import (
     step_substack_video_download,
     _extract_rumble_urls,
     _extract_youtube_ids,
+    _detect_unsupported_foreign_embed,
     _fetch_substack_html,
     _is_content_image,
     _is_substack_unauth_paywall_shell,
@@ -541,6 +542,30 @@ class TestSubstackVideoMetadata:
         mock_fetch.return_value = "<html><body>plain text article</body></html>"
         result = step_substack_embedded_media(task_dict, config)
         assert result == "no embedded media"
+
+    def test_detect_foreign_embed_instagram_iframe(self):
+        html = (
+            '<html><body><p>See below</p>'
+            '<iframe src="https://www.instagram.com/p/ABC123/embed/"></iframe>'
+            "</body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "instagram"
+
+    def test_detect_foreign_embed_absent_on_plain_text(self):
+        html = "<html><body><p>plain text article</p></body></html>"
+        assert _detect_unsupported_foreign_embed(html) is None
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_foreign_instagram_iframe_pauses_not_inline(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = (
+            "<html><body><p>Intro</p>"
+            '<iframe src="https://www.instagram.com/p/ABC123/embed/"></iframe>'
+            "</body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed: instagram" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_zero_embeds_with_pending_siblings_pauses_not_inline(

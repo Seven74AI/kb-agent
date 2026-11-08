@@ -200,6 +200,8 @@ def step_extract_metadata(task: dict, config: Config) -> str:
             if h1:
                 title = h1.group(1).strip()
 
+    title = redact_http_urls_in_text(title)
+
     metadata = {
         "title": title,
         "uploader": "Terr'à Grandir — Sommet TDAH Adulte",

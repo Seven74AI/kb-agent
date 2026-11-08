@@ -1271,9 +1271,18 @@ def record_batch_run(conn: sqlite3.Connection) -> int:
         return conn.execute("INSERT INTO batch_runs (status) VALUES ('running')").lastrowid
 
 
+def _persist_visible_error(message: str) -> str:
+    """Scrub ingest/batch durable error text: display-safe URLs plus visible-message policy."""
+    from agent.notify import sanitize_visible_message
+
+    return sanitize_visible_message(redact_http_urls_in_text(message))
+
+
 def finish_batch_run(conn: sqlite3.Connection, run_id: int, status: str,
                      total: int, failed: int, dispatched: int, summary: str | None = None) -> None:
     """Mark a batch run complete with its outcome."""
+    if summary is not None:
+        summary = _persist_visible_error(summary)
     with conn:
         conn.execute(
             "UPDATE batch_runs SET status=?, total=?, failed=?, dispatched=?, "
@@ -1469,9 +1478,7 @@ def update_ingest_status(conn: sqlite3.Connection, ingest_id: str, status: str,
                          error: str | None = None) -> None:
     """Transition an ingest-queue row to a new status (touches updated_at)."""
     if error is not None:
-        from agent.notify import sanitize_visible_message
-
-        error = sanitize_visible_message(error)
+        error = _persist_visible_error(error)
     with conn:
         if status == "dispatched":
             conn.execute(
@@ -1753,19 +1760,19 @@ def claim_task(conn: sqlite3.Connection) -> dict | None:
 
 
 def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
-    """Get the next pending step for a task, ordered by step_order.
+    """Get the next step the consumer should run, ordered by ``step_order``.
 
-    Any paused step before the next pending step whose task/step reason matches
-    :func:`is_deferred_media_pause` blocks the consumer from advancing past the
-    media gate (including skipping a paused ``substack_embedded_media`` to run
-    ``synthesize_note``).
+    Invariant: a paused step is always a barrier — the consumer must not run
+    any later ``pending`` step while an earlier step is still ``paused`` (deferred
+    media, cookies, Firecrawl, paywall, or any other pause reason).
 
     Args:
         conn: Agent database connection.
         task_id: The task UUID.
 
     Returns:
-        Step dict if a pending step exists, None otherwise.
+        Step dict for the next runnable or blocking step, or ``None`` when every
+        step is terminal (no pending and no paused).
     """
     pending_row = conn.execute(
         """
@@ -1775,10 +1782,6 @@ def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
         """,
         (task_id,),
     ).fetchone()
-    task_row = conn.execute(
-        "SELECT error FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
-    task_error = task_row[0] if task_row else None
     pending_order = pending_row["step_order"] if pending_row is not None else None
 
     paused_rows = conn.execute(
@@ -1790,12 +1793,6 @@ def get_next_step(conn: sqlite3.Connection, task_id: str) -> dict | None:
         (task_id,),
     ).fetchall()
     for paused in paused_rows:
-        step_output = paused["output"]
-        if not (
-            is_deferred_media_pause(task_error)
-            or is_deferred_media_pause(step_output)
-        ):
-            continue
         if pending_order is None or paused["step_order"] < pending_order:
             return dict(paused)
 
@@ -1909,9 +1906,11 @@ def get_last_log_line(conn: sqlite3.Connection, task_id: str) -> str | None:
 def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int:
     """Resume all paused tasks matching a reason pattern.
 
-    Resets retries to 0 and sets status back to 'pending'. Tasks paused for
-    deferred Substack media (structured deferral pause markers) are left paused
-    so the consumer does not skip past ``substack_embedded_media`` / ``synthesize_note``.
+    Resets retries to 0, clears task error, and sets status to ``pending``.
+    Paused ``task_steps`` on resumed tasks are reset to ``pending`` (output
+    cleared) so the consumer re-runs them in order — same step reset as
+    :func:`agent.core.resume.retry_task`. Tasks paused for deferred Substack
+    media (structured deferral pause markers) are excluded and left paused.
 
     Args:
         conn: Agent database connection.
@@ -1923,13 +1922,32 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
     """
     exclusion, ex_params = _deferred_media_resume_sql_exclusion()
     with conn:
-        cursor = conn.execute(
+        task_ids = [
+            row[0]
+            for row in conn.execute(
+                f"SELECT id FROM tasks WHERE status = 'paused' AND error LIKE ? "
+                f"AND {exclusion}",
+                (reason_pattern, *ex_params),
+            ).fetchall()
+        ]
+        if not task_ids:
+            return 0
+        placeholders = ",".join("?" * len(task_ids))
+        conn.execute(
             "UPDATE tasks SET status = 'pending', retries = 0, "
             "error = NULL, updated_at = datetime('now') "
-            f"WHERE status = 'paused' AND error LIKE ? AND {exclusion}",
-            (reason_pattern, *ex_params),
+            f"WHERE id IN ({placeholders})",
+            task_ids,
         )
-        return cursor.rowcount
+        conn.execute(
+            f"""
+            UPDATE task_steps
+            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+            WHERE task_id IN ({placeholders}) AND status = 'paused'
+            """,
+            task_ids,
+        )
+        return len(task_ids)
 
 
 def get_task_steps(conn: sqlite3.Connection, task_id: str) -> list[dict]:
