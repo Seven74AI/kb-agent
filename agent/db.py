@@ -1812,9 +1812,7 @@ def update_step(conn: sqlite3.Connection, step_id: int, status: str, output: str
         output: Optional output text from the step.
     """
     if output is not None:
-        from agent.notify import sanitize_visible_message
-
-        output = sanitize_visible_message(output)
+        output = _persist_visible_error(output)
     terminal = status in ("done", "failed", "paused")
     with conn:
         if status == "running":
@@ -1858,9 +1856,7 @@ def fail_task(conn: sqlite3.Connection, task_id: str, error: str):
         task_id: The task UUID.
         error: Human-readable error description.
     """
-    from agent.notify import sanitize_visible_message
-
-    error = sanitize_visible_message(error)
+    error = _persist_visible_error(error)
     with conn:
         conn.execute(
             "UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ?",
@@ -1876,9 +1872,7 @@ def pause_task(conn: sqlite3.Connection, task_id: str, reason: str):
         task_id: The task UUID.
         reason: Why the task is paused (e.g., 'cookies invalid').
     """
-    from agent.notify import sanitize_visible_message
-
-    reason = sanitize_visible_message(reason)
+    reason = _persist_visible_error(reason)
     with conn:
         conn.execute(
             "UPDATE tasks SET status = 'paused', error = ?, updated_at = datetime('now') WHERE id = ?",

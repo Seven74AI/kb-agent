@@ -19,6 +19,21 @@ _ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
 _HTTP_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
 
 
+def _http_netloc_for_display(parsed) -> str:
+    """Rebuild netloc with hostname/port only (no user:pass@ credentials)."""
+    if parsed.hostname:
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port is not None:
+            return f"{host}:{parsed.port}"
+        return host
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[-1]
+    return netloc
+
+
 def redact_llm_archive_text_content(text: str) -> str:
     """Scrub LLM archive bodies: display-safe URLs survive path/credential sanitization."""
     placeholders: list[str] = []
@@ -37,7 +52,7 @@ def redact_llm_archive_text_content(text: str) -> str:
 
 
 def redact_http_urls_in_text(text: str) -> str:
-    """Replace http(s) URLs in free text with display-safe forms (no query/fragment)."""
+    """Replace http(s) URLs in free text with display-safe forms (no credentials/query/fragment)."""
 
     def repl(match: re.Match[str]) -> str:
         return url_for_display(match.group(0))
@@ -46,7 +61,7 @@ def redact_http_urls_in_text(text: str) -> str:
 
 
 def url_for_display(url: str) -> str:
-    """Return a URL safe for dashboard/MCP/JSON/logs: no query or fragment on http(s).
+    """Return a URL safe for dashboard/MCP/JSON/logs: no credentials, query, or fragment on http(s).
 
     Credential-shaped segments in the remaining path are redacted. Local filesystem
     paths are reduced to their basename (same policy as task source_url display).
@@ -57,7 +72,7 @@ def url_for_display(url: str) -> str:
     parsed = urlparse(stripped)
     if parsed.scheme in _ALLOWED_SOURCE_URL_SCHEMES:
         path_only = urlunparse(
-            (parsed.scheme, parsed.netloc, parsed.path, "", "", ""),
+            (parsed.scheme, _http_netloc_for_display(parsed), parsed.path, "", "", ""),
         )
         return redact_credential_shapes(path_only)
     if parsed.scheme == "file":

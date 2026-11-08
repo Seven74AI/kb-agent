@@ -1019,6 +1019,41 @@ def test_dispatch_failure_pause_appended_and_blocks_resume_retry(tmp_path):
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
 
 
+def test_dispatch_failure_strips_query_tokens_in_tasks_error(tmp_path):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "dispatch_fail_secret_parent"
+    url = "https://blog.substack.com/p/dispatch-fail-secret"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    task_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    conn.commit()
+
+    secret_url = "https://cdn.example.com/v?token=SECRET"
+    batch_ingest._record_parent_deferral_dispatch_failure(
+        conn,
+        slug,
+        f"upstream refused {secret_url}",
+    )
+    conn.commit()
+
+    row = conn.execute("SELECT error FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    error = row[0] or ""
+    assert "deferred synthesis dispatch failed" in error
+    assert "token=SECRET" not in error
+    assert "SECRET" not in error
+    assert "upstream refused" in error
+
+
 def test_queue_ingest_duplicate_revives_failed_sibling(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -2951,6 +2986,61 @@ def test_pause_task_persists_scrubbed_reason_at_rest(tmp_path):
     ).fetchone()
     assert "/root" not in (row["error"] or "")
     assert "[path]" in (row["error"] or "")
+
+
+_TOKENIZED_CDN = "https://cdn.example.com/video.mp4?token=SECRET&expires=999"
+
+
+def test_fail_task_redacts_http_url_query_at_write(tmp_path):
+    """Invariant: tasks.error strips URL query params at write time."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    fail_task(conn, task_id, f"StepError: fetch failed {_TOKENIZED_CDN}")
+    row = conn.execute("SELECT error FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    err = row["error"] or ""
+    assert "token=SECRET" not in err
+    assert "?" not in err
+
+
+def test_pause_task_redacts_http_url_query_at_write(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "web", "slug", ["only"])
+    pause_task(conn, task_id, f"cookies invalid for {_TOKENIZED_CDN}")
+    row = conn.execute("SELECT error FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    err = row["error"] or ""
+    assert "token=SECRET" not in err
+    assert "?" not in err
+
+
+def test_update_step_redacts_url_bearing_metadata_output_at_write(tmp_path):
+    """Invariant: task_steps.output redacts embedded http URLs at write time."""
+    import json
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "youtube", "slug", ["extract_metadata"])
+    step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ?", (task_id,)
+    ).fetchone()["id"]
+    payload = json.dumps(
+        {
+            "title": "Episode",
+            "description": f"Chapters at {_TOKENIZED_CDN}",
+        }
+    )
+    update_step(conn, step_id, "done", payload)
+    row = conn.execute("SELECT output FROM task_steps WHERE id = ?", (step_id,)).fetchone()
+    stored = row["output"] or ""
+    assert "token=SECRET" not in stored
+    assert "?" not in stored
 
 
 def test_update_step_paused_sets_finished_at(tmp_path):

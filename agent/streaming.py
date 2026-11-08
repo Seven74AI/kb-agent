@@ -15,6 +15,7 @@ Process management (see CONTEXT.md):
 import asyncio
 import sqlite3
 
+from agent.db import _persist_visible_error
 from agent.notify import sanitize_visible_message
 
 
@@ -49,7 +50,7 @@ async def stream_to_logs(
         text = line.decode("utf-8", errors="replace").rstrip("\n")
         if not text.strip():
             continue
-        text = sanitize_visible_message(text)
+        text = _persist_visible_error(text)
 
         with logs_conn:
             logs_conn.execute(
@@ -153,7 +154,7 @@ def log_progress(
         message: Progress message to log.
         stream: 'stdout' or 'stderr' (default: stdout).
     """
-    message = sanitize_visible_message(message)
+    message = _persist_visible_error(message)
     with logs_conn:
         logs_conn.execute(
             "INSERT INTO step_logs (task_id, step_name, stream, content) "

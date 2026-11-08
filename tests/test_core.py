@@ -584,6 +584,32 @@ def test_list_tasks_sanitizes_error_and_step_output(core_config, agent_conn, log
     assert secret not in (one["steps"][0]["output"] or "")
 
 
+def test_list_tasks_redacts_tokenized_urls_on_stale_rows(core_config, agent_conn, logs_conn):
+    """Read-path defense: legacy rows with query-bearing URLs are redacted on display."""
+    tokenized = "https://cdn.example.com/video.mp4?token=SECRET&expires=999"
+    task_id = create_task(agent_conn, "https://a.com", "web", "stale_slug", ["extract"])
+    agent_conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (f"fetch failed: {tokenized}", task_id),
+    )
+    agent_conn.execute(
+        "UPDATE task_steps SET output = ? WHERE task_id = ? AND name = 'extract'",
+        (f'{{"description": "see {tokenized}"}}', task_id),
+    )
+    logs_conn.execute(
+        "INSERT INTO step_logs (task_id, step_name, stream, content) VALUES (?, ?, ?, ?)",
+        (task_id, "extract", "stderr", f"stderr: {tokenized}"),
+    )
+    agent_conn.commit()
+    logs_conn.commit()
+    listed = list_tasks(agent_conn, logs_conn=logs_conn, limit=10)
+    task = listed["tasks"][0]
+    assert "token=SECRET" not in (task["error"] or "")
+    assert "token=SECRET" not in (task["steps"][0]["output"] or "")
+    assert "token=SECRET" not in (task["last_log"] or "")
+    assert "?" not in (task["error"] or "")
+
+
 def test_get_task_missing(agent_conn):
     assert get_task(agent_conn, "nonexistent-id") is None
 

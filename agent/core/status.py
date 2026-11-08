@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from agent.redact import url_for_display
+from agent.redact import redact_http_urls_in_text, url_for_display
 from agent.db import get_all_tasks, get_last_log_line, get_task_steps
 from agent.notify import sanitize_visible_message
 
@@ -118,14 +118,18 @@ def _enrich_task(
         entry = dict(step)
         out = entry.get("output")
         if out:
-            entry["output"] = sanitize_visible_message(out)
+            entry["output"] = sanitize_visible_message(redact_http_urls_in_text(out))
         steps.append(entry)
     raw_last = get_last_log_line(logs_conn, task_row["id"]) if logs_conn else None
-    last_log = sanitize_visible_message(raw_last) if raw_last else None
+    last_log = (
+        sanitize_visible_message(redact_http_urls_in_text(raw_last)) if raw_last else None
+    )
     elapsed = format_elapsed(task_row["created_at"], now)
     staleness_str, is_stale = compute_staleness(task_row, logs_conn, now)
     raw_error = task_row.get("error")
-    error = sanitize_visible_message(raw_error) if raw_error else None
+    error = (
+        sanitize_visible_message(redact_http_urls_in_text(raw_error)) if raw_error else None
+    )
     raw_source_url = task_row["source_url"]
     return {
         "id": task_row["id"],

@@ -5,7 +5,12 @@ import sqlite3
 from agent.config import Config
 from agent.pipelines import get_pipeline_names
 from agent.core.slugify import slugify
-from agent.db import create_synthesize_task, create_task, queue_ingest
+from agent.db import (
+    _persist_visible_error,
+    create_synthesize_task,
+    create_task,
+    queue_ingest,
+)
 from agent.detection import (
     DedupCheckError,
     dedup_check,
@@ -109,7 +114,7 @@ def submit_plan(agent_conn: sqlite3.Connection, plan: dict, tags=None) -> dict:
             agent_conn, plan["url"], plan["content_type"], plan["slug"], plan["steps"],
             status="paused", tags=tags,
         )
-        pause_reason = sanitize_visible_message(plan["reason"] or "")
+        pause_reason = _persist_visible_error(plan["reason"] or "")
         agent_conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (pause_reason, task_id))
         agent_conn.commit()
         return {

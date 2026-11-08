@@ -555,6 +555,43 @@ class TestSubstackVideoMetadata:
         html = "<html><body><p>plain text article</p></body></html>"
         assert _detect_unsupported_foreign_embed(html) is None
 
+    def test_detect_foreign_embed_absent_on_plain_instagram_citation_link(self):
+        html = (
+            "<html><body><p>As noted in "
+            '<a href="https://instagram.com/p/abc">this post</a>'
+            "</p></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) is None
+
+    def test_detect_foreign_embed_instagram_embed_path_in_anchor_href(self):
+        html = (
+            "<html><body>"
+            '<a href="https://www.instagram.com/p/abc/embed/captioned/">open</a>'
+            "</body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "instagram"
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    @patch("agent.pipelines.web._enqueue_embedded_media")
+    def test_youtube_iframe_with_instagram_citation_still_defers(
+        self, mock_enqueue, mock_fetch, config, task_dict,
+    ):
+        from agent.pipelines.web import EmbeddedMediaEnqueueStats
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_enqueue.return_value = EmbeddedMediaEnqueueStats(1, 1)
+        mock_fetch.return_value = (
+            "<html><body>"
+            '<iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"></iframe>'
+            '<p>See <a href="https://www.instagram.com/user/">profile</a></p>'
+            "</body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed" not in str(exc.value).lower()
+        mock_enqueue.assert_called_once()
+
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_foreign_instagram_iframe_pauses_not_inline(self, mock_fetch, config, task_dict):
         mock_fetch.return_value = (

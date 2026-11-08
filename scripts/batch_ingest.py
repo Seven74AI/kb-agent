@@ -394,7 +394,7 @@ def _record_parent_deferral_dispatch_failure(
     err: str,
 ) -> None:
     """Append a scrubbed deferred-synthesis dispatch error on the paused parent task."""
-    dispatch_note = f"deferred synthesis dispatch failed: {_scrub_for_log(err)}"
+    dispatch_note = f"deferred synthesis dispatch failed: {_persist_visible_error(err)}"
     with conn:
         row = conn.execute(
             """
