@@ -458,7 +458,10 @@ Write a note following the template above.
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -548,7 +551,7 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     )
 
     if caption_result.returncode == 0:
-        metadata["caption"] = caption_result.stdout.strip()
+        metadata["caption"] = redact_http_urls_in_text(caption_result.stdout.strip())
 
     # Write metadata
     meta_path = Path(config.temp_dir) / f"{safe_slug}_carousel_meta.json"
@@ -782,7 +785,10 @@ Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -1268,7 +1274,10 @@ Write the note following the template."""
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(scrub_vault_note_content(note_content), encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)

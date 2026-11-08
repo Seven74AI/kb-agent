@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.redact import redact_http_urls_in_text
+
 _ALLOWED_INGEST_SCHEMES = frozenset({"http", "https"})
 
 # Max ingest-queue retries for failed embedded/standalone media (``recover_failed_media``).
@@ -1242,6 +1244,7 @@ def append_parent_media_atomic(
         return False
     if not raw_path.exists():
         return False
+    safe_body = redact_http_urls_in_text(body).strip()
     text = raw_path.read_text(encoding="utf-8")
     media_flag = bool(row["media_appended"] if hasattr(row, "keys") else row[0])
     if marker in text:
@@ -1249,7 +1252,7 @@ def append_parent_media_atomic(
             set_ingest_media_appended(conn, ingest_id)
         return True
     if media_flag:
-        section_present = f"## {section}" in text and body.strip() in text
+        section_present = f"## {section}" in text and safe_body in text
         if section_present:
             pending_text = text + f"\n\n{marker}\n"
             tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
@@ -1262,7 +1265,7 @@ def append_parent_media_atomic(
                 (ingest_id,),
             )
         media_flag = False
-    block = f"\n\n## {section}\n\n{body.strip()}\n\n{marker}\n"
+    block = f"\n\n## {section}\n\n{safe_body}\n\n{marker}\n"
     pending_text = text + block
     tmp_path = raw_path.with_name(f"{raw_path.name}.append-{ingest_id}.tmp")
     tmp_path.write_text(pending_text, encoding="utf-8")

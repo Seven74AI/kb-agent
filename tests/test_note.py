@@ -58,3 +58,25 @@ source_url: {MEGA_WITH_KEY}
     assert mega is not None
     assert "decryptionkey" not in mega["content"]
     assert "#" not in mega["content"].split("---")[1]
+
+
+def test_get_note_redacts_body_http_urls(tmp_path):
+    """MCP get_note must not return query-bearing URLs in the note body."""
+    vault = tmp_path / "vault"
+    articles = vault / "Knowledge base" / "articles"
+    articles.mkdir(parents=True)
+    raw_note = f"""---
+date: 2026-01-01
+source_url: https://example.com/safe
+---
+
+# Title
+
+See tracking link {TOKENIZED} in the body.
+"""
+    (articles / "body-url.md").write_text(raw_note, encoding="utf-8")
+
+    note = get_note("body-url", vault, content_type="web")
+    assert note is not None
+    assert "token=secret" not in note["content"]
+    assert "https://cdn.example.com/video.mp4" in note["content"]

@@ -299,6 +299,138 @@ def test_refresh_parent_media_manifest_syncs_media_changed_from_db(tmp_path):
     assert int(get_parent_media_deferral(conn, parent)["media_changed"]) == 0
 
 
+def test_maybe_dispatch_parent_synthesize_without_manifest_url(tmp_path, monkeypatch):
+    """Deferral gate must come from DB/bootstrap, not manifest ``url`` (redacted sidecars)."""
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import create_task, ensure_parent_media_deferral, media_append_marker, queue_ingest
+
+    conn = init_db(tmp_path / "agent.db", AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "url_redacted_parent"
+    post = "https://author.substack.com/p/post"
+    config = Config(
+        kb_agent_dir=tmp_path,
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "temp",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    ensure_parent_media_deferral(conn, parent, post, "substack_text", 1)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        json.dumps({"content_type": "substack_text", "total": 1}),
+        encoding="utf-8",
+    )
+    create_task(
+        conn,
+        post,
+        "substack_text",
+        parent,
+        ["substack_cleanup"],
+        status="paused",
+    )
+    ingest_id, _ = queue_ingest(
+        conn,
+        "https://example.com/i1.png",
+        "substack_image",
+        "i1",
+        parent_slug=parent,
+        media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE id=?", (ingest_id,))
+    conn.commit()
+    raw = config.temp_dir / f"{parent}_raw.md"
+    raw.write_text(
+        f"# Parent\n\n## Media\n\n{media_append_marker(ingest_id)}\n",
+        encoding="utf-8",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET media_appended = 1 WHERE parent_slug = ?",
+        (parent,),
+    )
+    conn.commit()
+
+    called: list[str] = []
+
+    def fake_dispatch(_url, _cfg, _agent_conn, **kwargs):
+        called.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "synth-1", "duplicate": False}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+    assert called == [parent]
+    assert "url" not in json.loads(
+        (config.temp_dir / f"{parent}_media.json").read_text(encoding="utf-8"),
+    )
+
+
+def test_parent_deferral_dispatch_error_records_scrubbed_pause(tmp_path, monkeypatch):
+    import scripts.batch_ingest as batch_ingest
+    from agent.db import create_task, ensure_parent_media_deferral, media_append_marker, queue_ingest
+
+    conn = init_db(tmp_path / "agent.db", AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "parent_dispatch_scrub"
+    secret_url = "https://blog.substack.com/p/x?api_key=LEAK"
+    config = Config(
+        kb_agent_dir=tmp_path,
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "temp",
+    )
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    ensure_parent_media_deferral(conn, parent, secret_url, "substack_text", 1)
+    (config.temp_dir / f"{parent}_media.json").write_text(
+        json.dumps({"content_type": "substack_text", "total": 1}),
+        encoding="utf-8",
+    )
+    parent_id = create_task(
+        conn,
+        secret_url,
+        "substack_text",
+        parent,
+        ["substack_embedded_media"],
+        status="paused",
+    )
+    ingest_id, _ = queue_ingest(
+        conn,
+        "https://example.com/i1.png",
+        "substack_image",
+        "i1",
+        parent_slug=parent,
+        media_kind="image",
+    )
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE id=?", (ingest_id,))
+    conn.commit()
+    raw = config.temp_dir / f"{parent}_raw.md"
+    raw.write_text(
+        f"# Parent\n\n## Media\n\n{media_append_marker(ingest_id)}\n",
+        encoding="utf-8",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET media_appended = 1 WHERE parent_slug = ?",
+        (parent,),
+    )
+    conn.commit()
+
+    def fake_dispatch(_url, _cfg, _agent_conn, **kwargs):
+        return {
+            "status": "error",
+            "error": "dispatch denied api_key=LEAK",
+        }
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
+    batch_ingest._deferred_synthesize_dispatched.clear()
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
+
+    row = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert row["status"] == "paused"
+    assert "deferred synthesis dispatch failed" in (row["error"] or "")
+    assert "LEAK" not in (row["error"] or "")
+    assert "api_key" not in (row["error"] or "")
+
+
 def test_consumer_skips_orphan_recovery_when_run_already_did(monkeypatch, consumer):
     import agent.consumer as consumer_mod
 

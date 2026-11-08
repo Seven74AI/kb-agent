@@ -248,6 +248,30 @@ class TestAppendToParent:
         assert body.count("OCR text") == 1
         assert media_append_marker(ingest_id) in body
 
+    def test_append_parent_media_atomic_redacts_urls_in_transcript_body(self, config, conn):
+        from agent.db import append_parent_media_atomic, queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "article_slug"
+        tracking = "https://cdn.example.com/frame.jpg?token=SECRET&expires=999"
+        ingest_id, _ = queue_ingest(
+            conn,
+            "https://example.com/img.png",
+            "substack_image",
+            "img1",
+            parent_slug=parent,
+            media_kind="image",
+        )
+        raw = config.temp_dir / f"{parent}_raw.md"
+        raw.write_text("# Article\n\nBody.\n", encoding="utf-8")
+
+        body = f"OCR line with source {tracking}"
+        assert append_parent_media_atomic(conn, ingest_id, raw, "Image", body) is True
+        written = raw.read_text(encoding="utf-8")
+        assert "token=SECRET" not in written
+        assert "?" not in written.split("## Image", 1)[-1]
+        assert "https://cdn.example.com/frame.jpg" in written
+
 
 class TestDeferredSynthesizeTags:
     def test_parent_tags_ignores_synthesize_task_row(self, conn):
@@ -274,15 +298,14 @@ class TestDeferredSynthesizeTags:
 
     def test_dispatch_includes_parent_tags_from_task(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
+        from agent.db import ensure_parent_media_deferral
 
         parent = "parent_slug"
         config.temp_dir.mkdir(parents=True, exist_ok=True)
+        post_url = "https://blog.substack.com/p/x"
+        ensure_parent_media_deferral(conn, parent, post_url, "substack_text", 0)
         (config.temp_dir / f"{parent}_media.json").write_text(
-            json.dumps({
-                "url": "https://blog.substack.com/p/x",
-                "content_type": "substack_text",
-                "total": 0,
-            }),
+            json.dumps({"content_type": "substack_text", "total": 0}),
             encoding="utf-8",
         )
         create_task(
@@ -306,15 +329,14 @@ class TestDeferredSynthesizeTags:
 
     def test_dispatch_supersedes_paused_parent_task(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
+        from agent.db import ensure_parent_media_deferral
 
         parent = "parent_slug"
         config.temp_dir.mkdir(parents=True, exist_ok=True)
+        post_url = "https://blog.substack.com/p/x"
+        ensure_parent_media_deferral(conn, parent, post_url, "substack_text", 0)
         (config.temp_dir / f"{parent}_media.json").write_text(
-            json.dumps({
-                "url": "https://blog.substack.com/p/x",
-                "content_type": "substack_text",
-                "total": 0,
-            }),
+            json.dumps({"content_type": "substack_text", "total": 0}),
             encoding="utf-8",
         )
         parent_id = create_task(
@@ -348,13 +370,14 @@ class TestDeferredSynthesizeTags:
 
     def test_dispatch_error_leaves_parent_unsuperseded(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
-        from agent.db import media_append_marker, queue_ingest
+        from agent.db import ensure_parent_media_deferral, media_append_marker, queue_ingest
 
         parent = "parent_dispatch_err"
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         url = "https://blog.substack.com/p/dispatch-err"
+        ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
         (config.temp_dir / f"{parent}_media.json").write_text(
-            json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
+            json.dumps({"content_type": "substack_text", "total": 1}),
             encoding="utf-8",
         )
         parent_id = create_task(
@@ -403,16 +426,19 @@ class TestDeferredSynthesizeTags:
         ).fetchone()
         assert row["status"] == "paused"
         assert "parent ingestion superseded" not in (row["error"] or "")
+        assert "deferred synthesis dispatch failed" in (row["error"] or "")
+        assert "unknown content_type: substack_text_synthesize" in (row["error"] or "")
 
     def test_dispatch_duplicate_still_supersedes_parent(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
-        from agent.db import media_append_marker, queue_ingest
+        from agent.db import ensure_parent_media_deferral, media_append_marker, queue_ingest
 
         parent = "parent_dispatch_dup"
         config.temp_dir.mkdir(parents=True, exist_ok=True)
         url = "https://blog.substack.com/p/dispatch-dup"
+        ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
         (config.temp_dir / f"{parent}_media.json").write_text(
-            json.dumps({"url": url, "content_type": "substack_text", "total": 1}),
+            json.dumps({"content_type": "substack_text", "total": 1}),
             encoding="utf-8",
         )
         parent_id = create_task(
