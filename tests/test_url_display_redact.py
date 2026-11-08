@@ -54,6 +54,23 @@ def test_url_for_display_preserves_plain_path():
     assert url_for_display(PLAIN) == PLAIN
 
 
+AUTH_IN_NETLOC = "https://user:sekret@example.com/path?q=1"
+
+
+def test_url_for_display_strips_userinfo():
+    assert url_for_display(AUTH_IN_NETLOC) == "https://example.com/path"
+    assert "sekret" not in url_for_display(AUTH_IN_NETLOC)
+    assert "user:" not in url_for_display(AUTH_IN_NETLOC)
+
+
+def test_redact_http_urls_in_text_strips_userinfo_in_body():
+    text = f"See {AUTH_IN_NETLOC} for details."
+    redacted = redact_http_urls_in_text(text)
+    assert "sekret" not in redacted
+    assert "user:" not in redacted
+    assert "https://example.com/path" in redacted
+
+
 def test_redact_http_urls_in_text_strips_query():
     text = f"SOURCE URL: {TOKENIZED}\nbody"
     redacted = redact_http_urls_in_text(text)

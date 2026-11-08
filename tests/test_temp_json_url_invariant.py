@@ -58,6 +58,29 @@ def sidecar_config(tmp_path):
 
 
 @patch("agent.pipelines.rumble.resolve_rumble")
+def test_rumble_metadata_sidecar_redacts_title_urls(mock_resolve, sidecar_config):
+    signed = "https://hugh.cdn.rumble.cloud/video/x.mp4?token=SECRET&exp=999"
+    mock_resolve.return_value = (
+        f"Evidence https://track.example/promo?jwt=LEAK more {signed}",
+        [{"url": signed, "height": 720}],
+    )
+    task = {
+        "id": "rumble-title-1",
+        "slug": "rumble_title_slug",
+        "source_url": "https://rumble.com/v123?utm=track",
+    }
+    out = step_rumble_extract_metadata(task, sidecar_config)
+    meta_path = sidecar_config.temp_dir / "rumble_title_slug_metadata.json"
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert "jwt=LEAK" not in data["title"]
+    assert "token=SECRET" not in data["title"]
+    assert data["title"].startswith("Evidence https://track.example/promo")
+    assert "jwt=LEAK" not in out
+    assert "token=SECRET" not in out
+
+
+@patch("agent.pipelines.rumble.resolve_rumble")
 def test_rumble_metadata_sidecar_omits_signed_cdn_urls(mock_resolve, sidecar_config):
     signed = "https://hugh.cdn.rumble.cloud/video/x.mp4?token=SECRET&exp=999"
     mock_resolve.return_value = (

@@ -27,7 +27,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import _artifact_stem, ensure_h264
-from agent.redact import url_for_display
+from agent.redact import redact_http_urls_in_text, url_for_display
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -219,6 +219,7 @@ def step_rumble_extract_metadata(task: dict, config: Config) -> str:
     """Resolve title + formats and write ``{stem}_metadata.json``."""
     stem = _download_artifact_stem(task)
     title, formats = resolve_rumble(task["source_url"])
+    title = redact_http_urls_in_text(title)
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(
         json.dumps(

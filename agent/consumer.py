@@ -30,8 +30,14 @@ detail_logger = logging.getLogger(__name__ + ".detail")
 from agent.config import Config
 from agent.db import (
     AGENT_SCHEMA, LOGS_SCHEMA,
-    claim_task, complete_task, fail_task, get_next_step,
-    init_db, pause_task, update_step,
+    _persist_visible_error,
+    claim_task,
+    complete_task,
+    fail_task,
+    get_next_step,
+    init_db,
+    pause_task,
+    update_step,
 )
 from agent.exceptions import ErrorType, StepError
 from agent.notify import notify_task, sanitize_visible_message
@@ -44,8 +50,8 @@ from agent.streaming import log_progress
 STEP_REGISTRY: dict[str, tuple[Any, str]] = {}
 
 def _sanitize_step_log_message(message: str) -> str:
-    """Alias for step_logs — same rules as other user-visible error surfaces."""
-    return sanitize_visible_message(message)
+    """Scrub text before persisting to step_logs (URL redaction + visible-message policy)."""
+    return _persist_visible_error(message)
 
 
 def _format_stdout_traceback(exc: BaseException, *, limit: int = 5) -> str:

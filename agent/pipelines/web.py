@@ -512,6 +512,11 @@ _LINK_HREF_RE = re.compile(
     r'<a[^>]+href=["\']([^"\']+)["\']',
     re.IGNORECASE,
 )
+# Embed-carrier paths only — plain citation anchors must not match (see _detect_unsupported_foreign_embed).
+_EMBED_CARRIER_URL_RE = re.compile(
+    r"(?:/embed(?:/|$|[?#])|/video/embed|player\.|widget)",
+    re.IGNORECASE,
+)
 _OEMBED_PROVIDER_RE = re.compile(
     r'"provider_(?:url|name)"\s*:\s*"([^"]+)"',
     re.IGNORECASE,
@@ -531,7 +536,9 @@ def _foreign_platform_from_url(url: str) -> str | None:
 def _detect_unsupported_foreign_embed(html: str) -> str | None:
     """First foreign embed platform in article HTML that the deferral gate cannot enqueue.
 
-    Scans iframe ``src``, anchor ``href``, and oEmbed provider fields. Substack-native,
+    Invariant: only embed carriers (iframe ``src``, oEmbed provider fields, embed-class
+    markers, and anchor ``href`` values whose URL looks like a player/embed endpoint).
+    Plain outbound citation links must not trigger a foreign pause. Substack-native,
     YouTube, and Rumble embeds are exempt (handled by the existing extractors).
     """
     decoded = _html_unescape(html)
@@ -540,8 +547,12 @@ def _detect_unsupported_foreign_embed(html: str) -> str | None:
     if "tiktok-embed" in decoded:
         return "tiktok"
     candidates: list[str] = []
-    for pattern in (_IFRAME_SRC_RE, _LINK_HREF_RE, _OEMBED_PROVIDER_RE):
+    for pattern in (_IFRAME_SRC_RE, _OEMBED_PROVIDER_RE):
         candidates.extend(m.group(1) for m in pattern.finditer(decoded))
+    for m in _LINK_HREF_RE.finditer(decoded):
+        url = m.group(1)
+        if _EMBED_CARRIER_URL_RE.search(url):
+            candidates.append(url)
     for url in candidates:
         platform = _foreign_platform_from_url(url)
         if platform:
