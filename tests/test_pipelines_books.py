@@ -428,6 +428,41 @@ class TestPdfExtraction:
         assert "quality_score" in data
 
     @patch("agent.pipelines.books.pymupdf")
+    def test_extract_pdf_redacts_urls_in_full_text_file(self, mock_pymupdf, config, book_task):
+        tokenized = "https://cdn.example.com/ref?token=secret&expires=999"
+        pdf_path = Path(config.temp_dir) / "test_book.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_text("dummy pdf content")
+        book_task["source_url"] = str(pdf_path)
+        base = (
+            "Page content with enough characters to pass "
+            "the scanned detection threshold of 500 chars. "
+            * 5
+        )
+        text_per_page = f"{base} See {tokenized}"
+
+        def make_doc():
+            mock_doc = MagicMock()
+            mock_doc.page_count = 3
+            pages = []
+            for _ in range(3):
+                page = MagicMock()
+                page.get_text.return_value = text_per_page
+                pages.append(page)
+            mock_doc.__iter__.return_value = iter(pages)
+            mock_doc.__getitem__.side_effect = lambda i: pages[i]
+            return mock_doc
+
+        mock_pymupdf.open.side_effect = [make_doc(), make_doc(), make_doc()]
+        Path(config.temp_dir).mkdir(parents=True, exist_ok=True)
+        step_extract_pdf(book_task, config)
+        slug = book_task["slug"]
+        full_txt = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        body = full_txt.read_text(encoding="utf-8")
+        assert "token=secret" not in body
+        assert "https://cdn.example.com/ref" in body
+
+    @patch("agent.pipelines.books.pymupdf")
     def test_extract_pdf_scanned_raises(self, mock_pymupdf, config, book_task):
         """Scanned PDF raises StepError."""
         # Create dummy pdf file
@@ -1181,7 +1216,7 @@ source_files:
   text: <filled by archival step>
 ---
 
-Body without query parameters in the note text.
+Body links {TOKENIZED_BOOK_URL} in prose before patch.
 """,
             encoding="utf-8",
         )
@@ -1189,6 +1224,7 @@ Body without query parameters in the note text.
         step_book_minio_upload(book_task, config)
         written = note_path.read_text(encoding="utf-8")
         assert "token=secret" not in written
+        assert "https://cdn.example.com/book.mp3" in written
         assert "source_files:" in written
 
 

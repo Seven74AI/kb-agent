@@ -127,7 +127,11 @@ def rebuild_fts(conn: sqlite3.Connection):
 def main():
     """Run the full log rotation cycle."""
     if not LOGS_DB.exists():
-        print(f"[rotate_logs] No logs.db at {LOGS_DB} — nothing to rotate")
+        print(
+            "[rotate_logs] No logs.db at",
+            sanitize_visible_message(str(LOGS_DB)),
+            "— nothing to rotate",
+        )
         return 0
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).strftime(
@@ -187,7 +191,10 @@ def main():
         print(f"[rotate_logs] Archived {total_rows} rows → {archive_size:,} bytes compressed")
 
     except Exception as e:
-        print(f"[rotate_logs] ERROR during dump/gzip: {e}", file=sys.stderr)
+        print(
+            f"[rotate_logs] ERROR during dump/gzip: {sanitize_visible_message(str(e))}",
+            file=sys.stderr,
+        )
         conn.close()
         return 1
 
@@ -199,7 +206,11 @@ def main():
     )
 
     if result.returncode != 0:
-        print(f"[rotate_logs] MinIO upload FAILED: {result.stderr.strip()}", file=sys.stderr)
+        print(
+            "[rotate_logs] MinIO upload FAILED:",
+            sanitize_visible_message((result.stderr or "").strip()),
+            file=sys.stderr,
+        )
         # Clean up temp files but DON'T delete rows — retry next run
         tmp_json.unlink(missing_ok=True)
         tmp_gz.unlink(missing_ok=True)

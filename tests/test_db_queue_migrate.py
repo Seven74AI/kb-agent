@@ -1718,6 +1718,110 @@ def test_has_completed_parent_synthesis_monotonic_pending_with_fresh_synth_embed
     assert has_completed_parent_synthesis(conn, slug, temp_dir=media_tmp) is False
 
 
+def test_media_changed_consumed_after_reingest_growth_and_media_landed(tmp_path):
+    """Growth sets media_changed; satisfied siblings + landed raw must clear it."""
+    from agent.db import (
+        ensure_parent_media_deferral,
+        find_active_task,
+        get_parent_media_deferral,
+        parent_media_complete,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "consumed_growth"
+    url = "https://blog.substack.com/p/consumed-growth"
+    vault = tmp_path / "vault"
+    media_tmp = tmp_path / "media_tmp"
+    media_tmp.mkdir(parents=True)
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1.png", "substack_image", "i1",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    queue_ingest(
+        conn, "https://example.com/i2.png", "substack_image", "i2",
+        parent_slug=slug, media_kind="image",
+    )
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    raw = media_tmp / f"{slug}_raw.md"
+    assert parent_media_complete(conn, slug, raw_path=raw) is True
+    deferral_anchor = get_parent_media_deferral(conn, slug)["updated_at"]
+    conn.execute(
+        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+        (deferral_anchor, syn_id),
+    )
+    conn.commit()
+
+    assert has_completed_parent_synthesis(
+        conn, slug, vault_path=vault, temp_dir=media_tmp,
+    ) is True
+    assert get_parent_media_deferral(conn, slug)["media_changed"] == 0
+    assert find_active_task(conn, slug, "substack_text_synthesize") == syn_id
+
+
+def test_media_changed_blocks_completion_while_sibling_shortfall(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "shortfall_block"
+    url = "https://blog.substack.com/p/shortfall"
+    media_tmp = tmp_path / "media_tmp"
+    media_tmp.mkdir(parents=True)
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1.png", "substack_image", "i1",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now'), updated_at=datetime('now') WHERE parent_slug=?",
+        (slug,),
+    )
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+        (syn_id,),
+    )
+    conn.commit()
+
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+
+    deferral = get_parent_media_deferral(conn, slug)
+    assert deferral["expected_total"] == 2
+    assert int(deferral["media_changed"]) == 1
+    assert has_completed_parent_synthesis(
+        conn, slug, temp_dir=media_tmp,
+    ) is False
+
+
 def test_has_completed_parent_synthesis_monotonic_complete_media_and_fresh_terminal(
     tmp_path,
 ):

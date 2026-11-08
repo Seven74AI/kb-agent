@@ -529,6 +529,35 @@ def _mark_parent_media_enqueue_shortfall(
         )
 
 
+def _clear_parent_media_changed_if_satisfied(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    *,
+    raw_path: Path | None = None,
+) -> None:
+    """Clear consumed ``media_changed`` once sibling count and landed raw match expected_total."""
+    if not parent_slug:
+        return
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None or not int(deferral.get("media_changed") or 0):
+        return
+    sibling_n = _parent_sibling_media_count(conn, parent_slug)
+    expected = int(deferral["expected_total"])
+    if sibling_n < expected:
+        return
+    if not parent_media_complete(conn, parent_slug, raw_path=raw_path):
+        return
+    with conn:
+        conn.execute(
+            """
+            UPDATE parent_media_deferral
+            SET media_changed = 0
+            WHERE parent_slug = ?
+            """,
+            (parent_slug,),
+        )
+
+
 def _reconcile_parent_media_deferral_on_new_sibling(
     conn: sqlite3.Connection,
     parent_slug: str,
@@ -637,6 +666,8 @@ def find_active_task(
             return None
         if deferral is not None:
             if status in ("done", "completed"):
+                _clear_parent_media_changed_if_satisfied(conn, slug)
+                deferral = get_parent_media_deferral(conn, slug)
                 fresh = _deferral_synthesize_terminal_fresh(conn, slug, deferral)
                 if int(deferral.get("media_changed") or 0) or not fresh:
                     supersede_stale_deferral_synthesize_tasks(conn, slug, deferral)
@@ -998,6 +1029,7 @@ def has_completed_parent_synthesis(
         ):
             return False
 
+        _clear_parent_media_changed_if_satisfied(conn, slug, raw_path=raw_path)
         deferral = get_parent_media_deferral(conn, slug)
 
         if deferral is not None:
@@ -1094,17 +1126,6 @@ def get_last_batch_run(conn: sqlite3.Connection) -> dict | None:
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM batch_runs ORDER BY id DESC LIMIT 1").fetchone()
     return dict(row) if row else None
-
-
-def ingest_media_appended(conn: sqlite3.Connection, ingest_id: str) -> bool:
-    """True when embedded media body was already written to the parent raw markdown."""
-    row = conn.execute(
-        "SELECT media_appended FROM ingest_queue WHERE id = ?", (ingest_id,)
-    ).fetchone()
-    if row is None:
-        return False
-    val = row["media_appended"] if hasattr(row, "keys") else row[0]
-    return bool(val)
 
 
 def set_ingest_media_appended(conn: sqlite3.Connection, ingest_id: str) -> None:
@@ -1271,6 +1292,15 @@ def append_parent_media_atomic(
     tmp_path.write_text(pending_text, encoding="utf-8")
     os.replace(tmp_path, raw_path)
     set_ingest_media_appended(conn, ingest_id)
+    parent_row = conn.execute(
+        "SELECT parent_slug FROM ingest_queue WHERE id = ?", (ingest_id,),
+    ).fetchone()
+    if parent_row is not None:
+        parent_slug = parent_row["parent_slug"] if hasattr(parent_row, "keys") else parent_row[0]
+        if parent_slug:
+            _clear_parent_media_changed_if_satisfied(
+                conn, parent_slug, raw_path=raw_path,
+            )
     return True
 
 

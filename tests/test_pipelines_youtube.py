@@ -160,6 +160,7 @@ def test_ytdlp_xdg_config_is_owner_only(config):
 
 def test_pass1_debug_dump_owner_only(tmp_path):
     """Pass-1 JSON failure writes debug output under temp_dir with 0600 perms."""
+    tokenized = "https://cdn.example.com/x?token=secret&expires=999"
     cfg = Config(
         kb_agent_dir=tmp_path / "kb",
         vault_path=tmp_path / "vault",
@@ -168,13 +169,19 @@ def test_pass1_debug_dump_owner_only(tmp_path):
     )
     cfg.temp_dir.mkdir(parents=True, exist_ok=True)
     llm = MagicMock()
-    llm.call.return_value = LLMResponse(content="not json at all", model="m")
+    llm.call.return_value = LLMResponse(
+        content=f"not json — see {tokenized}",
+        model="m",
+    )
     with pytest.raises(StepError, match="Pass 1 concepts JSON parse failed"):
         _pass1_extract_concepts("transcript", (3, 6), llm, "dbg_slug", cfg)
     debug_path = cfg.temp_dir / "pass1_debug" / "dbg_slug_pass1_debug.txt"
     assert debug_path.is_file()
     assert oct(debug_path.stat().st_mode)[-3:] == "600"
     assert debug_path.stat().st_mode & stat.S_IRWXO == 0
+    saved = debug_path.read_text(encoding="utf-8")
+    assert "token=secret" not in saved
+    assert "https://cdn.example.com/x" in saved
 
 
 def test_validate_cookies_missing(config):

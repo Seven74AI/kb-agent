@@ -26,7 +26,8 @@ from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
+from agent.core.note import write_vault_note
+from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json
 from agent.llm import get_llm_client
 from agent.quality import count_quotes
 from agent.pipelines import Step, register_pipeline
@@ -664,7 +665,7 @@ def step_threads_merge(task: dict, config: Config) -> str:
 
     # Write merged
     merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
-    merged_path.write_text(json.dumps(trans, indent=2, ensure_ascii=False))
+    write_merged_transcript_json(merged_path, trans)
 
     return json.dumps({
         "segments": len(trans.get("segments", [])),
@@ -803,10 +804,7 @@ Incorporate the post description as a source alongside the transcript."""
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(
-        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, note_content)
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -899,10 +897,7 @@ The confidence level is '{confidence}' — be appropriately cautious if it's 'un
 
     note_path = config.vault_path / "Knowledge base" / "threads" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(
-        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, note_content)
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)

@@ -31,7 +31,8 @@ from agent.curl_config import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
+from agent.core.note import write_vault_note
+from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json
 from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
@@ -334,7 +335,7 @@ def step_ig_reel_merge(task: dict, config: Config) -> str:
 
     # Write merged
     merged_path = Path(config.temp_dir) / f"{safe_slug}_merged.json"
-    merged_path.write_text(json.dumps(trans, indent=2, ensure_ascii=False))
+    write_merged_transcript_json(merged_path, trans)
 
     return json.dumps({
         "segments": len(trans.get("segments", [])),
@@ -458,10 +459,7 @@ Write a note following the template above.
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(
-        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, note_content)
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -668,7 +666,10 @@ asyncio.run(main())
         # Write extracted slides
         slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
         slides_persisted = [
-            {"slide": s["slide"], "alt_text": s.get("alt_text", "")}
+            {
+                "slide": s["slide"],
+                "alt_text": redact_http_urls_in_text(s.get("alt_text", "")),
+            }
             for s in slides
         ]
         slides_data = {
@@ -785,10 +786,7 @@ Note: only {len(slides_data.get('slides', []))} of {playlist_count} slides could
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(
-        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, note_content)
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -1274,10 +1272,7 @@ Write the note following the template."""
 
     note_path = config.vault_path / "Knowledge base" / "instagram" / f"{safe_slug}.md"
     note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(
-        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, note_content)
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)

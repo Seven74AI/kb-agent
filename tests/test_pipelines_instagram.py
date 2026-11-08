@@ -435,6 +435,33 @@ class TestCarouselExtract:
         assert "Hard cap" in data["cap_note"]
 
     @patch("subprocess.run")
+    def test_extract_redacts_tokenized_urls_in_alt_text(self, mock_run, config, post_task):
+        tokenized = "https://promo.example/offers?jwt=SECRET&igsh=track"
+        slides = json.dumps([
+            {
+                "slide": 1,
+                "alt_text": f"Shop at {tokenized}",
+                "src": "https://cdn.ig/img1.jpg?sig=HIDDEN",
+            },
+        ])
+
+        def fake_run(*args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = slides
+            result.stderr = ""
+            return result
+
+        mock_run.side_effect = fake_run
+        result = step_ig_carousel_extract(post_task, config)
+        data = json.loads(Path(result).read_text(encoding="utf-8"))
+        alt = data["slides"][0]["alt_text"]
+        assert "jwt=SECRET" not in alt
+        assert "igsh=track" not in alt
+        assert "https://promo.example/offers" in alt
+        assert "src" not in data["slides"][0]
+
+    @patch("subprocess.run")
     def test_extract_escapes_url_in_playwright_script(self, mock_run, config):
         task = {
             "id": "test-ig-post-12345",

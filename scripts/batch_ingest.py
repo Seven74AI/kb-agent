@@ -36,6 +36,7 @@ from agent.config import load_config  # noqa: E402
 sys.path.insert(0, str(load_config().kb_agent_dir))
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
+    _clear_parent_media_changed_if_satisfied,
     bootstrap_parent_media_deferral_from_manifest,
     claim_ingest_items,
     finish_batch_run,
@@ -456,7 +457,9 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
             f"(rows {actual}/{expected}, raw={raw_path.name})"
         )
         return False
-    if int(deferral.get("media_changed") or 0):
+    _clear_parent_media_changed_if_satisfied(conn, parent_slug, raw_path=raw_path)
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is not None and int(deferral.get("media_changed") or 0):
         supersede_stale_deferral_synthesize_tasks(conn, parent_slug, deferral)
     rr = dispatch_synthesize(
         deferral["source_url"], config, conn,

@@ -23,7 +23,8 @@ from agent.detection import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
-from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
+from agent.core.note import write_vault_note
+from agent.redact import redact_http_urls_in_text, url_for_display
 
 logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
@@ -109,7 +110,7 @@ def step_substack_cleanup(task: dict, config: Config) -> str:
     # Remove trailing whitespace on each line
     content = '\n'.join(line.rstrip() for line in content.splitlines())
 
-    raw_path.write_text(content, encoding="utf-8")
+    raw_path.write_text(redact_http_urls_in_text(content), encoding="utf-8")
     return "cleaned"
 
 
@@ -1037,10 +1038,7 @@ def step_synthesize_web(task: dict, config: Config) -> str:
             source_content, source_url, slug, config, llm
         )
 
-    note_path.write_text(
-        scrub_vault_note_content(redact_http_urls_in_text(note_content)),
-        encoding="utf-8",
-    )
+    write_vault_note(note_path, note_content)
     append_note_tags(note_path, task.get("tags"))
     return str(note_path)
 
@@ -1434,7 +1432,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
                 else:
                     # No source_files: field — insert after the opening ---
                     content = content[:3] + "\nsource_files:\n  raw: " + minio_url + content[3:]
-                note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
+                write_vault_note(note_path, content)
 
         # Write the real archive URL into the Sources section (before See Also).
         # If the note lacks a See Also header, skip — the frontmatter raw: field
@@ -1444,7 +1442,7 @@ def step_minio_upload(task: dict, config: Config) -> str:
             f'- Raw source archived: `{minio_url}`\n\n## See Also',
             content, flags=re.MULTILINE, count=1,
         )
-        note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
+        write_vault_note(note_path, content)
 
     return minio_url
 

@@ -44,12 +44,20 @@ MAX_IMAGE_PIXELS = 4_194_304  # 2048 x 2048
 MAX_NEW_OCR_TOKENS = 768
 
 
-def _sanitize_modal_log(message: str, *, limit: int = 400) -> str:
-    """Keep Modal worker logs short and free of noisy subprocess dumps."""
-    text = str(message or "").replace("\n", " ").strip()
-    if len(text) > limit:
-        text = text[:limit] + "…"
-    return text
+def _sanitize_emit(message: object) -> str:
+    """Route Modal stdout lines that may carry paths/URLs through notify scrub."""
+    import sys
+    from pathlib import Path
+
+    for root in (Path(__file__).resolve().parent.parent, Path("/root/kb-agent")):
+        if root.is_dir():
+            root_s = str(root)
+            if root_s not in sys.path:
+                sys.path.insert(0, root_s)
+            break
+    from agent.notify import sanitize_visible_message
+
+    return sanitize_visible_message(str(message))
 
 
 PROMPT = (
@@ -142,7 +150,7 @@ def read_images(images: list) -> list:
             results.append({"name": name, "reading": reading})
             print(f"[{name}] {len(reading)} chars in {time.time() - t0:.0f}s", flush=True)
         except Exception as exc:
-            safe = _sanitize_modal_log(exc)
+            safe = _sanitize_emit(exc)
             print(f"[{name}] failed: {safe}", flush=True)
             results.append({"name": name, "error": safe})
     return results
@@ -171,14 +179,9 @@ def main(image_dir: str = None, out_dir: str = "."):
     if skipped:
         print(f"skipped {skipped} oversized image(s)", flush=True)
     if not items:
-        print("no images found in", image_dir)
+        print("no images found in", _sanitize_emit(image_dir))
         return
-    import sys
-    from pathlib import Path
-
-    repo = Path(__file__).resolve().parent.parent
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
+    _sanitize_emit("")  # ensure repo on sys.path for agent.notify
     from agent.notify import ocr_error_json
 
     results = read_images.remote(items)
@@ -188,5 +191,12 @@ def main(image_dir: str = None, out_dir: str = "."):
             if r.get("error"):
                 json.dump(ocr_error_json(r["error"]), f, ensure_ascii=False, indent=2)
             else:
-                json.dump({"reading": r["reading"]}, f, ensure_ascii=False, indent=2)
-        print(f"wrote {p}")
+                from agent.redact import redact_http_urls_in_text
+
+                json.dump(
+                    {"reading": redact_http_urls_in_text(r["reading"])},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+        print("wrote", _sanitize_emit(p))

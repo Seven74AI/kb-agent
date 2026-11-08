@@ -202,10 +202,15 @@ def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
                 else:
                     url_ok = url_for_display(cached_url) == url_for_display(source_url)
                 if url_ok and isinstance(formats, list) and formats:
+                    _, resolved = resolve_rumble(source_url)
                     if all("url" not in f for f in formats):
-                        _, resolved = resolve_rumble(source_url)
                         return _merge_resolved_format_urls(formats, resolved)
-                    return formats
+                    sidecar_heights = [
+                        {"height": int(f["height"])} for f in formats if "height" in f
+                    ]
+                    if sidecar_heights:
+                        return _merge_resolved_format_urls(sidecar_heights, resolved)
+                    return resolved
     _, formats = resolve_rumble(source_url)
     return formats
 

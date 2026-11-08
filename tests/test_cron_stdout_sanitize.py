@@ -163,6 +163,122 @@ async def test_watch_scheduler_sanitizes_poll_exception(monkeypatch, capsys):
     assert "poll error:" in out
 
 
+def test_rotate_logs_missing_db_scrubs_path_in_stdout(monkeypatch, capsys, tmp_path):
+    mod = _load_script_module("rotate_logs", "scripts/rotate_logs.py")
+    missing = tmp_path / "secret" / "logs.db"
+    monkeypatch.setattr(mod, "LOGS_DB", missing)
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert str(missing) not in out
+    assert "[path]" in out
+    assert "No logs.db at" in out
+
+
+def test_rotate_logs_gzip_failure_scrubs_stderr(monkeypatch, capsys, tmp_path):
+    import sqlite3
+
+    from agent.db import LOGS_SCHEMA, init_db
+
+    mod = _load_script_module("rotate_logs", "scripts/rotate_logs.py")
+    db_path = tmp_path / "logs.db"
+    conn = init_db(db_path, LOGS_SCHEMA)
+    old = "2020-01-01 00:00:00"
+    conn.execute(
+        "INSERT INTO step_logs (task_id, step_name, stream, content, logged_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("t1", "download", "stderr", "x", old),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(mod, "LOGS_DB", db_path)
+    monkeypatch.setattr(
+        "gzip.open",
+        MagicMock(
+            side_effect=OSError(
+                "Permission denied for /root/kb-agent/data/logs.db token=gzfail"
+            )
+        ),
+    )
+    assert mod.main() == 1
+    err = capsys.readouterr().err
+    assert "gzfail" not in err
+    assert "/root/kb-agent" not in err
+    assert "[path]" in err
+    assert "ERROR during dump/gzip" in err
+
+
+def test_rotate_logs_upload_failure_scrubs_stderr(monkeypatch, capsys, tmp_path):
+    import sqlite3
+    from unittest.mock import MagicMock
+
+    from agent.db import LOGS_SCHEMA, init_db
+
+    mod = _load_script_module("rotate_logs", "scripts/rotate_logs.py")
+    db_path = tmp_path / "logs.db"
+    conn = init_db(db_path, LOGS_SCHEMA)
+    old = "2020-01-01 00:00:00"
+    conn.execute(
+        "INSERT INTO step_logs (task_id, step_name, stream, content, logged_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("t1", "download", "stderr", "x", old),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(mod, "LOGS_DB", db_path)
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *a, **k: MagicMock(
+            returncode=1,
+            stderr="mc: ERROR at /root/kb-agent/cookies/x.txt api_key=mcleak",
+        ),
+    )
+    with monkeypatch.context() as mp:
+        mp.setattr("pathlib.Path.unlink", lambda *a, **k: None)
+        assert mod.main() == 1
+    err = capsys.readouterr().err
+    assert "mcleak" not in err
+    assert "/root/kb-agent" not in err
+    assert "[path]" in err
+    assert "MinIO upload FAILED" in err
+
+
+def test_kb_ocr_visible_stdout_routes_through_sanitize_emit():
+    from agent.notify import sanitize_visible_message
+
+    text = (_REPO_ROOT / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
+    assert "def _sanitize_emit" in text
+    assert "_sanitize_modal_log" not in text
+    assert "sanitize_visible_message" in text
+    assert '_sanitize_emit(exc)' in text
+    assert '_sanitize_emit(image_dir)' in text
+    assert '_sanitize_emit(p)' in text
+
+    raw = "fail path=/home/ubuntu/secret/img.png api_key=ocrstdoutleak"
+    clean = sanitize_visible_message(raw)
+    assert "/home/ubuntu" not in clean
+    assert "ocrstdoutleak" not in clean
+    assert "[path]" in clean
+    assert "[credential redacted]" in clean
+
+
+def test_db_has_no_ingest_media_appended_reader():
+    text = (_REPO_ROOT / "agent" / "db.py").read_text(encoding="utf-8")
+    assert "def ingest_media_appended" not in text
+    assert "def set_ingest_media_appended" in text
+
+
+def test_delegate_books_documented_as_implemented():
+    doc = (_REPO_ROOT / "docs" / "core-extraction-inventory-consumer.md").read_text(
+        encoding="utf-8"
+    )
+    assert "step_delegate_books" in doc
+    assert "not implemented yet" not in doc
+    assert "Implemented" in doc
+
+
 def test_watch_sources_poll_stderr_sanitizes_url_and_error(monkeypatch, capsys):
     mod = _load_script_module("watch_sources_poll", "scripts/watch_sources_poll.py")
     token_url = "https://example.com/watch?token=supersecret&x=1"
