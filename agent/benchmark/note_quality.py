@@ -269,6 +269,20 @@ def compare_from_vaults(
     return entries
 
 
+def _note_path_for_display(note_path: str | None) -> str | None:
+    """Display-safe note path for durable benchmark artifacts (no absolute host paths)."""
+    if note_path is None:
+        return None
+    return url_for_display(str(note_path))
+
+
+def _side_for_json(side: dict[str, Any]) -> dict[str, Any]:
+    scrubbed = {**side, "content": None}
+    if side.get("note_path") is not None:
+        scrubbed["note_path"] = _note_path_for_display(str(side["note_path"]))
+    return scrubbed
+
+
 def _summary(entries: list[dict[str, Any]]) -> dict[str, int]:
     kb_pass = sum(1 for e in entries if e["kb_agent"]["passed"])
     hermes_pass = sum(1 for e in entries if e["hermes"]["passed"])
@@ -355,8 +369,8 @@ def write_comparison_report(
         "entries": [
             {
                 **e,
-                "kb_agent": {**e["kb_agent"], "content": None},
-                "hermes": {**e["hermes"], "content": None},
+                "kb_agent": _side_for_json(e["kb_agent"]),
+                "hermes": _side_for_json(e["hermes"]),
             }
             for e in entries
         ],

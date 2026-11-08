@@ -109,6 +109,47 @@ def test_write_comparison_report_json_and_html(benchmark_config, tmp_path):
     assert "example.com/benchmark-article-a" in html
 
 
+def test_write_comparison_report_json_note_path_display_safe(benchmark_config, tmp_path):
+    """comparison.json must not persist absolute host paths (same policy as review bodies)."""
+    host_like = tmp_path / "root" / "kb-agent" / "vault" / "Knowledge base" / "articles"
+    host_like.mkdir(parents=True)
+    kb_note = host_like / "benchmark-article-a.md"
+    kb_note.write_text(
+        "---\nsource_url: https://example.com/benchmark-article-a\n---\n"
+        "## Summary\nKB body with enough text.\n"
+        "## Key Concepts\n### One\n"
+        "> quote one\n> quote two\n"
+        "## Critical Analysis\n**Fact check 1:** ok\n**Fact check 2:** ok\n",
+        encoding="utf-8",
+    )
+    hermes_note = host_like / "hermes-a.md"
+    hermes_note.write_text("# short\n", encoding="utf-8")
+
+    entries = [
+        compare_url_pair(
+            "https://example.com/benchmark-article-a",
+            kb_note,
+            hermes_note,
+            content_type="web",
+            config=benchmark_config,
+        )
+    ]
+    assert Path(entries[0]["kb_agent"]["note_path"]).is_absolute()
+
+    out_dir = tmp_path / "report"
+    paths = write_comparison_report(entries, out_dir)
+    raw_json = paths["json"].read_text(encoding="utf-8")
+    assert "/root/kb-agent" not in raw_json
+    assert str(host_like) not in raw_json
+
+    entry = json.loads(raw_json)["entries"][0]
+    for side in ("kb_agent", "hermes"):
+        note_path = entry[side]["note_path"]
+        assert note_path is not None
+        assert not Path(note_path).is_absolute()
+        assert note_path in {"benchmark-article-a.md", "hermes-a.md"}
+
+
 def test_build_review_html_redacts_tracking_query_on_url():
     tracked = "https://example.com/article?utm_source=track&sig=deadbeef"
     html = build_review_html(

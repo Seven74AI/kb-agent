@@ -560,6 +560,49 @@ class TestCarouselExtract:
             step_ig_carousel_extract(post_task, config)
         assert not script_path.exists()
 
+    @patch("subprocess.run")
+    def test_extract_goto_failure_raises_no_carousel_artifact(self, mock_run, config, post_task):
+        """page.goto failure must fail-closed: StepError, no thin carousel JSON on disk."""
+        slides_path = Path(config.temp_dir) / f"{post_task['slug']}_carousel_slides.json"
+
+        def fake_run(*args, **kwargs):
+            result = MagicMock()
+            result.returncode = 1
+            result.stdout = "[]"
+            result.stderr = "Page.goto: Timeout 30000ms exceeded."
+            return result
+
+        mock_run.side_effect = fake_run
+
+        with pytest.raises(StepError, match="Playwright carousel extraction failed") as exc:
+            step_ig_carousel_extract(post_task, config)
+        assert exc.value.error_type == ErrorType.RETRY
+        assert not slides_path.exists()
+
+    @patch("subprocess.run")
+    def test_extract_playwright_script_does_not_swallow_goto_errors(self, mock_run, config, post_task):
+        """Embedded script must not bare-except page.goto (navigation errors must propagate)."""
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            script_path = Path(args[0][1])
+            captured["script"] = script_path.read_text(encoding="utf-8")
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = json.dumps([
+                {"slide": 1, "alt_text": "alt", "src": "https://cdn.ig/x.jpg"},
+            ])
+            r.stderr = ""
+            return r
+
+        mock_run.side_effect = fake_run
+        step_ig_carousel_extract(post_task, config)
+        script = captured["script"]
+        goto_pos = script.index("await page.goto(")
+        chunk = script[goto_pos : goto_pos + 200]
+        assert "except Exception:" not in chunk
+        assert "pass" not in chunk.split("page.goto(")[-1].split("wait_for_timeout")[0]
+
 
 class TestCarouselSynthesis:
     """Tests for step_ig_carousel_synthesize."""
