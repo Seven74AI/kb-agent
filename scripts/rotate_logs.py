@@ -24,6 +24,7 @@ from pathlib import Path
 
 from agent.db import _persist_visible_error
 from agent.notify import sanitize_visible_message
+from agent.persist import persist_durable_text
 
 _OBVIOUS_SECRET_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*\S+"
@@ -178,10 +179,11 @@ def main():
     tmp_gz = Path("/tmp") / f"kb-agent-logs-{archive_month}.json.gz"
 
     try:
-        with open(tmp_json, "w") as f:
-            for record in step_records + llm_records:
-                safe = sanitize_archive_record(record)
-                f.write(json.dumps(safe, ensure_ascii=False) + "\n")
+        jsonl_lines: list[str] = []
+        for record in step_records + llm_records:
+            safe = sanitize_archive_record(record)
+            jsonl_lines.append(json.dumps(safe, ensure_ascii=False) + "\n")
+        persist_durable_text(tmp_json, "".join(jsonl_lines), policy="boundary4")
 
         # Gzip
         with open(tmp_json, "rb") as f_in:
