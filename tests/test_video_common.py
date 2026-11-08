@@ -57,8 +57,12 @@ def test_step_fetch_transcript_writes_metadata_from_segments(config):
     assert meta["duration"] == 300.0
 
 
+@patch("agent.pipelines.video_common.subprocess.run")
 @patch("agent.archival.upload_file_to_minio")
-def test_upload_video_artifacts_redacts_merged_segment_text(mock_upload, config):
+def test_upload_video_artifacts_redacts_merged_segment_text(
+    mock_upload, mock_run, config
+):
+    mock_run.return_value = MagicMock(returncode=1)
     slug = "vid_slug"
     merged = {
         "segments": [
