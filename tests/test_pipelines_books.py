@@ -1014,6 +1014,26 @@ class TestContentClassification:
         for book in data["books"]:
             assert book["classification"] == "text"
             assert book["pipeline"] == "book_epub"
+            assert "path" not in book
+
+    def test_classify_content_durable_output_has_no_absolute_paths(
+        self, config, mega_task,
+    ):
+        """Invariant: task_steps.output must not embed machine-local book paths."""
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        epub = dl_dir / "proof.epub"
+        epub.write_text("epub", encoding="utf-8")
+
+        classify_json = step_classify_content(mega_task, config)
+        assert str(epub) not in classify_json
+        assert "/root/" not in classify_json
+        for book in json.loads(classify_json).get("books", []):
+            assert "path" not in book
+
+        manifest = _book_classify_manifest_path(config, mega_task)
+        manifest_text = manifest.read_text(encoding="utf-8")
+        assert str(epub) in manifest_text
 
     @patch("agent.pipelines.books.pymupdf")
     def test_classify_content_with_pdfs(self, mock_pymupdf, config, mega_task):
@@ -1176,6 +1196,8 @@ class TestDelegateBooks:
         epub.write_text("epub", encoding="utf-8")
 
         classify_json = step_classify_content(mega_task, config)
+        assert str(epub) not in classify_json
+
         manifest = _book_classify_manifest_path(config, mega_task)
         assert manifest.is_file()
         assert str(epub) in manifest.read_text(encoding="utf-8")
@@ -1193,14 +1215,14 @@ class TestDelegateBooks:
             (parent_id,),
         ).fetchone()[0]
         update_step(conn, step_id, "done", classify_json)
-        scrubbed = conn.execute(
+        stored_output = conn.execute(
             "SELECT output FROM task_steps WHERE id = ?", (step_id,),
         ).fetchone()[0]
         conn.commit()
         conn.close()
 
-        assert str(epub) in scrubbed
-        assert "[path]" not in scrubbed
+        assert str(epub) not in (stored_output or "")
+        assert "[path]" not in (stored_output or "")
 
         mega_task["id"] = parent_id
         result = json.loads(step_delegate_books(mega_task, config))

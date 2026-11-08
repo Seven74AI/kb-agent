@@ -49,7 +49,7 @@ PLATFORM_PATTERNS: list[tuple[str, str]] = [
     # Rumble
     (r"rumble\.com/", "rumble"),
     # Wikispooks
-    (r"wikispooks\.org/", "wikispooks"),
+    (r"wikispooks\.(org|com)/", "wikispooks"),
     # Books (direct upload by file extension)
     (r"\.(epub|pdf|mobi|azw3)$", "book"),
 ]

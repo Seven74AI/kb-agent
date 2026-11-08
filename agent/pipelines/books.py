@@ -124,6 +124,13 @@ def _read_book_classify_manifest(config: Config, task: dict) -> dict:
         ) from e
 
 
+def _classify_payload_visible_summary(payload: dict) -> dict:
+    """Scrub machine-local book paths from durable task_steps.output (manifest keeps paths)."""
+    books = payload.get("books") or []
+    visible_books = [{k: v for k, v in book.items() if k != "path"} for book in books]
+    return {**payload, "books": visible_books}
+
+
 def _sanitize_subprocess_failure(text: str, *, max_len: int = 200) -> str:
     """Scrub tool stdout/stderr before it is embedded in StepError messages."""
     cleaned = sanitize_visible_message(redact_http_urls_in_text(text.strip()))
@@ -146,7 +153,7 @@ def step_megadl_download(task: dict, config: Config) -> str:
         config: Config dataclass.
 
     Returns:
-        JSON string with archive_path, file_count, and file list.
+        JSON string with file_count and filename list (no host paths).
 
     Raises:
         StepError: On download failure (PAUSE — retry won't help without
@@ -259,13 +266,11 @@ def step_megadl_download(task: dict, config: Config) -> str:
                 step_name="megadl_download",
             )
 
-        # Build result
-        result_data = {
-            "archive_path": str(dl_dir),
+        # Durable output: counts + filenames only (files live under dl_dir on disk).
+        visible = {
             "file_count": len(book_files),
             "books": [
                 {
-                    "path": str(bf),
                     "filename": bf.name,
                     "extension": bf.suffix.lower(),
                     "size_bytes": bf.stat().st_size,
@@ -274,7 +279,7 @@ def step_megadl_download(task: dict, config: Config) -> str:
             ],
         }
 
-        return json.dumps(result_data)
+        return json.dumps(visible)
 
     except StepError:
         raise
@@ -367,7 +372,7 @@ def step_classify_content(task: dict, config: Config) -> str:
         "books": classified,
     }
     _write_book_classify_manifest(config, task, payload)
-    return json.dumps(payload)
+    return json.dumps(_classify_payload_visible_summary(payload))
 
 
 def _book_child_slug(parent_slug: str, file_path: str) -> str:
