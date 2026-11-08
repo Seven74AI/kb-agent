@@ -46,6 +46,7 @@ from agent.pipelines.video_common import (
     _artifact_stem,
     _slug_path,
     ensure_h264,
+    resolve_artifact_stem,
     format_transcript_for_llm,
     merge_speaker_labels,
     run_threads_video_quality_gate,
@@ -104,13 +105,6 @@ MUSIC_ONLY_CHAR_THRESHOLD = 50
 
 # Hard cap for carousel slides (Playwright alt text extraction)
 CAROUSEL_SLIDE_CAP = 2
-
-
-def _download_artifact_stem(task: dict) -> str:
-    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    from agent.pipelines.video_common import _artifact_stem
-
-    return _artifact_stem(task)
 
 
 def _carousel_meta_path(config: Config, task: dict) -> Path:
@@ -264,7 +258,7 @@ def step_ig_reel_download(task: dict, config: Config) -> str:
     from agent.pipelines.video_common import instagram_reel_ytdlp_output
 
     url = task["source_url"]
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     batch = task.get("_batch_ingest")
     output_path, ytdlp_out, glob_pattern = instagram_reel_ytdlp_output(task, config)
 

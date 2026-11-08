@@ -18,9 +18,8 @@ from agent.exceptions import ErrorType, StepError
 from agent.pipelines.see_also import _see_also_link_count, step_see_also
 from agent.pipelines.instagram import step_ig_reel_merge
 from agent.pipelines.threads import step_threads_merge
-from agent.pipelines.video_common import _artifact_stem, _slug_path
+from agent.pipelines.video_common import _artifact_stem, _slug_path, resolve_artifact_stem
 from agent.pipelines.youtube import (
-    _download_artifact_stem,
     step_merge_and_identify,
     step_minio_upload,
 )
@@ -269,11 +268,11 @@ def test_resynthesize_logs_when_raw_source_missing(tmp_path, config, caplog):
 def test_artifact_stem_batch_uses_ingest_id_and_resolve_slug_otherwise():
     tid = "ingest-batch-uuid"
     task_batch = {"id": tid, "slug": "foo/bar", "_batch_ingest": True}
+    assert resolve_artifact_stem(task_batch) == tid
     assert _artifact_stem(task_batch) == tid
-    assert _download_artifact_stem(task_batch) == tid
     task = {"id": tid, "slug": "foo/bar?"}
+    assert resolve_artifact_stem(task) == "foo_bar_"
     assert _artifact_stem(task) == "foo_bar_"
-    assert _download_artifact_stem(task) == "foo_bar_"
 
 
 def test_merge_and_identify_uses_artifact_stem_paths(config, tmp_path):

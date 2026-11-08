@@ -124,13 +124,6 @@ def _assert_threads_video_cdn_url_allowed(url: str) -> None:
         ) from exc
 
 
-def _download_artifact_stem(task: dict) -> str:
-    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    from agent.pipelines.video_common import _artifact_stem
-
-    return _artifact_stem(task)
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> str:

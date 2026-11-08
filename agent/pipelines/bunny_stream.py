@@ -19,7 +19,7 @@ from agent.redact import redact_http_urls_in_text, url_for_display, write_vault_
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import _artifact_stem, _find_video_file
+from agent.pipelines.video_common import _artifact_stem, _find_video_file, resolve_artifact_stem
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -43,11 +43,6 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 BUNNY_REFERER = "Referer: https://player.mediadelivery.net/"
-
-
-def _download_artifact_stem(task: dict) -> str:
-    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    return _artifact_stem(task)
 
 
 BUNNY_UUID_RE = re.compile(
@@ -226,7 +221,7 @@ def _resolve_cdn_base(embed_url: str, video_uuid: str) -> str:
 def step_extract_metadata(task: dict, config: Config) -> str:
     """Extract basic metadata from the terragrandir detail page."""
     slug = task.get("slug", task["id"][:8])
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     source_url = task["source_url"]
 
     title = slug.replace("-", " ").title()
@@ -262,7 +257,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
 
 def step_download_video(task: dict, config: Config) -> str:
     """Download Bunny Stream video (MP4 preferred, HLS fallback)."""
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     source_url = task["source_url"]
     output_path = Path(config.temp_dir) / f"{stem}.mp4"
 

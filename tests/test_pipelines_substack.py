@@ -15,7 +15,7 @@ sys.path.insert(0, str(WORKSPACE))
 from agent.config import Config
 from agent.detection import _detect_substack_subtype
 from agent.exceptions import ErrorType, StepError
-from agent.pipelines.video_common import _find_video_file
+from agent.pipelines.video_common import _find_video_file, resolve_artifact_stem
 from agent.pipelines.web import (
     step_substack_cleanup,
     step_substack_embedded_media,
@@ -25,7 +25,6 @@ from agent.pipelines.web import (
     _extract_body_images,
     _extract_native_video_ids,
     _resolve_native_video_id,
-    _ingest_download_stem,
     step_substack_video_download,
     _extract_rumble_urls,
     _extract_youtube_ids,
@@ -519,11 +518,11 @@ class TestSubstackVideoMetadata:
         assert not (config.temp_dir / f"{slug}_metadata.json").exists()
         assert not (config.temp_dir / f"{slug}.mp4").exists()
 
-    def test_ingest_download_stem_batch_vs_consumer(self, task_dict):
+    def test_resolve_artifact_stem_substack_video_batch_vs_consumer(self, task_dict):
         consumer = dict(task_dict)
         batch = {**task_dict, "id": "ingest-abc", "_batch_ingest": True}
-        assert _ingest_download_stem(consumer) == consumer["slug"]
-        assert _ingest_download_stem(batch) == "ingest-abc"
+        assert resolve_artifact_stem(consumer) == consumer["slug"]
+        assert resolve_artifact_stem(batch) == "ingest-abc"
 
     @patch("agent.pipelines.web.ensure_h264", side_effect=lambda p: p)
     @patch("agent.pipelines.web.subprocess.run")

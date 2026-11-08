@@ -1,24 +1,19 @@
 """Read vault notes by slug."""
 
-import re
 from pathlib import Path
 
 from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
-from agent.core.slugify import SLUG_MAX_LEN
+from agent.core.slugify import slug_path
 from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
 
 def _vault_folder(content_type: str) -> str:
     return CONTENT_TYPE_FOLDERS.get(content_type, "articles")
 
 
-def _slug_path(slug: str) -> str:
-    return re.sub(r'[<>:"/\\|?*=&]', "_", slug)[:SLUG_MAX_LEN]
-
-
 def _note_candidates(slug: str, vault_path: Path, content_type: str | None) -> list[Path]:
     """Build ordered candidate paths for a note slug."""
     knowledge = vault_path / "Knowledge base"
-    safe = _slug_path(slug)
+    safe = slug_path(slug)
     candidates: list[Path] = []
 
     if content_type:

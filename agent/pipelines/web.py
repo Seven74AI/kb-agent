@@ -40,7 +40,7 @@ from agent.archival import step_minio_upload as archival_minio_upload
 from agent.archival import step_git_push as archival_git_push
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import _resolve_slug, ensure_h264
+from agent.pipelines.video_common import ensure_h264, resolve_artifact_stem
 from agent.pipelines.youtube import (
     step_cleanup_temp as _yt_cleanup_temp,
     step_diarize as _yt_diarize,
@@ -122,17 +122,6 @@ def step_substack_cleanup(task: dict, config: Config) -> str:
     return "cleaned"
 
 
-def _ingest_download_stem(task: dict) -> str:
-    """Temp-dir stem for substack_video download/metadata (matches later pipeline steps).
-
-    Consumer path names artifacts by slug so ``_find_video_file`` / extract_audio find them;
-    ingest id only when ``_batch_ingest`` (embedded siblings share a parent slug).
-    """
-    if task.get("_batch_ingest"):
-        return task["id"]
-    return _resolve_slug(task)
-
-
 # SSRF curl policy (web.py): ``--max-redirs 0`` on first-party Substack fetches whose
 # URL is validated up-front and must not chain off-origin (post HTML for metadata /
 # embedded-media discovery). The ``/api/v1/video/upload/<id>/src?type=mp4`` endpoint is
@@ -210,7 +199,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
     as ``videoUpload.id``. The Substack cookie is only needed for PAYWALLED
     posts (to see the id at all).
     """
-    stem = _ingest_download_stem(task)
+    stem = resolve_artifact_stem(task)
     url = task["source_url"]
     _assert_fetch_url_allowed(url)
     domain = _netloc_without_userinfo(urlparse(url))
@@ -254,7 +243,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
 
 def step_substack_video_download(task: dict, config: Config) -> str:
     """Download native video via the public ``/api/v1/video/upload/<id>/src`` endpoint."""
-    stem = _ingest_download_stem(task)
+    stem = resolve_artifact_stem(task)
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if not meta_path.exists():
         raise StepError(

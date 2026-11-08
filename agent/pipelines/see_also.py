@@ -13,7 +13,7 @@ from pathlib import Path
 from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.config import Config
 from agent.llm import get_llm_client
-from agent.pipelines.video_common import _slug_path
+from agent.core.slugify import slug_path
 from agent.redact import write_vault_note
 
 
@@ -45,7 +45,7 @@ def step_see_also(task: dict, config: Config) -> str:
 
     folder = _get_folder(content_type)
     # Match synthesis / MinIO / IG+Threads vault writes: filesystem-safe slug first.
-    safe_slug = _slug_path(slug)
+    safe_slug = slug_path(slug)
     note_path = config.vault_path / "Knowledge base" / folder / f"{safe_slug}.md"
     if not note_path.exists():
         legacy_path = config.vault_path / "Knowledge base" / folder / f"{slug}.md"

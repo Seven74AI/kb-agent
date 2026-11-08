@@ -26,7 +26,7 @@ from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import _artifact_stem, ensure_h264
+from agent.pipelines.video_common import _artifact_stem, ensure_h264, resolve_artifact_stem
 from agent.redact import redact_http_urls_in_text, url_for_display
 from agent.pipelines.youtube import (
     step_cleanup_temp,
@@ -46,11 +46,6 @@ MAX_HEIGHT = 720
 RUMBLE_METADATA_MAX_AGE_SEC = 6 * 3600
 
 _RUMBLE_CDN_HOST_SUFFIXES = (".cdn.rumble.cloud", ".rumble.com")
-
-
-def _download_artifact_stem(task: dict) -> str:
-    """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    return _artifact_stem(task)
 
 
 def _assert_rumble_cdn_url_allowed(url: str) -> None:
@@ -184,7 +179,7 @@ def _merge_resolved_format_urls(sidecar: list[dict], resolved: list[dict]) -> li
 
 def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
     """Use cached ``{stem}_metadata.json`` from extract_metadata when still fresh."""
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     source_url = task["source_url"]
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if meta_path.exists():
@@ -217,7 +212,7 @@ def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
 
 def step_rumble_extract_metadata(task: dict, config: Config) -> str:
     """Resolve title + formats and write ``{stem}_metadata.json``."""
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     title, formats = resolve_rumble(task["source_url"])
     title = redact_http_urls_in_text(title)
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
@@ -238,7 +233,7 @@ def step_rumble_extract_metadata(task: dict, config: Config) -> str:
 
 def step_rumble_download_video(task: dict, config: Config) -> str:
     """Resolve + download the ≤720p mp4 from the un-gated CDN, normalize to H.264."""
-    stem = _download_artifact_stem(task)
+    stem = resolve_artifact_stem(task)
     output_path = Path(config.temp_dir) / f"{stem}.mp4"
 
     formats = _load_rumble_formats(task, config)

@@ -8,6 +8,14 @@ from urllib.parse import urlparse, urlunparse
 # limit, round power-of-two, enough headroom that long paths don't collide.
 SLUG_MAX_LEN = 128
 
+_SLUG_PATH_UNSAFE = re.compile(r'[<>:"/\\|?*=&]')
+
+
+def slug_path(slug: str) -> str:
+    """Convert a slug to a filesystem-safe path segment (sanitized, length-capped)."""
+    return _SLUG_PATH_UNSAFE.sub("_", slug)[:SLUG_MAX_LEN]
+
+
 _YOUTUBE_V_PARAM = re.compile(r"[?&]v=([A-Za-z0-9_-]{11})")
 _COMMENT_ID_PARAM = re.compile(r"[?&]comment_id=([A-Za-z0-9_-]+)")
 _YOUTUBE_PATH_ID = re.compile(
