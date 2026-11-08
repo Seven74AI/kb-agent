@@ -30,7 +30,8 @@ from agent.core.submit import submit_url as core_submit_url
 from agent.core.submit import submit_ingest as core_submit_ingest
 from agent.core.batch_lock import is_locked
 from agent.core.watch_source import register_watch_source, submit_routed
-from agent.db import _persist_visible_error, list_ingest_by_status
+from agent.db import list_ingest_by_status
+from agent.notify import scrub_outbound_visible_message
 from agent.mcp.db import open_agent_conn, open_logs_conn
 from agent.webhook import (
     _TOKEN_NOT_CONFIGURED_MSG,
@@ -76,7 +77,7 @@ def agent_relative_path(path: Path, agent_dir: Path) -> str:
 
 def _sanitize_exception_message(message: str) -> str:
     """Scrub paths and credential-shaped text before returning tool errors."""
-    scrubbed = _persist_visible_error(message)
+    scrubbed = scrub_outbound_visible_message(message)
     if len(scrubbed) > _MAX_CLIENT_ERROR_LEN:
         scrubbed = scrubbed[: _MAX_CLIENT_ERROR_LEN - 3] + "..."
     return scrubbed
