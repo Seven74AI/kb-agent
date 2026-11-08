@@ -17,6 +17,7 @@ from agent.pipelines.instagram import (
     step_ig_comment_fetch,
 )
 from agent.pipelines.rumble import step_rumble_extract_metadata
+from agent.pipelines.web import step_substack_video_extract_metadata
 from agent.pipelines.threads import step_threads_detect, step_threads_extract_text
 from agent.redact import url_for_display
 import scripts.batch_ingest as batch_ingest
@@ -96,6 +97,31 @@ def test_bunny_metadata_sidecar_redacts_title_urls(mock_curl, sidecar_config):
     _assert_sidecar_has_no_sensitive_url_strings(data)
     assert "token=secret" not in data["title"]
     assert data["title"].startswith("Watch https://cdn.example.com/v.mp4")
+
+
+@patch("agent.pipelines.web.subprocess.run")
+def test_substack_video_metadata_sidecar_redacts_title_urls(mock_run, sidecar_config):
+    vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+    mock_run.return_value = MagicMock(
+        returncode=0,
+        stdout=(
+            "<title>Vlog https://substackcdn.com/clips/x.mp4?sig=SECRET</title>"
+            f'<script>"videoUpload":{{"id":"{vid}"}}</script>'
+        ),
+    )
+    task = {
+        "id": "ss-vid-1",
+        "slug": "substack_video_slug",
+        "source_url": "https://testblog.substack.com/p/vlog",
+        "content_type": "substack_video",
+    }
+    step_substack_video_extract_metadata(task, sidecar_config)
+    meta_path = sidecar_config.temp_dir / "substack_video_slug_metadata.json"
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert "sig=SECRET" not in data["title"]
+    assert data["title"].startswith("Vlog https://substackcdn.com/clips/x.mp4")
+    assert data["video_id"] == vid
 
 
 @patch("agent.pipelines.bunny_stream._curl_page", return_value="<html><h1>Talk</h1></html>")

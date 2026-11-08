@@ -28,6 +28,7 @@ from agent.db import (
     get_task_steps,
     init_db,
     is_deferred_media_pause,
+    task_in_deferred_media_cycle,
     queue_ingest,
     recover_failed_media,
     recover_stale_ingest,
@@ -360,10 +361,53 @@ def test_get_next_step_does_not_skip_paused_synthesize_deferral(tmp_path, pause_
         "deferred synthesis paused — sibling media still pending",
         "deferred synthesis paused — parent media not complete at execute time",
         "deferred synthesis dispatch failed: unknown content_type",
+        "unsupported embed: instagram",
+        "unsupported embed: tiktok",
     ],
 )
 def test_is_deferred_media_pause_execute_gate_synthesis(pause_reason):
     assert is_deferred_media_pause(pause_reason)
+
+
+def test_task_in_deferred_media_cycle_unsupported_embed(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = "unsupported embed: instagram"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note", "quality_gate"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.commit()
+    assert task_in_deferred_media_cycle(conn, task_id, error=pause_reason)
+
+
+def test_resume_unsupported_embed_denies_bulk_resume(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = "unsupported embed: instagram"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note", "quality_gate"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.commit()
+    assert resume_tasks_by_reason(conn, "%unsupported%") == 0
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "paused"
 
 
 def test_is_deferred_media_pause_media_gate_mismatch():

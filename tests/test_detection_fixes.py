@@ -398,7 +398,13 @@ def test_flaresolverr_health_curl_disables_redirects(monkeypatch):
     assert any("localhost:8191" in str(part) for part in cmd)
 
 
-def test_firecrawl_health_curl_loopback_disables_redirects(monkeypatch):
+def test_firecrawl_health_curl_loopback_disables_redirects(monkeypatch, tmp_path):
+    cfg = Config(
+        kb_agent_dir=tmp_path,
+        vault_path=tmp_path / "vault",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
     captured: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
@@ -411,15 +417,54 @@ def test_firecrawl_health_curl_loopback_disables_redirects(monkeypatch):
     cmd = captured[0]
     assert "--max-redirs" in cmd
     assert cmd[cmd.index("--max-redirs") + 1] == "0"
-    assert "http://localhost:3002/v2/scrape" in cmd
-    assert not any(
-        str(part).startswith("http://") and "localhost" not in str(part)
-        for part in cmd
-    )
+    assert cfg.firecrawl_url in cmd
+
+
+def test_firecrawl_health_uses_config_firecrawl_url_not_hardcoded(
+    monkeypatch, tmp_path,
+):
+    custom = "http://firecrawl.svc.internal:3999/v2/scrape"
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", firecrawl_url=custom)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = _check_firecrawl()
+    assert ok is True
+    assert reason == ""
+    assert custom in captured[0]
+
+
+def test_firecrawl_health_unhealthy_when_configured_endpoint_down(
+    monkeypatch, tmp_path,
+):
+    custom = "http://firecrawl.svc.internal:3999/v2/scrape"
+    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", firecrawl_url=custom)
+    monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 7, stdout="", stderr="")
+
+    monkeypatch.setattr("agent.detection.subprocess.run", fake_run)
+    ok, reason = _check_firecrawl()
+    assert ok is False
+    assert "Firecrawl unreachable" in reason
+    assert custom in captured[0]
 
 
 def test_preflight_web_firecrawl_curl_invariant(monkeypatch, tmp_path):
-    cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault")
+    custom = "http://firecrawl.prod.example/v2/scrape"
+    cfg = Config(
+        kb_agent_dir=tmp_path,
+        vault_path=tmp_path / "vault",
+        firecrawl_url=custom,
+    )
     monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
     captured: list[list[str]] = []
 
@@ -434,6 +479,7 @@ def test_preflight_web_firecrawl_curl_invariant(monkeypatch, tmp_path):
     cmd = captured[0]
     assert "--max-redirs" in cmd
     assert cmd[cmd.index("--max-redirs") + 1] == "0"
+    assert custom in cmd
 
 
 def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):
