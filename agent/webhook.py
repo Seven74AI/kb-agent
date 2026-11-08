@@ -222,6 +222,13 @@ ALLOWED_COOKIE_FILES = {
 MAX_COOKIE_UPLOAD_BYTES = 1 * 1024 * 1024
 
 
+def _netscape_cookie_value_unsafe(value: str) -> bool:
+    """True when a cookie value must not be stored (curl/shell delimiter risk)."""
+    if '"' in value:
+        return True
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
 def _netscape_cookie_upload_error(payload: bytes) -> str | None:
     """Return a client error message when cookie bytes are invalid, else None."""
     if len(payload) > MAX_COOKIE_UPLOAD_BYTES:
@@ -242,6 +249,15 @@ def _netscape_cookie_upload_error(payload: bytes) -> str | None:
         or header.startswith("# http cookie file")
     ):
         return "cookie file must be Netscape HTTP Cookie File format"
+    for ln in non_empty[1:]:
+        stripped = ln.strip()
+        if stripped.startswith("#"):
+            continue
+        parts = ln.split("\t")
+        if len(parts) < 7:
+            return "cookie file line must have 7 tab-separated fields"
+        if _netscape_cookie_value_unsafe(parts[6]):
+            return "cookie value contains disallowed characters"
     return None
 
 

@@ -21,6 +21,14 @@ ExpandPlaylistFn = Callable[[str], list[str]]
 SubmitFn = Callable[[str, Config, sqlite3.Connection], dict]
 
 
+class PlaylistExpandError(Exception):
+    """Raised when yt-dlp cannot expand a playlist (network, auth, tool failure)."""
+
+    def __init__(self, message: str, *, exit_code: int | None = None):
+        self.exit_code = exit_code
+        super().__init__(message)
+
+
 def expand_youtube_playlist(playlist_url: str) -> list[str]:
     """Return watch URLs for entries in a YouTube playlist (flat extract, no download)."""
     playlist_url = (playlist_url or "").strip()
@@ -40,10 +48,16 @@ def expand_youtube_playlist(playlist_url: str) -> list[str]:
             text=True,
             timeout=120,
         )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
+    except subprocess.TimeoutExpired:
+        raise PlaylistExpandError("playlist expansion timed out") from None
+    except OSError as exc:
+        raise PlaylistExpandError(f"playlist expansion failed: {exc}") from exc
     if proc.returncode != 0:
-        return []
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        msg = f"playlist expansion failed (exit {proc.returncode})"
+        if detail:
+            msg = f"{msg}: {detail}"
+        raise PlaylistExpandError(msg, exit_code=proc.returncode)
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
@@ -106,7 +120,16 @@ def ingest_playlist(
             "count": 0,
             "results": [],
         }
-    urls = expand(playlist_url)
+    try:
+        urls = expand(playlist_url)
+    except PlaylistExpandError as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "playlist_url": url_for_display(playlist_url),
+            "count": 0,
+            "results": [],
+        }
     if not urls:
         return {
             "status": "error",

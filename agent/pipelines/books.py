@@ -579,6 +579,12 @@ def _resolve_local_book_path(
             if f.suffix.lower() in extensions and "__MACOSX" not in str(f)
         ]
         if matches:
+            slug_lower = slug.lower()
+            slug_matches = [
+                f for f in matches if slug_lower in f.name.lower()
+            ]
+            if slug_matches:
+                return sorted(slug_matches, key=lambda f: f.name)[0]
             return sorted(matches, key=lambda f: f.name)[0]
 
     raise StepError(

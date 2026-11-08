@@ -13,6 +13,34 @@ from agent.notify import redact_credential_shapes
 
 _ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
 
+_HTTP_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
+
+
+def redact_llm_archive_text_content(text: str) -> str:
+    """Scrub LLM archive bodies: display-safe URLs survive path/credential sanitization."""
+    placeholders: list[str] = []
+
+    def shield(match: re.Match[str]) -> str:
+        placeholders.append(url_for_display(match.group(0)))
+        return f"__KB_ARCHIVE_URL_{len(placeholders) - 1}__"
+
+    shielded = _HTTP_URL_IN_TEXT.sub(shield, text or "")
+    from agent.notify import sanitize_visible_message
+
+    cleaned = sanitize_visible_message(shielded)
+    for index, safe in enumerate(placeholders):
+        cleaned = cleaned.replace(f"__KB_ARCHIVE_URL_{index}__", safe)
+    return cleaned
+
+
+def redact_http_urls_in_text(text: str) -> str:
+    """Replace http(s) URLs in free text with display-safe forms (no query/fragment)."""
+
+    def repl(match: re.Match[str]) -> str:
+        return url_for_display(match.group(0))
+
+    return _HTTP_URL_IN_TEXT.sub(repl, text or "")
+
 
 def url_for_display(url: str) -> str:
     """Return a URL safe for dashboard/MCP/JSON/logs: no query or fragment on http(s).

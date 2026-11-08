@@ -25,7 +25,7 @@ from agent.core import (
     slugify,
     submit_url,
 )
-from agent.core.bulk import expand_youtube_playlist
+from agent.core.bulk import PlaylistExpandError, expand_youtube_playlist
 from agent.core.resume import ResumeReasonError
 from agent.core.submit import plan_submission, submit_ingest, submit_plan
 from agent.detection import ContentSubtypeDetection
@@ -401,6 +401,28 @@ def test_expand_youtube_playlist_rejects_private_host_url(mock_run):
     mock_run.assert_not_called()
 
 
+@patch("agent.core.bulk.subprocess.run")
+def test_expand_youtube_playlist_raises_on_nonzero_exit(mock_run):
+    import subprocess
+
+    mock_run.return_value = subprocess.CompletedProcess(
+        [], 1, stdout="", stderr="Sign in to confirm you're not a bot"
+    )
+    with pytest.raises(PlaylistExpandError, match="exit 1"):
+        expand_youtube_playlist("https://youtube.com/playlist?list=PLtest")
+
+
+def test_ingest_playlist_surfaces_expand_failure(monkeypatch, core_config, agent_conn):
+    def fail(_url):
+        raise PlaylistExpandError("playlist expansion timed out")
+
+    monkeypatch.setattr("agent.core.bulk.expand_youtube_playlist", fail)
+    result = ingest_playlist("https://youtube.com/playlist?list=PLx", core_config, agent_conn)
+    assert result["status"] == "error"
+    assert "timed out" in result["error"]
+    assert "no videos found" not in result["error"]
+
+
 def test_submit_url_health_pause(core_config, agent_conn, monkeypatch):
     monkeypatch.setattr(
         "agent.core.submit.preflight_health",
@@ -434,7 +456,8 @@ def test_archive_llm_call_redacts_paths_and_secrets_at_insert(logs_conn, monkeyp
         logs_conn,
         "task-1",
         "synthesis",
-        "read /root/secret/vault/note.md\napi_key=supersecret",
+        "read /root/secret/vault/note.md\napi_key=supersecret\n"
+        "SOURCE URL: https://cdn.example.com/v.mp4?token=archive-secret",
         "Bearer eyJhbG.token\n/home/user/out.txt",
         "test-model",
         tokens_in=1,
@@ -446,6 +469,8 @@ def test_archive_llm_call_redacts_paths_and_secrets_at_insert(logs_conn, monkeyp
     assert "/root/" not in row["prompt"]
     assert "supersecret" not in row["prompt"]
     assert "[credential redacted]" in row["prompt"]
+    assert "token=archive-secret" not in row["prompt"]
+    assert "https://cdn.example.com/v.mp4" in row["prompt"]
     assert "eyJhbG" not in row["response"]
     assert "[redacted]" in row["response"]
     assert "/home/" not in row["response"]

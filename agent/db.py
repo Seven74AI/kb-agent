@@ -694,8 +694,13 @@ def _is_superseded_parent_error(error: str | None) -> bool:
 
 
 def _deferral_cycle_cmp(deferral: dict) -> str:
-    """SQL comparison operator for deferral-generation freshness."""
-    return ">" if int(deferral.get("media_changed") or 0) else ">="
+    """SQL comparison operator for deferral-generation freshness.
+
+    Invariant: a task created at or after ``deferral.updated_at`` is never stale.
+    SQLite ``datetime('now')`` is second-resolution, so strict ``>`` would mark
+    same-second rows stale when ``media_changed`` is set.
+    """
+    return ">="
 
 
 def _deferral_terminal_parent_fresh(conn: sqlite3.Connection, slug: str, deferral: dict) -> bool:
@@ -835,7 +840,7 @@ def supersede_stale_deferral_synthesize_tasks(
             UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now')
             WHERE slug = ? AND content_type GLOB '*_synthesize'
             AND status IN ('pending', 'in_progress', 'paused', 'done', 'completed')
-            AND datetime(updated_at) <= datetime(?)
+            AND datetime(updated_at) < datetime(?)
             """,
             ("superseded by deferral media cycle", slug, anchor),
         )
@@ -993,6 +998,8 @@ def has_completed_parent_synthesis(
         deferral = get_parent_media_deferral(conn, slug)
 
         if deferral is not None:
+            if int(deferral.get("media_changed") or 0):
+                return False
             media_anchor = _deferral_media_landing_anchor(conn, slug, deferral)
             if _deferral_synthesize_terminal_fresh(conn, slug, deferral):
                 return True
@@ -1005,8 +1012,6 @@ def has_completed_parent_synthesis(
                 return False
             note = vault_path / "Knowledge base" / "articles" / f"{slug}.md"
             if not note.is_file():
-                return False
-            if int(deferral.get("media_changed") or 0):
                 return False
             if _parent_terminal_after_anchor(conn, slug, media_anchor):
                 return True
@@ -1782,9 +1787,9 @@ def redact_llm_archive_text(text: str, *, store_raw: bool | None = None) -> str:
     """Scrub paths and token-shaped secrets before persisting llm_archives rows."""
     if store_raw if store_raw is not None else llm_archive_store_raw():
         return text or ""
-    from agent.notify import sanitize_visible_message
+    from agent.redact import redact_llm_archive_text_content
 
-    return sanitize_visible_message(text or "")
+    return redact_llm_archive_text_content(text or "")
 
 
 def archive_llm_call(conn: sqlite3.Connection, task_id: str, role: str,

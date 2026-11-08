@@ -7,7 +7,7 @@ import pytest
 from agent.config import Config
 from agent.core.bulk import ingest_playlist
 from agent.core.redact import url_for_display
-from agent.redact import scrub_vault_note_content
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
 from agent.core.status import get_task, list_tasks
 from agent.core.submit import plan_submission
 from agent.detection import ContentSubtypeDetection
@@ -50,6 +50,13 @@ def test_url_for_display_strips_query_params():
 
 def test_url_for_display_preserves_plain_path():
     assert url_for_display(PLAIN) == PLAIN
+
+
+def test_redact_http_urls_in_text_strips_query():
+    text = f"SOURCE URL: {TOKENIZED}\nbody"
+    redacted = redact_http_urls_in_text(text)
+    assert "token=secret" not in redacted
+    assert "https://cdn.example.com/video.mp4" in redacted
 
 
 def test_scrub_vault_note_content_redacts_frontmatter_only():
