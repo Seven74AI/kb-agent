@@ -56,3 +56,9 @@ def test_ocr_error_json_scrubs_paths_and_credentials(tmp_path):
     out.write_text(json.dumps(doc), encoding="utf-8")
     loaded = json.loads(out.read_text(encoding="utf-8"))
     assert "/home/ubuntu" not in loaded["error"]
+
+
+def test_kb_ocr_success_path_wires_prepare_ocr_reading_for_write():
+    text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
+    assert "prepare_ocr_reading_for_write" in text
+    assert "redact_http_urls_in_text(r" not in text

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
 from agent.detection import _classify_mega_filenames
-from agent.db import AGENT_SCHEMA, create_task, init_db
+from agent.db import AGENT_SCHEMA, create_task, init_db, update_step
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines.books import (
     CLASSIFY_BOOK_PIPELINES,
@@ -31,6 +31,8 @@ from agent.pipelines.books import (
     step_extract_mobi,
     step_extract_pdf_degraded,
     step_extract_pdf_scanned,
+    _book_classify_manifest_path,
+    _write_book_classify_manifest,
     step_classify_content,
     step_delegate_books,
     step_book_quality_gate,
@@ -46,6 +48,11 @@ from agent.pipelines.books import (
     CHARS_PER_TOKEN,
 )
 from agent.quality import quality_gate_book
+
+
+def _seed_classify_manifest(config, task: dict, classify_json: str) -> None:
+    """Mirror classify step: manifest holds machine-readable paths (scrub-exempt)."""
+    _write_book_classify_manifest(config, task, json.loads(classify_json))
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -1119,6 +1126,53 @@ class TestDelegateBooks:
         conn.close()
         assert {r[0] for r in rows} == {"book_mobi", "book_scanned"}
 
+    def test_delegate_reads_manifest_after_classify_output_scrubbed(
+        self, config, mega_task, tmp_path,
+    ):
+        """Invariant: delegate uses scrub-exempt manifest, not task_steps.output paths."""
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        epub = dl_dir / "scrub-proof.epub"
+        epub.write_text("epub", encoding="utf-8")
+
+        classify_json = step_classify_content(mega_task, config)
+        manifest = _book_classify_manifest_path(config, mega_task)
+        assert manifest.is_file()
+        assert str(epub) in manifest.read_text(encoding="utf-8")
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        step_id = conn.execute(
+            "SELECT id FROM task_steps WHERE task_id = ? AND name = 'classify_content'",
+            (parent_id,),
+        ).fetchone()[0]
+        update_step(conn, step_id, "done", classify_json)
+        scrubbed = conn.execute(
+            "SELECT output FROM task_steps WHERE id = ?", (step_id,),
+        ).fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        assert "[path]" in scrubbed
+        assert str(epub) not in scrubbed
+
+        mega_task["id"] = parent_id
+        result = json.loads(step_delegate_books(mega_task, config))
+        assert result["child_tasks_created"] == 1
+        assert result["created"][0]["path"] == str(epub)
+
     def test_delegate_retry_does_not_duplicate_child_tasks(self, config, mega_task, tmp_path):
         """Re-running delegate after partial completion must not create duplicate child owners."""
         kb_dir = tmp_path / "kb"
@@ -1220,6 +1274,7 @@ class TestDelegateBooks:
         conn.close()
 
         mega_task["id"] = parent_id
+        _seed_classify_manifest(config, mega_task, classify_json)
         result = json.loads(step_delegate_books(mega_task, config))
         assert result["child_tasks_created"] == 1
         assert result["created"][0]["task_id"] == failed_id
@@ -1295,6 +1350,7 @@ class TestDelegateBooks:
         conn.close()
 
         mega_task["id"] = parent_id
+        _seed_classify_manifest(config, mega_task, classify_v1)
         json.loads(step_delegate_books(mega_task, config))
 
         conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
@@ -1312,6 +1368,7 @@ class TestDelegateBooks:
         conn.commit()
         conn.close()
 
+        _seed_classify_manifest(config, mega_task, classify_v2)
         json.loads(step_delegate_books(mega_task, config))
         conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
         row = conn.execute(
@@ -1412,6 +1469,7 @@ class TestMegadlZeroArtifacts:
         conn.close()
 
         mega_task["id"] = parent_id
+        _seed_classify_manifest(config, mega_task, classify_json)
         with pytest.raises(StepError) as excinfo:
             step_delegate_books(mega_task, config)
         assert excinfo.value.step_name == "delegate"

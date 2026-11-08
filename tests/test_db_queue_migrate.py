@@ -1141,6 +1141,59 @@ def test_retry_media_gate_preserves_embed_without_deferral_row(tmp_path):
     assert steps["synthesize_note"] == "pending"
 
 
+def test_retry_terminal_success_embed_rewinds_embed_step(tmp_path):
+    """Terminal-success embed must reset on retry so HTML re-parse can re-enqueue media."""
+    from agent.db import ensure_parent_media_deferral, task_in_deferred_media_cycle
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "terminal_embed_retry"
+    url = "https://blog.substack.com/p/terminal-embed"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    task_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    terminal_output = "media ready — deferred to batch"
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("batch synthesis dispatched or completed — parent must not re-enter synthesis", task_id),
+    )
+    conn.execute(
+        """
+        UPDATE task_steps SET status = 'done', output = ?
+        WHERE task_id = ? AND name IN ('substack_cleanup', 'substack_embedded_media')
+        """,
+        (f"cleaned\nmedia_deferred:{slug}", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET output = ? WHERE id = ?",
+        (terminal_output, embed_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    )
+    conn.commit()
+
+    assert task_in_deferred_media_cycle(conn, task_id, slug=slug, error=None)
+    assert retry_task(conn, task_id) is True
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (embed_id,),
+    ).fetchone()
+    assert embed[0] == "pending"
+    assert embed[1] is None
+
+
 def test_retry_failed_deferral_cycle_preserves_embed_step(tmp_path):
     from agent.db import ensure_parent_media_deferral
 
@@ -3742,6 +3795,26 @@ def _batch_test_config(tmp_path) -> Config:
     )
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     return config
+
+
+def test_parent_media_complete_fail_closed_without_raw_path(tmp_path):
+    from agent.db import ensure_parent_media_deferral, parent_media_complete, queue_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "db_only_no_raw"
+    ensure_parent_media_deferral(conn, parent, "https://blog.substack.com/p/x", "substack_text", 1)
+    ingest_id, _ = queue_ingest(
+        conn, "https://example.com/i.png", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', media_appended=1 WHERE id=?",
+        (ingest_id,),
+    )
+    conn.commit()
+    assert parent_media_complete(conn, parent, raw_path=None) is False
+    assert parent_media_complete(conn, parent, raw_path=None, allow_db_only=True) is True
 
 
 def test_parent_media_complete_rejects_marker_only_block(tmp_path):
