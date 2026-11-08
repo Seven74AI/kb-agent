@@ -200,3 +200,50 @@ def test_collect_abnormal_runs_unit():
     abnormal = send_morning_digest._collect_abnormal_runs(rows, now, stale_hours)
     ids = [r["id"] for r in abnormal]
     assert ids == [2, 3]
+
+
+def test_aggregate_crashed_null_summary_yields_synthetic_cause():
+    runs = [
+        {
+            "id": 9,
+            "status": "crashed",
+            "started_at": "2026-11-08 03:00:00",
+            "summary": None,
+            "failed": 1,
+            "total": 1,
+            "dispatched": 0,
+        },
+    ]
+    _, _, _, causes = send_morning_digest._aggregate_for_notify(runs)
+    assert len(causes) == 1
+    assert "batch run #9 crashed since 2026-11-08 03:00:00" == causes[0]
+
+
+def test_crashed_null_summary_digest_includes_cause(digest_db, tmp_path):
+    """Crashed batch_runs without summary still contribute a cause line."""
+    cutoff = "2026-11-07 08:00:00"
+    _insert_run(
+        digest_db,
+        started_at="2026-11-08 02:00:00",
+        finished_at="2026-11-08 02:05:00",
+        status="crashed",
+        total=2,
+        failed=2,
+        dispatched=0,
+        summary=None,
+    )
+    cfg = Config(kb_agent_dir=tmp_path)
+    fixed_now = datetime(2026, 11, 8, 8, 30, tzinfo=timezone.utc)
+
+    with (
+        patch.object(send_morning_digest, "load_config", return_value=cfg),
+        patch.object(send_morning_digest, "init_db", return_value=digest_db),
+        patch.object(send_morning_digest, "_since_morning", return_value=cutoff),
+        patch.object(send_morning_digest, "_utc_now", return_value=fixed_now),
+        patch.object(send_morning_digest, "notify_batch") as notify,
+    ):
+        send_morning_digest.main()
+
+    notify.assert_called_once()
+    causes = notify.call_args[1]["causes"]
+    assert any("crashed since" in c for c in causes)

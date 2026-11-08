@@ -354,6 +354,81 @@ class TestDeferredSynthesizeTags:
         )
         assert batch_ingest._parent_tags(conn, parent) == ["article-tag"]
 
+    def test_parent_tags_ingest_fallback_picks_oldest_sibling(self, conn):
+        import scripts.batch_ingest as batch_ingest
+
+        parent = "parent_ingest_tags_order"
+        older_id, _ = queue_ingest(
+            conn,
+            "https://example.com/old.png",
+            "substack_image",
+            "old-img",
+            parent_slug=parent,
+            tags=["keep-oldest"],
+        )
+        queue_ingest(
+            conn,
+            "https://example.com/new.png",
+            "substack_image",
+            "new-img",
+            parent_slug=parent,
+            tags=["ignore-newer"],
+        )
+        conn.execute(
+            "UPDATE ingest_queue SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            (older_id,),
+        )
+        conn.execute(
+            "UPDATE ingest_queue SET created_at = '2099-01-01 00:00:00' "
+            "WHERE parent_slug = ? AND id != ?",
+            (parent, older_id),
+        )
+        conn.commit()
+        assert batch_ingest._parent_tags(conn, parent) == ["keep-oldest"]
+
+    def test_dispatch_failure_merge_uses_oldest_parent_error(self, conn):
+        import scripts.batch_ingest as batch_ingest
+
+        slug = "multi_parent_slug"
+        url = "https://blog.substack.com/p/multi"
+        older_id = create_task(
+            conn,
+            url,
+            "substack_text",
+            slug,
+            ["substack_cleanup"],
+            status="paused",
+        )
+        newer_id = create_task(
+            conn,
+            url,
+            "substack_text",
+            slug,
+            ["substack_cleanup"],
+            status="paused",
+        )
+        conn.execute(
+            "UPDATE tasks SET error = 'oldest-pause-reason', created_at = '2020-01-01 00:00:00' "
+            "WHERE id = ?",
+            (older_id,),
+        )
+        conn.execute(
+            "UPDATE tasks SET error = 'newer-pause-reason', created_at = '2099-01-01 00:00:00' "
+            "WHERE id = ?",
+            (newer_id,),
+        )
+        conn.commit()
+        batch_ingest._record_parent_deferral_dispatch_failure(conn, slug, "dispatch timeout")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, error FROM tasks WHERE slug = ? ORDER BY created_at ASC",
+            (slug,),
+        ).fetchall()
+        for _id, error in rows:
+            assert "oldest-pause-reason" in (error or "")
+            assert "newer-pause-reason" not in (error or "")
+            assert "deferred synthesis dispatch failed" in (error or "")
+
     def test_dispatch_includes_parent_tags_from_task(self, tmp_path, monkeypatch, config, conn):
         import scripts.batch_ingest as batch_ingest
         from agent.db import ensure_parent_media_deferral

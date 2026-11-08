@@ -22,7 +22,9 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.notify import sanitize_visible_message
 from agent.redact import redact_http_urls_in_text, write_vault_note
+from agent.pipelines.video_common import _artifact_stem
 from agent.db import init_db, LOGS_SCHEMA
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
@@ -86,6 +88,19 @@ CLASSIFY_BOOK_PIPELINES = frozenset({
 _log = logging.getLogger(__name__)
 
 
+def _mega_download_dir(task: dict, config: Config) -> Path:
+    """Local megadl scratch dir — stem from ingest id under batch, else slug."""
+    return Path(config.temp_dir) / f"mega_{_artifact_stem(task)}"
+
+
+def _sanitize_subprocess_failure(text: str, *, max_len: int = 200) -> str:
+    """Scrub tool stdout/stderr before it is embedded in StepError messages."""
+    cleaned = sanitize_visible_message(redact_http_urls_in_text(text.strip()))
+    if max_len and len(cleaned) > max_len:
+        return cleaned[:max_len]
+    return cleaned
+
+
 # ── Mega.nz Download ──────────────────────────────────────────────────────────
 
 def step_megadl_download(task: dict, config: Config) -> str:
@@ -107,10 +122,9 @@ def step_megadl_download(task: dict, config: Config) -> str:
             credentials or URL fix).
     """
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
 
     # Determine download directory
-    dl_dir = Path(config.temp_dir) / f"mega_{slug}"
+    dl_dir = _mega_download_dir(task, config)
     if dl_dir.exists():
         shutil.rmtree(dl_dir)
     dl_dir.mkdir(parents=True, exist_ok=True)
@@ -131,8 +145,12 @@ def step_megadl_download(task: dict, config: Config) -> str:
             capture_output=True, text=True, timeout=600,  # 10 min for large files
         )
         if result.returncode != 0:
+            detail = _sanitize_subprocess_failure(
+                result.stderr or result.stdout or "megadl failed",
+                max_len=0,
+            )
             raise StepError(
-                f"megadl download failed: {result.stderr.strip()}",
+                f"megadl download failed: {detail}",
                 error_type=ErrorType.PAUSE,
                 step_name="megadl_download",
             )
@@ -159,9 +177,11 @@ def step_megadl_download(task: dict, config: Config) -> str:
                         capture_output=True, text=True, timeout=120,
                     )
                     if result.returncode != 0:
-                        detail = (result.stderr or result.stdout or "unzip failed").strip()
+                        detail = _sanitize_subprocess_failure(
+                            result.stderr or result.stdout or "unzip failed",
+                        )
                         raise StepError(
-                            f"failed to extract .zip archive {f.name}: {detail[:200]}",
+                            f"failed to extract .zip archive {f.name}: {detail}",
                             error_type=ErrorType.FAIL,
                             step_name="megadl_download",
                         )
@@ -171,9 +191,11 @@ def step_megadl_download(task: dict, config: Config) -> str:
                         capture_output=True, text=True, timeout=300,
                     )
                     if result.returncode != 0:
-                        detail = (result.stderr or result.stdout or "unar failed").strip()
+                        detail = _sanitize_subprocess_failure(
+                            result.stderr or result.stdout or "unar failed",
+                        )
                         raise StepError(
-                            f"failed to extract .rar archive {f.name}: {detail[:200]}",
+                            f"failed to extract .rar archive {f.name}: {detail}",
                             error_type=ErrorType.FAIL,
                             step_name="megadl_download",
                         )
@@ -183,9 +205,11 @@ def step_megadl_download(task: dict, config: Config) -> str:
                         capture_output=True, text=True, timeout=300,
                     )
                     if result.returncode != 0:
-                        detail = (result.stderr or result.stdout or "7z failed").strip()
+                        detail = _sanitize_subprocess_failure(
+                            result.stderr or result.stdout or "7z failed",
+                        )
                         raise StepError(
-                            f"failed to extract .7z archive {f.name}: {detail[:200]}",
+                            f"failed to extract .7z archive {f.name}: {detail}",
                             error_type=ErrorType.FAIL,
                             step_name="megadl_download",
                         )
@@ -225,7 +249,7 @@ def step_megadl_download(task: dict, config: Config) -> str:
         raise
     except Exception as e:
         raise StepError(
-            f"megadl download error: {e}",
+            f"megadl download error: {_sanitize_subprocess_failure(str(e), max_len=0)}",
             error_type=ErrorType.PAUSE,
             step_name="megadl_download",
         ) from e
@@ -250,10 +274,8 @@ def step_classify_content(task: dict, config: Config) -> str:
     Returns:
         JSON string with classification results.
     """
-    slug = task.get("slug", task["id"][:8])
-
     # Try to get the download result
-    dl_dir = Path(config.temp_dir) / f"mega_{slug}"
+    dl_dir = _mega_download_dir(task, config)
     if not dl_dir.exists():
         raise StepError(
             f"Download directory not found: {dl_dir}",
@@ -518,8 +540,8 @@ def _resolve_local_book_path(
     """Resolve a local book file for child or batch mega tasks.
 
     Prefer ``task['source_url']`` when it is an existing local path (delegated
-    mega children). Fall back to ``mega_{slug}`` only when that directory exists
-    (batch/parent download layout).
+    mega children). Fall back to ``mega_{artifact_stem}`` when that directory
+    exists (batch/parent download layout).
     """
     source = (task.get("source_url") or "").strip()
     if source:
@@ -528,7 +550,7 @@ def _resolve_local_book_path(
             return src_path
 
     slug = task.get("slug", task["id"][:8])
-    dl_dir = Path(config.temp_dir) / f"mega_{slug}"
+    dl_dir = _mega_download_dir(task, config)
     if dl_dir.is_dir():
         matches = [
             f for f in dl_dir.rglob("*")
@@ -903,8 +925,11 @@ def step_extract_mobi(task: dict, config: Config) -> str:
             timeout=600,
         )
         if result.returncode != 0:
+            detail = _sanitize_subprocess_failure(
+                result.stderr or result.stdout or "ebook-convert failed",
+            )
             raise StepError(
-                f"ebook-convert failed: {result.stderr.strip() or result.stdout.strip()}",
+                f"ebook-convert failed: {detail}",
                 error_type=ErrorType.FAIL,
                 step_name="extract_mobi",
             )
@@ -947,8 +972,11 @@ def step_extract_pdf_scanned(task: dict, config: Config) -> str:
             timeout=7200,
         )
         if result.returncode != 0:
+            detail = _sanitize_subprocess_failure(
+                result.stderr or result.stdout or "marker-pdf failed",
+            )
             raise StepError(
-                f"marker-pdf OCR failed: {result.stderr.strip() or result.stdout.strip()}",
+                f"marker-pdf OCR failed: {detail}",
                 error_type=ErrorType.FAIL,
                 step_name="extract_pdf_scanned",
             )

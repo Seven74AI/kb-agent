@@ -11,7 +11,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from agent.config import Config
 from agent.detection import (
@@ -1044,6 +1044,25 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
 # ── Firecrawl Extraction ─────────────────────────────────────────────────────
 
+_WIKISPOOKS_BYPASS_PATH = "/w/welcome_back.php"
+
+
+def _firecrawl_outbound_url(url: str) -> str:
+    """Sanitize scrape target URLs sent to Firecrawl (no userinfo / tracking params).
+
+    Wikispooks DDOS bypass URLs keep only the ``goto=`` query (required for fetch).
+    """
+    parsed = urlparse(url.strip())
+    if (
+        parsed.scheme in ("http", "https")
+        and parsed.path.rstrip("/") == _WIKISPOOKS_BYPASS_PATH
+        and parsed.query.startswith("goto=")
+    ):
+        host = _netloc_without_userinfo(parsed)
+        return urlunparse((parsed.scheme, host, parsed.path, "", parsed.query, ""))
+    return url_for_display(url)
+
+
 def step_firecrawl_extract(task: dict, config: Config) -> str:
     """Extract article content via Firecrawl, save raw markdown.
 
@@ -1060,6 +1079,7 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
     url = task["source_url"]
     _assert_fetch_url_allowed(url)
     slug = task.get("slug", task["id"][:8])
+    outbound_url = _firecrawl_outbound_url(url)
 
     result = subprocess.run(
         [
@@ -1067,7 +1087,7 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
             config.firecrawl_url,
             "-H", "Content-Type: application/json",
             "-d", json.dumps({
-                "url": url,
+                "url": outbound_url,
                 "formats": ["markdown"],
                 "waitFor": 3000,
             }),

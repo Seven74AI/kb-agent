@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 
-from agent.redact import redact_http_urls_in_text
+from agent.redact import redact_http_urls_in_text, url_for_display
 
 _ALLOWED_INGEST_SCHEMES = frozenset({"http", "https"})
 
@@ -1116,19 +1116,23 @@ def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
         return _deferral_synthesize_terminal_fresh(conn, slug, deferral)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT error FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        "AND status IN ('done', 'completed') "
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"AND status IN ('done', 'completed') {_TERMINAL_SUPERSEDE_FILTER} "
+        f"{_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug,),
     ).fetchone()
-    if row is None:
-        return False
-    err = row["error"] if hasattr(row, "keys") else row[0]
-    return not _is_superseded_parent_error(err)
+    return row is not None
 
 
 def _is_superseded_parent_error(error: str | None) -> bool:
     return bool(error and "superseded" in error.lower())
+
+
+_TERMINAL_SUPERSEDE_FILTER = (
+    "AND (error IS NULL OR instr(LOWER(COALESCE(error, '')), 'superseded') = 0)"
+)
+_TERMINAL_PROBE_ORDER = "ORDER BY created_at ASC, id ASC"
 
 
 SUPERSEDE_DEFERRED_PARENT_REASON = (
@@ -1152,15 +1156,13 @@ def _deferral_terminal_parent_fresh(conn: sqlite3.Connection, slug: str, deferra
     anchor = deferral["updated_at"]
     op = _deferral_cycle_cmp(deferral)
     row = conn.execute(
-        f"SELECT error FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
+        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
-    if row is None:
-        return False
-    err = row["error"] if hasattr(row, "keys") else row[0]
-    return not _is_superseded_parent_error(err)
+    return row is not None
 
 
 def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, deferral: dict) -> bool:
@@ -1169,15 +1171,13 @@ def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, def
     anchor = deferral["updated_at"]
     op = _deferral_cycle_cmp(deferral)
     row = conn.execute(
-        f"SELECT error FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
+        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
-    if row is None:
-        return False
-    err = row["error"] if hasattr(row, "keys") else row[0]
-    return not _is_superseded_parent_error(err)
+    return row is not None
 
 
 def _deferral_synthesize_task_fresh(
@@ -1219,29 +1219,25 @@ def _deferral_media_landing_anchor(
 def _parent_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT error FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
+        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
-    if row is None:
-        return False
-    err = row["error"] if hasattr(row, "keys") else row[0]
-    return not _is_superseded_parent_error(err)
+    return row is not None
 
 
 def _synthesize_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT error FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
+        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
-    if row is None:
-        return False
-    err = row["error"] if hasattr(row, "keys") else row[0]
-    return not _is_superseded_parent_error(err)
+    return row is not None
 
 
 def _has_stale_deferral_synthesize_terminal(
@@ -1321,15 +1317,13 @@ def _non_superseded_parent_terminal(conn: sqlite3.Connection, slug: str) -> bool
     """Terminal non-synthesize parent row that was not superseded by batch synthesis."""
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT error FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        "AND status IN ('done', 'completed') "
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        f"AND status IN ('done', 'completed') {_TERMINAL_SUPERSEDE_FILTER} "
+        f"{_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug,),
     ).fetchone()
-    if row is None:
-        return False
-    err = row["error"] if hasattr(row, "keys") else row[0]
-    return not _is_superseded_parent_error(err)
+    return row is not None
 
 
 def _embedded_media_landing_anchor(conn: sqlite3.Connection, slug: str) -> str | None:
@@ -1816,6 +1810,8 @@ def ensure_parent_media_deferral(
     source_url: str,
     content_type: str,
     expected_total: int,
+    *,
+    media_changed: int | None = None,
 ) -> None:
     """Persist the deferral manifest total (never lowered; may grow on conflict)."""
     if not parent_slug:
@@ -1823,12 +1819,13 @@ def ensure_parent_media_deferral(
     content_type = normalize_deferral_parent_content_type(content_type)
     prior = get_parent_media_deferral(conn, parent_slug)
     prior_total = int(prior["expected_total"]) if prior else 0
+    mc_insert = 1 if media_changed else 0
     with conn:
         conn.execute(
             """
             INSERT INTO parent_media_deferral
-                (parent_slug, source_url, content_type, expected_total)
-            VALUES (?, ?, ?, ?)
+                (parent_slug, source_url, content_type, expected_total, media_changed)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(parent_slug) DO UPDATE SET
                 content_type = excluded.content_type,
                 expected_total = MAX(parent_media_deferral.expected_total, excluded.expected_total),
@@ -1838,12 +1835,13 @@ def ensure_parent_media_deferral(
                     ELSE parent_media_deferral.updated_at
                 END,
                 media_changed = CASE
+                    WHEN excluded.media_changed = 1 THEN 1
                     WHEN excluded.expected_total > parent_media_deferral.expected_total
                     THEN 1
                     ELSE parent_media_deferral.media_changed
                 END
             """,
-            (parent_slug, source_url, content_type, int(expected_total)),
+            (parent_slug, source_url, content_type, int(expected_total), mc_insert),
         )
     deferral = get_parent_media_deferral(conn, parent_slug)
     if (
@@ -1928,8 +1926,15 @@ def bootstrap_parent_media_deferral_from_manifest(
             )
     if not source_url or not content_type:
         return
+    source_url = url_for_display(source_url)
+    manifest_media_changed = 1 if data.get("media_changed") else None
     ensure_parent_media_deferral(
-        conn, parent_slug, source_url, content_type, int(total),
+        conn,
+        parent_slug,
+        source_url,
+        content_type,
+        int(total),
+        media_changed=manifest_media_changed,
     )
 
 
@@ -2307,14 +2312,43 @@ def reset_task_steps_for_retry(
     )
 
 
+def _task_blocks_bulk_resume(
+    conn: sqlite3.Connection,
+    task_id: str,
+    slug: str | None,
+    error: str | None,
+) -> bool:
+    """Deferral gate for bulk resume: active media cycle only, not stale deferral rows."""
+    if is_deferred_media_pause(error):
+        return True
+    if slug:
+        deferral = get_parent_media_deferral(conn, slug)
+        if deferral is not None:
+            if count_pending_media(conn, slug) > 0 or int(deferral.get("media_changed") or 0):
+                return True
+    row = conn.execute(
+        """
+        SELECT output FROM task_steps
+        WHERE task_id = ? AND name = 'substack_embedded_media'
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if row and is_deferred_media_pause(row[0]):
+        return True
+    if _substack_cleanup_output_signals_deferred_media(conn, task_id, slug):
+        return True
+    return False
+
+
 def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int:
     """Resume all paused tasks matching a reason pattern.
 
     Resets retries to 0, clears task error, and sets status to ``pending``.
     Step reset matches :func:`agent.core.resume.retry_task` (failed/paused/running
     steps rewound). Skips tasks whose slug has an in-flight ``*_synthesize`` sibling
-    and tasks in an open deferred-media cycle (``task_in_deferred_media_cycle``),
-    same ownership/deferral gates as ``retry_task``.
+    and tasks blocked by :func:`_task_blocks_bulk_resume` (active deferral cycle or
+    durable pause markers). Stale ``parent_media_deferral`` rows alone do not block.
 
     Args:
         conn: Agent database connection.
@@ -2333,7 +2367,7 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
         for task_id, slug, error in rows:
             if slug and has_active_synthesize_task(conn, slug):
                 continue
-            if task_in_deferred_media_cycle(conn, task_id, slug=slug, error=error):
+            if _task_blocks_bulk_resume(conn, task_id, slug=slug, error=error):
                 continue
             conn.execute(
                 "UPDATE tasks SET status = 'pending', retries = 0, "

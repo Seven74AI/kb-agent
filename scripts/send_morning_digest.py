@@ -78,8 +78,14 @@ def _aggregate_for_notify(abnormal: list[dict]) -> tuple[int, int, int, list[str
     total_dispatched = sum(int(r.get("dispatched") or 0) for r in abnormal)
     causes: list[str] = []
     for run in abnormal:
-        if run["status"] in ("failed", "crashed") and run.get("summary"):
-            causes.append(run["summary"])
+        if run["status"] in ("failed", "crashed"):
+            summary = run.get("summary")
+            if summary:
+                causes.append(summary)
+            else:
+                causes.append(
+                    f"batch run #{run['id']} {run['status']} since {run['started_at']}"
+                )
         elif run["status"] == "running":
             causes.append(
                 f"batch run #{run['id']} still running since {run['started_at']}"

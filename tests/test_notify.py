@@ -114,6 +114,23 @@ def test_notify_task_redacts_url_query_in_reason():
         assert "download failed" in text
 
 
+def test_notify_batch_includes_all_unique_causes():
+    cfg = Config(
+        kb_agent_dir=Path("/tmp/k"),
+        vault_path=Path("/tmp/v"),
+        temp_dir=Path("/tmp/t"),
+        cookie_dir=Path("/tmp/c"),
+        telegram_bot_token="tok",
+        telegram_chat_id="123",
+    )
+    causes = [f"cause-{i}" for i in range(5)]
+    with patch("agent.notify.send_message") as send:
+        notify_batch(cfg, failed=5, total=5, dispatched=0, causes=causes)
+        text = send.call_args[0][1]
+        for c in causes:
+            assert c in text
+
+
 def test_notify_batch_redacts_url_query_in_causes():
     cfg = Config(
         kb_agent_dir=Path("/tmp/k"),
