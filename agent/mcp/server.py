@@ -32,7 +32,7 @@ from agent.core.batch_lock import is_locked
 from agent.core.watch_source import register_watch_source, submit_routed
 from agent.db import list_ingest_by_status
 from agent.notify import scrub_outbound_visible_message
-from agent.persist import persist_durable_text
+from agent.persist import persist_durable_text, persist_subprocess_log_stream
 from agent.mcp.db import open_agent_conn, open_logs_conn
 from agent.webhook import (
     _TOKEN_NOT_CONFIGURED_MSG,
@@ -280,20 +280,17 @@ def build_mcp_server(config: Config | None = None) -> FastMCP:
 
         script = Path(cfg.kb_agent_dir) / "scripts" / "batch_ingest.py"
         log_path = Path(cfg.kb_agent_dir) / "data" / "batch_manual.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        persist_durable_text(
-            log_path,
-            f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n",
-            policy="machine_local",
-            append=True,
+        header = f"\n--- run_batch {datetime.now(timezone.utc).isoformat()} ---\n"
+        persist_durable_text(log_path, header, policy="boundary4", append=True)
+        proc = subprocess.Popen(
+            [sys.executable, str(script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            text=True,
         )
-        with open(log_path, "a") as log:
-            subprocess.Popen(
-                [sys.executable, str(script)],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        assert proc.stdout is not None
+        persist_subprocess_log_stream(log_path, proc.stdout)
 
         return {
             "status": "started",

@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
+from agent.core.detect import detect_type
 from agent.detection import detect_platform
 from agent.pipelines import PIPELINES
 from agent.pipelines.wikispooks import (
@@ -42,6 +43,23 @@ class TestWikispooksDetection:
     def test_detect_platform_wikispooks_org_http(self):
         url = "http://wikispooks.org/wiki/Some_Page"
         assert detect_platform(url) == "wikispooks"
+
+    def test_detect_platform_wikispooks_com(self):
+        url = "https://wikispooks.com/wiki/Foo"
+        assert detect_platform(url) == "wikispooks"
+
+    def test_detect_type_wikispooks_hosts(self):
+        assert detect_type("https://wikispooks.com/wiki/Foo") == {
+            "platform": "wikispooks",
+            "content_type": "wikispooks",
+        }
+        assert detect_type("https://wikispooks.org/wiki/Foo") == {
+            "platform": "wikispooks",
+            "content_type": "wikispooks",
+        }
+
+    def test_detect_platform_unrelated_url_unchanged(self):
+        assert detect_platform("https://example.com/wiki/Foo") == "web"
 
 
 class TestWikispooksBypassUrl:

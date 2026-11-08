@@ -45,8 +45,8 @@
 {"content_type": "web", "platform": "web", "url": "https://v.cdn/v_720.mp4"}
 {"content_type": "web", "platform": "web", "url": "https://video.cdn.threads.net/test.mp4"}
 {"content_type": "web", "platform": "web", "url": "https://vz-testzone.b-cdn.net/12345678-abcd-ef01-2345-6789abcdef01/playlist.m3u8"}
-{"content_type": "web", "platform": "web", "url": "https://wikispooks.com/w/welcome_back.php?goto="}
-{"content_type": "web", "platform": "web", "url": "https://wikispooks.com/wiki/Document/911"}
+{"content_type": "wikispooks", "platform": "wikispooks", "url": "https://wikispooks.com/w/welcome_back.php?goto="}
+{"content_type": "wikispooks", "platform": "wikispooks", "url": "https://wikispooks.com/wiki/Document/911"}
 {"content_type": "wikispooks", "platform": "wikispooks", "url": "https://wikispooks.org/w/welcome_back.php?"}
 {"content_type": "wikispooks", "platform": "wikispooks", "url": "https://wikispooks.org/wiki/COVID-19/Perpetrators/Bilderberg"}
 {"content_type": "wikispooks", "platform": "wikispooks", "url": "https://wikispooks.org/wiki/Test/Article"}
