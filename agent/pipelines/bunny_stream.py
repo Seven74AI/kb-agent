@@ -15,8 +15,7 @@ from agent.config import Config
 from agent.db import LOGS_SCHEMA, init_db
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
-from agent.core.note import write_vault_note
-from agent.redact import redact_http_urls_in_text, url_for_display
+from agent.redact import redact_http_urls_in_text, url_for_display, write_vault_note
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also

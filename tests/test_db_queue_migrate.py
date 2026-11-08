@@ -1053,6 +1053,88 @@ def test_retry_awaiting_media_unblocks_embedded_step_not_synthesize(tmp_path):
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
 
 
+def test_retry_failed_deferral_cycle_preserves_embed_step(tmp_path):
+    from agent.db import ensure_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "failed_deferral_parent"
+    url = "https://blog.substack.com/p/failed-deferral"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    task_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="failed",
+    )
+    defer_step_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    embed_output = "awaiting media: 1 images enqueued"
+    pause_reason = "awaiting media: 1 images enqueued"
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (embed_output, defer_step_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'failed' WHERE task_id = ? AND name = 'synthesize_note'",
+        (task_id,),
+    )
+    conn.commit()
+
+    assert retry_task(conn, task_id) is True
+    embed = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (defer_step_id,),
+    ).fetchone()
+    assert embed[0] == "paused"
+    assert embed[1] == embed_output
+    steps = {s["name"]: s["status"] for s in get_task_steps(conn, task_id)}
+    assert steps["synthesize_note"] == "pending"
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+
+
+def test_retry_failed_without_deferral_cycle_resets_steps(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn,
+        "https://example.com/article",
+        "web",
+        "web_fail_retry",
+        ["fetch", "clean", "synthesize_note"],
+        status="failed",
+    )
+    embed_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'clean'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        ("transient 503", task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'failed', output = 'err' WHERE id = ?",
+        (embed_id,),
+    )
+    conn.commit()
+
+    assert retry_task(conn, task_id) is True
+    row = conn.execute(
+        "SELECT status, output FROM task_steps WHERE id = ?",
+        (embed_id,),
+    ).fetchone()
+    assert row[0] == "pending"
+    assert row[1] is None
+
+
 def test_dispatch_failure_pause_appended_and_blocks_resume_retry(tmp_path):
     import scripts.batch_ingest as batch_ingest
     from agent.db import ensure_parent_media_deferral
@@ -3240,6 +3322,36 @@ def test_fail_task_redacts_credential_shapes_at_write(tmp_path):
     assert "Bearer [redacted]" in err
 
 
+def test_persist_visible_error_redacts_cookie_session_pairs():
+    """Invariant: cookie-style name=value secrets are scrubbed before durable storage."""
+    from agent.db import _persist_visible_error
+
+    out = _persist_visible_error("err sessionid=supersecret token")
+    assert "supersecret" not in out
+    assert "sessionid=[REDACTED]" in out
+
+
+def test_fail_task_redacts_cookie_in_steperror_stderr_slice(tmp_path):
+    """stderr[:200] embedded in StepError messages must not leak cookies at persist."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+
+    task_id = create_task(conn, "https://example.com", "instagram", "slug", ["only"])
+    stderr_snippet = "ERROR: auth failed sessionid=leaked-cookie-value9; retry"
+    fail_task(
+        conn,
+        task_id,
+        f"yt-dlp reel download failed: {stderr_snippet[:200]}",
+    )
+    row = conn.execute(
+        "SELECT error FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    err = row["error"] or ""
+    assert "leaked-cookie-value9" not in err
+    assert "sessionid=[REDACTED]" in err
+
+
 def test_pause_task_persists_scrubbed_reason_at_rest(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -3510,6 +3622,95 @@ def test_has_completed_synthesize_task_ignores_superseded_terminal_done_row(tmp_
 
     assert has_completed_synthesize_task(conn, slug) is False
     assert find_active_task(conn, slug, "substack_text_synthesize") is None
+
+
+def test_find_active_task_terminal_synthesize_keeps_media_changed_without_raw_on_disk(
+    tmp_path,
+):
+    """media_changed must not clear from DB-only parent_media_complete (missing raw bundle)."""
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://blog.substack.com/p/raw-missing"
+    slug = "raw_missing_active"
+    media_tmp = tmp_path / "tmp"
+    media_tmp.mkdir(parents=True, exist_ok=True)
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    ingest_id, _ = queue_ingest(
+        conn, "https://example.com/m.png", "substack_image", "m1",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', media_appended=1 WHERE id=?",
+        (ingest_id,),
+    )
+    conn.commit()
+    deferral = get_parent_media_deferral(conn, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="done",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+        (deferral["updated_at"], syn_id),
+    )
+    conn.execute(
+        "UPDATE parent_media_deferral SET media_changed = 1 WHERE parent_slug = ?",
+        (slug,),
+    )
+    conn.commit()
+
+    assert find_active_task(
+        conn, slug, "substack_text_synthesize", temp_dir=media_tmp,
+    ) is None
+    assert int(get_parent_media_deferral(conn, slug)["media_changed"]) == 1
+
+
+def test_find_active_task_terminal_synthesize_clears_media_changed_when_raw_landed(
+    tmp_path,
+):
+    """Disk markers present: find_active_task may consume media_changed like has_completed_parent_synthesis."""
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    url = "https://blog.substack.com/p/raw-landed"
+    slug = "raw_landed_active"
+    media_tmp = tmp_path / "tmp"
+    media_tmp.mkdir(parents=True, exist_ok=True)
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    ingest_id, _ = queue_ingest(
+        conn, "https://example.com/m.png", "substack_image", "m1",
+        parent_slug=slug, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', media_appended=1 WHERE id=?",
+        (ingest_id,),
+    )
+    conn.commit()
+    _stamp_parent_raw_media(conn, media_tmp, slug)
+    deferral = get_parent_media_deferral(conn, slug)
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug,
+        ["synthesize_note"], status="done",
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+        (deferral["updated_at"], syn_id),
+    )
+    conn.execute(
+        "UPDATE parent_media_deferral SET media_changed = 1 WHERE parent_slug = ?",
+        (slug,),
+    )
+    conn.commit()
+
+    assert find_active_task(
+        conn, slug, "substack_text_synthesize", temp_dir=media_tmp,
+    ) == syn_id
+    assert int(get_parent_media_deferral(conn, slug)["media_changed"]) == 0
 
 
 def test_find_active_task_supersedes_stale_pending_synthesize_after_media_changed(tmp_path):

@@ -16,7 +16,6 @@ import asyncio
 import sqlite3
 
 from agent.db import _persist_visible_error
-from agent.notify import sanitize_visible_message
 
 
 async def stream_to_logs(

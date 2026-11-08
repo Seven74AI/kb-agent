@@ -24,6 +24,9 @@ _SUBPROCESS_STDERR_LINE_RE = re.compile(
 _CREDENTIAL_SECRET_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*(?!Bearer\b)\S+"
 )
+_COOKIE_SESSION_PAIR_RE = re.compile(
+    r"(?i)\b(sessionid|csrftoken|phpsessid|sid|xsrf|_csrf|auth[-_]?token)\s*=\s*[^\s;&]+"
+)
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)
 
 
@@ -32,6 +35,7 @@ def redact_credential_shapes(text: str) -> str:
     if not text:
         return text
     text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _COOKIE_SESSION_PAIR_RE.sub(r"\1=[REDACTED]", text)
     text = _CREDENTIAL_SECRET_RE.sub("[credential redacted]", text)
     return text
 

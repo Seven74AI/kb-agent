@@ -10,8 +10,7 @@ import re
 from pathlib import Path
 
 from agent.notify import redact_credential_shapes
-from agent.core.note import write_vault_note
-from agent.redact import url_for_display
+from agent.redact import url_for_display, write_vault_note
 
 logger = logging.getLogger(__name__)
 

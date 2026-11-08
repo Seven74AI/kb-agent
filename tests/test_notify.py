@@ -60,6 +60,20 @@ def test_sanitize_visible_message_redacts_credential_shapes():
     assert "upstream failed" in out
 
 
+def test_sanitize_visible_message_redacts_cookie_session_pairs():
+    raw = (
+        "stderr: sessionid=supersecret; csrftoken=abc; PHPSESSID=xyz; "
+        "SID=tail; _csrf=2; xsrf=3; auth-token=4"
+    )
+    out = sanitize_visible_message(raw)
+    assert "supersecret" not in out
+    assert "sessionid=[REDACTED]" in out
+    assert "csrftoken=[REDACTED]" in out
+    assert "PHPSESSID=[REDACTED]" in out
+    assert "SID=tail" not in out
+    assert "SID=[REDACTED]" in out
+
+
 def test_notify_batch_sanitizes_causes():
     cfg = Config(
         kb_agent_dir=Path("/tmp/k"),

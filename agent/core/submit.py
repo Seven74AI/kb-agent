@@ -238,6 +238,7 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
     # Blocks in-flight work and prior successful synthesis; allows retry after failed.
     task_id, created = create_synthesize_task(
         agent_conn, url, content_type, slug, steps, tags=tags,
+        temp_dir=config.temp_dir,
     )
     result = {
         "status": "pending",

@@ -6,7 +6,6 @@ The simplest pipeline. No cookies, no video. Verifies the entire architecture.
 
 import json
 import logging
-import os
 import re
 import subprocess
 from datetime import datetime
@@ -23,8 +22,7 @@ from agent.detection import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
-from agent.core.note import write_vault_note
-from agent.redact import redact_http_urls_in_text, url_for_display
+from agent.redact import redact_http_urls_in_text, url_for_display, write_vault_note
 
 logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
@@ -523,6 +521,25 @@ _OEMBED_PROVIDER_RE = re.compile(
 )
 
 
+def _embed_carrier_class_re(marker: str) -> re.Pattern[str]:
+    """Match *marker* only inside a ``class="..."`` attribute (embed DOM carrier)."""
+    return re.compile(
+        rf'\bclass\s*=\s*["\'][^"\']*\b{re.escape(marker)}\b',
+        re.IGNORECASE,
+    )
+
+
+_DATA_INSTGRM_PERMALINK_RE = re.compile(r"data-instgrm-permalink\s*=", re.IGNORECASE)
+_DATA_THREADS_POST_PERMALINK_RE = re.compile(
+    r"data-text-post-permalink\s*=", re.IGNORECASE
+)
+_INSTAGRAM_MEDIA_CLASS_RE = _embed_carrier_class_re("instagram-media")
+_TIKTOK_EMBED_CLASS_RE = _embed_carrier_class_re("tiktok-embed")
+_THREADS_TEXT_POST_CLASS_RE = _embed_carrier_class_re("text-post-media")
+_TWITTER_TWEET_CLASS_RE = _embed_carrier_class_re("twitter-tweet")
+_TWITTER_TIMELINE_CLASS_RE = _embed_carrier_class_re("twitter-timeline")
+
+
 def _foreign_platform_from_url(url: str) -> str | None:
     """Return a platform label when *url* names media we do not batch from Substack parents."""
     if not url or _HANDLED_EMBED_URL_RE.search(url):
@@ -559,13 +576,19 @@ def _detect_unsupported_foreign_embed(html: str) -> str | None:
     exempt (handled by the existing extractors).
     """
     decoded = _html_unescape(html)
-    if "data-instgrm-permalink" in decoded or "instagram-media" in decoded:
+    if _DATA_INSTGRM_PERMALINK_RE.search(decoded) or _INSTAGRAM_MEDIA_CLASS_RE.search(
+        decoded
+    ):
         return "instagram"
-    if "tiktok-embed" in decoded:
+    if _TIKTOK_EMBED_CLASS_RE.search(decoded):
         return "tiktok"
-    if "data-text-post-permalink" in decoded or "text-post-media" in decoded:
+    if _DATA_THREADS_POST_PERMALINK_RE.search(decoded) or _THREADS_TEXT_POST_CLASS_RE.search(
+        decoded
+    ):
         return "threads"
-    if "twitter-tweet" in decoded or "twitter-timeline" in decoded:
+    if _TWITTER_TWEET_CLASS_RE.search(decoded) or _TWITTER_TIMELINE_CLASS_RE.search(
+        decoded
+    ):
         return "twitter"
     candidates: list[str] = []
     for pattern in (_IFRAME_SRC_RE, _OEMBED_PROVIDER_RE):

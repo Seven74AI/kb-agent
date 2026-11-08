@@ -563,6 +563,38 @@ class TestSubstackVideoMetadata:
         )
         assert _detect_unsupported_foreign_embed(html) is None
 
+    def test_detect_foreign_embed_absent_on_prose_instagram_media_class_mention(self):
+        html = "<html><body><p>Do not use instagram-media class</p></body></html>"
+        assert _detect_unsupported_foreign_embed(html) is None
+
+    def test_detect_foreign_embed_instagram_blockquote_class(self):
+        html = (
+            '<html><body><blockquote class="instagram-media" '
+            'data-instgrm-permalink="https://www.instagram.com/p/abc/">'
+            "</blockquote></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "instagram"
+
+    def test_detect_foreign_embed_instagram_data_perm_attr_only(self):
+        html = (
+            "<html><body><div "
+            'data-instgrm-permalink="https://www.instagram.com/p/abc/">'
+            "</div></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "instagram"
+
+    def test_detect_foreign_embed_tiktok_blockquote_class(self):
+        html = (
+            '<html><body><blockquote class="tiktok-embed" '
+            'cite="https://www.tiktok.com/@u/video/1">'
+            "</blockquote></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "tiktok"
+
+    def test_detect_foreign_embed_absent_on_prose_tiktok_embed_mention(self):
+        html = "<html><body><p>Avoid tiktok-embed in docs</p></body></html>"
+        assert _detect_unsupported_foreign_embed(html) is None
+
     def test_detect_foreign_embed_instagram_embed_path_in_anchor_href(self):
         html = (
             "<html><body>"

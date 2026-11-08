@@ -31,8 +31,7 @@ from agent.detection import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
-from agent.core.note import write_vault_note
-from agent.redact import redact_http_urls_in_text, url_for_display, write_merged_transcript_json
+from agent.redact import url_for_display, write_merged_transcript_json, write_vault_note
 from agent.llm import get_llm_client
 from agent.notify import sanitize_visible_message
 from agent.quality import count_quotes
@@ -588,7 +587,6 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
         StepError(SKIP): If captions empty AND og:description is login-wall text.
     """
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
 
     html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
@@ -1037,7 +1035,6 @@ def step_threads_cleanup(task: dict, config: Config) -> str:
     """
     from agent.pipelines.video_common import _artifact_stem, resolve_threads_video_path
 
-    slug = task.get("slug", task["id"][:8])
     stem = _artifact_stem(task)
 
     to_remove = []

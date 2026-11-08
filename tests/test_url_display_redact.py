@@ -8,8 +8,12 @@ import pytest
 from agent.config import Config
 from agent.core.bulk import ingest_playlist
 from agent.core.redact import url_for_display
-from agent.core.note import write_vault_note
-from agent.redact import failure_text_for_display, redact_http_urls_in_text, scrub_vault_note_content
+from agent.redact import (
+    failure_text_for_display,
+    redact_http_urls_in_text,
+    scrub_vault_note_content,
+    write_vault_note,
+)
 from agent.core.status import get_task, list_tasks
 from agent.core.submit import plan_submission
 from agent.detection import ContentSubtypeDetection
