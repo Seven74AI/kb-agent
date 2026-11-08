@@ -616,12 +616,13 @@ def _check_flaresolverr() -> tuple[bool, str]:
 
 
 def _check_firecrawl() -> tuple[bool, str]:
-    """Check Firecrawl health via /scrape endpoint."""
+    """Check Firecrawl health via the configured scrape endpoint."""
+    firecrawl_url = load_config().firecrawl_url
     try:
         result = subprocess.run(
             [
                 "curl", "-s", "--max-redirs", "0",
-                "--max-time", "10", "http://localhost:3002/v2/scrape",
+                "--max-time", "10", firecrawl_url,
             ],
             capture_output=True, text=True, timeout=15,
         )

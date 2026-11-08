@@ -18,15 +18,17 @@ import os
 import sys
 import time
 
+if "HF_TOKEN" not in os.environ:
+    print(
+        "ERROR: HF_TOKEN not set — export HF_TOKEN with your Hugging Face access token.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 from pyannote.audio import Pipeline
 
 audio_path = sys.argv[1]
 output_path = sys.argv[2]
-
-if "HF_TOKEN" not in os.environ:
-    print("ERROR: HF_TOKEN not set — load from researcher-videos profile:", file=sys.stderr)
-    print("  export HF_TOKEN=$(grep -oP 'HF_TOKEN=\\K[^#\\n]+' /root/.hermes/profiles/researcher-videos/.env | head -1)", file=sys.stderr)
-    sys.exit(1)
 
 print(f"[{time.strftime('%H:%M:%S')}] Loading pyannote/speaker-diarization-3.1...", flush=True)
 pipeline = Pipeline.from_pretrained(

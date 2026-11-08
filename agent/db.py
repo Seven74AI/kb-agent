@@ -24,6 +24,7 @@ DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
     "deferred synthesis dispatch failed",
     "media gate",
     "media_deferred:",
+    "unsupported embed",
 )
 
 _EMBEDDED_MEDIA_AWAITING_RE = re.compile(

@@ -241,7 +241,7 @@ def step_substack_video_extract_metadata(task: dict, config: Config) -> str:
         )
     title_m = re.search(r"<title>([^<]+)</title>", html)
     meta = {
-        "title": title_m.group(1).strip() if title_m else "",
+        "title": redact_http_urls_in_text(title_m.group(1).strip() if title_m else ""),
         "video_id": video_id,
         "domain": domain,
     }
