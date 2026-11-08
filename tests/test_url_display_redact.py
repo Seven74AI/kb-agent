@@ -10,6 +10,7 @@ from agent.core.redact import url_for_display
 from agent.redact import scrub_vault_note_content
 from agent.core.status import get_task, list_tasks
 from agent.core.submit import plan_submission
+from agent.detection import ContentSubtypeDetection
 from agent.core.watch_source import get_watch_source, poll_watch_source, register_watch_source
 from agent.db import AGENT_SCHEMA, create_task, init_db, queue_ingest
 from agent.webhook import app
@@ -96,8 +97,8 @@ def test_plan_submission_error_plan_redacts_url(monkeypatch, tmp_path):
     monkeypatch.setenv("KB_VAULT_PATH", str(vault))
     core_config = load_config()
     monkeypatch.setattr(
-        "agent.core.submit.detect_content_subtype",
-        lambda url, platform: "unknown",
+        "agent.core.submit.detect_content_subtype_with_signals",
+        lambda url, platform: ContentSubtypeDetection(subtype="unknown"),
     )
     result = plan_submission(MEGA_WITH_KEY, core_config)
     assert result["status"] == "error"
