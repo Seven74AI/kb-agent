@@ -626,3 +626,37 @@ def test_recover_orphan_tasks_shared_helper(agent_db):
     recover_orphan_tasks(conn, log_prefix="[test]")
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
     assert row[0] == "pending"
+
+
+def test_recover_orphan_tasks_skips_parent_with_active_synthesize(agent_db):
+    from agent.db import create_task
+
+    conn = agent_db
+    slug = "orphan_synth_guard"
+    url = "https://example.com/parent"
+    parent_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="in_progress",
+    )
+    with conn:
+        conn.execute(
+            "INSERT INTO task_steps (task_id, step_order, name, status, output) "
+            "VALUES (?, 0, 'substack_cleanup', 'done', NULL), "
+            "(?, 1, 'substack_embedded_media', 'running', 'pid=99999999')",
+            (parent_id, parent_id),
+        )
+    create_task(
+        conn,
+        url,
+        "substack_text_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="in_progress",
+    )
+    recover_orphan_tasks(conn, log_prefix="[test]")
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (parent_id,)).fetchone()
+    assert row[0] == "in_progress"

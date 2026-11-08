@@ -2520,6 +2520,117 @@ def test_media_changed_blocks_completion_while_sibling_shortfall(tmp_path):
     ) is False
 
 
+def test_shortfall_marker_does_not_clear_media_changed_without_raw(tmp_path):
+    """INVARIANT: enqueue shortfall is set-only; raw verification clears media_changed."""
+    from agent.db import (
+        ensure_parent_media_deferral,
+        get_parent_media_deferral,
+        mark_parent_media_changed,
+        parent_media_complete,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "shortfall_no_clear"
+    url = "https://blog.substack.com/p/shortfall-no-clear"
+    media_tmp = tmp_path / "media_tmp"
+    media_tmp.mkdir(parents=True)
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 2)
+    mark_parent_media_changed(conn, slug)
+    queue_ingest(
+        conn, "https://example.com/a.png", "substack_image", "a",
+        parent_slug=slug, media_kind="image",
+    )
+    queue_ingest(
+        conn, "https://example.com/b.png", "substack_image", "b",
+        parent_slug=slug, media_kind="image",
+    )
+    deferral = get_parent_media_deferral(conn, slug)
+    assert deferral["expected_total"] == 2
+    assert int(deferral["media_changed"]) == 1
+    assert parent_media_complete(conn, slug) is False
+
+
+def test_requeue_task_for_retry_cas_refuses_superseded_before_update(tmp_path):
+    from agent.db import requeue_task_for_retry_cas
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn, "https://example.com", "web", "cas_slug", ["only"], status="failed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = 'superseded: stale owner' WHERE id = ?", (task_id,),
+    )
+    conn.commit()
+    with conn:
+        assert requeue_task_for_retry_cas(conn, task_id) is False
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "failed"
+
+
+def test_retry_task_cas_skips_step_reset_when_superseded_race(tmp_path):
+    """CAS update must fail when error becomes superseded after SELECT."""
+    import agent.core.resume as resume_mod
+    from agent.db import get_task_steps, requeue_task_for_retry_cas
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn, "https://example.com", "web", "race_slug", ["s0", "s1"], status="failed",
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'failed' WHERE task_id = ?", (task_id,),
+    )
+    conn.execute("UPDATE tasks SET error = ? WHERE id = ?", ("transient fail", task_id))
+    conn.commit()
+
+    def requeue_after_supersede(connection, tid, **kwargs):
+        connection.execute(
+            "UPDATE tasks SET error = 'superseded: between select and update' WHERE id = ?",
+            (tid,),
+        )
+        return requeue_task_for_retry_cas(connection, tid, **kwargs)
+
+    with patch.object(resume_mod, "requeue_task_for_retry_cas", side_effect=requeue_after_supersede):
+        assert retry_task(conn, task_id) is False
+
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "failed"
+    steps = get_task_steps(conn, task_id)
+    assert all(s["status"] == "failed" for s in steps)
+
+
+def test_resume_tasks_by_reason_cas_skips_superseded_race(tmp_path):
+    """Bulk resume CAS must not resurrect superseded paused rows."""
+    from agent.db import get_task_steps
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    reason = "cooldown — retry later"
+    task_id = create_task(
+        conn, "https://example.com", "web", "resume_race", ["only"], status="paused",
+    )
+    conn.execute("UPDATE tasks SET error = ? WHERE id = ?", (reason, task_id))
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ?", (task_id,),
+    )
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT id, slug, error FROM tasks WHERE status = 'paused' AND error LIKE ?",
+        (f"%{reason[:8]}%",),
+    ).fetchall()
+    assert len(rows) == 1
+
+    conn.execute(
+        "UPDATE tasks SET error = 'superseded: bulk resume race' WHERE id = ?", (task_id,),
+    )
+    conn.commit()
+
+    assert resume_tasks_by_reason(conn, f"%{reason[:8]}%") == 0
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "paused"
+    assert all(s["status"] == "paused" for s in get_task_steps(conn, task_id))
+
+
 def test_has_completed_parent_synthesis_monotonic_complete_media_and_fresh_terminal(
     tmp_path,
 ):

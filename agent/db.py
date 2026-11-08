@@ -903,15 +903,21 @@ def _mark_parent_media_enqueue_shortfall(
     *,
     expected_grew: bool = False,
 ) -> None:
-    flag = 1 if (sibling_n < expected_total or expected_grew) else 0
+    """Set-only shortfall marker: raise ``media_changed`` when siblings lag or expected grew.
+
+    Invariant: never clear ``media_changed`` here — only
+    :func:`_clear_parent_media_changed_if_satisfied` may consume the flag after raw verification.
+    """
+    if not (sibling_n < expected_total or expected_grew):
+        return
     with conn:
         conn.execute(
             """
             UPDATE parent_media_deferral
-            SET media_changed = ?, updated_at = datetime('now')
+            SET media_changed = MAX(media_changed, 1), updated_at = datetime('now')
             WHERE parent_slug = ?
             """,
-            (flag, parent_slug),
+            (parent_slug,),
         )
 
 
@@ -1119,6 +1125,66 @@ def find_active_task(
 
 
 _SYNTHESIZE_IN_FLIGHT_STATUSES = "'pending', 'in_progress', 'paused'"
+
+
+_REQUEUE_SUPERSEDE_GUARD = (
+    "AND (error IS NULL OR instr(LOWER(COALESCE(error, '')), 'superseded') = 0)"
+)
+
+
+def may_reset_parent_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    slug: str | None,
+    *,
+    error: str | None = None,
+    content_type: str | None = None,
+) -> bool:
+    """Shared gate for parent re-queue paths (orphan recovery, retry, bulk resume).
+
+    Returns False when the row is terminal-superseded or an in-flight synthesize owner
+    blocks resetting a non-synthesize parent for the same slug.
+    """
+    if error is None or content_type is None:
+        row = conn.execute(
+            "SELECT error, content_type FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if error is None:
+            error = row[0]
+        if content_type is None:
+            content_type = row[1]
+    if _is_superseded_parent_error(error):
+        return False
+    if slug and content_type and not is_synthesize_content_type(content_type):
+        if has_active_synthesize_task(conn, slug):
+            return False
+    return True
+
+
+def requeue_task_for_retry_cas(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    allowed_statuses: tuple[str, ...] = ("failed", "paused"),
+) -> bool:
+    """Compare-and-swap task re-queue; refuses superseded terminal rows."""
+    if not allowed_statuses:
+        return False
+    status_sql = ", ".join(f"'{s}'" for s in allowed_statuses)
+    cur = conn.execute(
+        f"""
+        UPDATE tasks
+        SET status = 'pending', error = NULL, retries = 0, updated_at = datetime('now')
+        WHERE id = ?
+          AND status IN ({status_sql})
+          {_REQUEUE_SUPERSEDE_GUARD}
+        """,
+        (task_id,),
+    )
+    return cur.rowcount == 1
 
 
 def has_active_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
@@ -2419,17 +2485,14 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
     resumed = 0
     with conn:
         for task_id, slug, error in rows:
-            if _is_superseded_parent_error(error):
-                continue
-            if slug and has_active_synthesize_task(conn, slug):
+            if not may_reset_parent_task(
+                conn, task_id, slug, error=error,
+            ):
                 continue
             if _task_blocks_bulk_resume(conn, task_id, slug=slug, error=error):
                 continue
-            conn.execute(
-                "UPDATE tasks SET status = 'pending', retries = 0, "
-                "error = NULL, updated_at = datetime('now') WHERE id = ?",
-                (task_id,),
-            )
+            if not requeue_task_for_retry_cas(conn, task_id, allowed_statuses=("paused",)):
+                continue
             reset_task_steps_for_retry(
                 conn, task_id, slug=slug, error=error,
             )

@@ -3,8 +3,8 @@
 import sqlite3
 
 from agent.db import (
-    _is_superseded_parent_error,
-    has_active_synthesize_task,
+    may_reset_parent_task,
+    requeue_task_for_retry_cas,
     reset_task_steps_for_retry,
     resume_tasks_by_reason,
 )
@@ -55,25 +55,18 @@ def retry_task(agent_conn: sqlite3.Connection, task_id: str) -> bool:
     ).fetchone()
     if row is None or row[0] not in ("failed", "paused"):
         return False
-    # Terminal superseded rows must not be resurrected (mirrors complete_task CAS).
-    if _is_superseded_parent_error(row[1]):
-        return False
-    if row[2] and has_active_synthesize_task(agent_conn, row[2]):
+    if not may_reset_parent_task(
+        agent_conn, task_id, row[2], error=row[1],
+    ):
         return False
 
     with agent_conn:
+        if not requeue_task_for_retry_cas(agent_conn, task_id):
+            return False
         reset_task_steps_for_retry(
             agent_conn,
             task_id,
             slug=row[2],
             error=row[1],
-        )
-        agent_conn.execute(
-            """
-            UPDATE tasks
-            SET status = 'pending', error = NULL, retries = 0, updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (task_id,),
         )
     return True

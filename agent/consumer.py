@@ -93,11 +93,22 @@ def register_step(name: str, fn, on_error: str = "retry"):
 
 def recover_orphan_tasks(conn: sqlite3.Connection, *, log_prefix: str = "[consumer]") -> None:
     """Reset in_progress tasks whose running step has no live subprocess PID."""
+    from agent.db import may_reset_parent_task
+
     orphans = conn.execute(
-        "SELECT id, content_type, slug FROM tasks WHERE status = 'in_progress'"
+        "SELECT id, content_type, slug, error FROM tasks WHERE status = 'in_progress'"
     ).fetchall()
 
-    for task_id, content_type, slug in orphans:
+    for task_id, content_type, slug, error in orphans:
+        if not may_reset_parent_task(
+            conn, task_id, slug, error=error, content_type=content_type,
+        ):
+            print(
+                f"{log_prefix} Orphan task {task_id[:8]} — "
+                f"synthesize owner or superseded terminal; skipping reset"
+            )
+            continue
+
         step = conn.execute(
             "SELECT id, step_order, name, output FROM task_steps "
             "WHERE task_id = ? AND status = 'running' "

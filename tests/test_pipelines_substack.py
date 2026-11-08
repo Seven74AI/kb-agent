@@ -736,16 +736,16 @@ class TestSubstackVideoMetadata:
         html = (
             '<iframe src="https://player.mediadelivery.net/embed/99/"></iframe>'
         )
-        assert _detect_unenqueued_handled_embed(html, [], [], []) is not None
+        assert _detect_unenqueued_handled_embed(html, [], [], [], []) is not None
         assert _detect_unsupported_foreign_embed(html) is None
 
     def test_detect_unenqueued_handled_embed_rumble_embed_unknown(self):
         html = '<iframe src="https://rumble.com/embed/unknown"></iframe>'
-        assert _detect_unenqueued_handled_embed(html, [], [], []) is not None
+        assert _detect_unenqueued_handled_embed(html, [], [], [], []) is not None
 
     def test_detect_unenqueued_handled_embed_short_youtube_id(self):
         html = '<iframe src="https://www.youtube.com/embed/abc12"></iframe>'
-        assert _detect_unenqueued_handled_embed(html, [], [], []) is not None
+        assert _detect_unenqueued_handled_embed(html, [], [], [], []) is not None
 
     def test_detect_unenqueued_handled_embed_absent_when_canonical_bunny_queued(self):
         bunny = (
@@ -753,7 +753,31 @@ class TestSubstackVideoMetadata:
             "12345678-abcd-ef01-2345-6789abcdef01"
         )
         html = f'<iframe src="{bunny}"></iframe>'
-        assert _detect_unenqueued_handled_embed(html, [], [], [bunny]) is None
+        assert _detect_unenqueued_handled_embed(html, [], [], [bunny], []) is None
+
+    def test_extract_native_video_ids_iframe_url_without_trailing_slash(self):
+        vid = "cccc3333-3333-4333-8333-333333333333"
+        html = (
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe>"
+        )
+        assert _extract_native_video_ids(html) == [vid]
+
+    def test_detect_unenqueued_handled_embed_native_video_iframe_unextracted(self):
+        vid = "dddd4444-4444-4444-8444-444444444444"
+        html = (
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe>"
+        )
+        assert _detect_unenqueued_handled_embed(html, [], [], [], []) is not None
+
+    def test_detect_unenqueued_handled_embed_absent_when_native_video_extracted(self):
+        vid = "eeee5555-5555-4555-8555-555555555555"
+        html = (
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe>"
+        )
+        assert _detect_unenqueued_handled_embed(html, [], [], [], [vid]) is None
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_truncated_bunny_iframe_pauses_not_no_embedded_media(
@@ -1204,6 +1228,144 @@ class TestSubstackVideoMetadata:
         assert _extract_native_video_ids(html) == [
             "deadbeef-1111-2222-3333-444455556666"
         ]
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_native_video_iframe_without_trailing_slash_enqueued(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        post = task_dict["source_url"]
+        vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe></body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "awaiting media" in str(exc.value).lower()
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            rows = conn.execute(
+                "SELECT url, content_type FROM ingest_queue WHERE parent_slug = ?",
+                (task_dict["slug"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0][0] == f"{post}#{vid}"
+        assert rows[0][1] == "substack_video"
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_mixed_image_and_native_video_iframe_counts_both(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "b8426ab9-9138-4543-a8e4-763580cd6386"
+        chart_key = "chart_1664x1184.png"
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'<img src="https://substack-post-media.s3.amazonaws.com/public/images/{chart_key}">'
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe></body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM ingest_queue WHERE parent_slug = ?",
+                (slug,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n == 2
+        manifest = json.loads((config.temp_dir / f"{slug}_media.json").read_text())
+        assert manifest["total"] == 2
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            urls = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT url FROM ingest_queue WHERE parent_slug = ? ORDER BY url",
+                    (slug,),
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        assert f"{post}#{vid}" in urls
+        assert chart_key in urls[0] or chart_key in urls[1]
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_embedded_media_manifest_persists_media_changed_field(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        vid = "c9537hc0-a249-6654-c9f5-874691de7497"
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe></body></html>"
+        )
+        with pytest.raises(StepError):
+            step_substack_embedded_media(task_dict, config)
+        manifest = json.loads(
+            (config.temp_dir / f"{task_dict['slug']}_media.json").read_text(encoding="utf-8")
+        )
+        assert "media_changed" in manifest
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_embedded_media_rerun_preserves_manifest_media_changed_on_db_loss(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, get_parent_media_deferral, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        vid = "d0648ad1-b35a-4765-a0a6-985702ef8508"
+        manifest_path = config.temp_dir / f"{slug}_media.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "content_type": "substack_text",
+                    "total": 1,
+                    "media_changed": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_fetch.return_value = (
+            "<html><body>"
+            f'<iframe src="https://author.substack.com/api/v1/video/upload/{vid}">'
+            "</iframe></body></html>"
+        )
+        with pytest.raises(StepError):
+            step_substack_embedded_media(task_dict, config)
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            deferral = get_parent_media_deferral(conn, slug)
+        finally:
+            conn.close()
+        assert deferral is not None
+        assert int(deferral["media_changed"]) == 1
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest.get("media_changed") is True
 
     def test_extract_native_video_ids_multiple_uploads(self):
         html = (
