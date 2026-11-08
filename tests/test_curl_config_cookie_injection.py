@@ -13,6 +13,7 @@ import pytest
 
 from agent.config import Config
 from agent.curl_config import escape_curl_config_quoted_string
+from agent.detection import _curl_netscape_cookie_config, _unlink_curl_netscape_sidecar
 from agent.pipelines.instagram import _fetch_ig_comment
 from agent.webhook import _netscape_cookie_upload_error
 
@@ -69,6 +70,24 @@ def _parse_quoted_config_assignments(conf_text: str) -> list[tuple[str, str]]:
         )
         out.append((key, val))
     return out
+
+
+class TestDetectionCurlNetscapeCookieConfig:
+    def test_malicious_cookie_path_does_not_inject_directive(self, tmp_path):
+        cookie_dir = tmp_path / 'cookies"evil'
+        cookie_dir.mkdir()
+        cookie = cookie_dir / 'threads".txt'
+        cookie.write_text("session=1\n", encoding="utf-8")
+        args, conf_path = _curl_netscape_cookie_config(cookie)
+        try:
+            assert conf_path is not None
+            text = conf_path.read_text(encoding="utf-8")
+            assert _count_config_directive_lines(text) == 1
+            assert "https://evil.example/injected" not in text
+            assert "\nurl = " not in text
+            assert args == ["--config", str(conf_path)]
+        finally:
+            _unlink_curl_netscape_sidecar(conf_path)
 
 
 class TestEscapeCurlConfigQuotedString:

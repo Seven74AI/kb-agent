@@ -742,7 +742,6 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     gate_total = max(extracted_total, enqueued_success, prior_manifest_total)
 
     manifest = {
-        "url": url,
         "content_type": task.get("content_type", "substack_text"),
         "total": gate_total,
     }

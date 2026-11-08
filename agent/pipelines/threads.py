@@ -36,12 +36,14 @@ from agent.pipelines.video_common import (
     ensure_h264,
     format_transcript_for_llm,
     merge_speaker_labels,
+    resolve_threads_raw_path,
     run_threads_video_quality_gate,
     step_diarize,
     step_extract_audio,
     step_fetch_transcript,
     step_transcribe,
     strip_code_fence,
+    threads_raw_path,
     upload_note_archive,
     upload_video_source,
 )
@@ -408,7 +410,6 @@ def step_threads_detect(task: dict, config: Config) -> str:
         JSON string: {"content_type": "threads_text" | "threads_video", "raw_page": "..."}
     """
     url = task["source_url"]
-    stem = _download_artifact_stem(task)
 
     html = _curl_threads(url, cookie_dir=config.cookie_dir)
 
@@ -440,7 +441,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
             parent_url = f"https://www.threads.net/t/{parent_match.group(1)}"
             parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
 
-    raw_path = Path(config.temp_dir) / f"{stem}_threads_raw.json"
+    raw_path = threads_raw_path(config, task)
     raw_path.write_text(
         json.dumps(
             {
@@ -536,7 +537,7 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
             parent_context = _fetch_parent_post(parent_url, cookie_dir=config.cookie_dir)
 
     # Write raw extraction for archival
-    raw_path = Path(config.temp_dir) / f"{_slug_path(slug)}_threads_raw.json"
+    raw_path = threads_raw_path(config, task)
     extracted = {
         "url": url,
         "author": author,
@@ -701,7 +702,7 @@ def step_threads_video_synthesize(task: dict, config: Config) -> str:
     merged = json.loads(merged_path.read_text())
 
     # Load raw extraction for author context
-    raw_path = Path(config.temp_dir) / f"{safe_slug}_threads_raw.json"
+    raw_path = resolve_threads_raw_path(config, task)
     author = "unknown"
     parent_context = None
     captions: list[str] = []
@@ -827,7 +828,7 @@ def step_threads_text_synthesize(task: dict, config: Config) -> str:
     source_url = task.get("source_url", "")
     display_source_url = url_for_display(source_url)
 
-    raw_path = Path(config.temp_dir) / f"{safe_slug}_threads_raw.json"
+    raw_path = resolve_threads_raw_path(config, task)
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw extraction not found: {raw_path}")
 

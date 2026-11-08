@@ -74,7 +74,7 @@ Single task + steps; same optional enrichment as `list_tasks`.
 
 ### `resume_task(conn, reason_pattern) -> ResumeResult`
 
-SQL LIKE match on `tasks.error` for `status='paused'`. Reason normalization via `normalize_resume_reason_pattern` (Flask query param parity).
+SQL LIKE match on `tasks.error` for `status='paused'`. Reason normalization via `normalize_reason_pattern` (Flask query param parity).
 
 ### `retry_task(conn, task_id) -> RetryResult`
 

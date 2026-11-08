@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.config import load_config
 from agent.core.watch_source import default_fetch_html, poll_all_due_sources
 from agent.db import AGENT_SCHEMA, init_db
+from agent.notify import sanitize_visible_message
+from agent.redact import url_for_display
 
 
 def main() -> int:
@@ -38,7 +40,9 @@ def main() -> int:
 
     for r in results:
         if "error" in r:
-            print(f"{r['page_url']}: ERROR {r['error']}", file=sys.stderr)
+            safe_url = url_for_display(r.get("page_url") or "")
+            safe_err = sanitize_visible_message(r.get("error") or "")
+            print(f"{safe_url}: ERROR {safe_err}", file=sys.stderr)
             continue
         new = r.get("new_items") or []
         failed = [s for s in r.get("submissions", []) if s.get("status") == "error"]

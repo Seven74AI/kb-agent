@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent.config import Config, load_config
 from agent.consumer import Consumer, recover_orphan_tasks
+from agent.notify import sanitize_visible_message
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db
 from agent.webhook import app
 
@@ -73,7 +74,10 @@ def _run_consumer(config: Config, loop: asyncio.AbstractEventLoop):
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        print(f"[run] Consumer error: {e}", file=sys.stderr)
+        print(
+            f"[run] Consumer error: {sanitize_visible_message(f'{type(e).__name__}: {e}')}",
+            file=sys.stderr,
+        )
     finally:
         # Graceful shutdown
         print("[run] Shutting down consumer...")

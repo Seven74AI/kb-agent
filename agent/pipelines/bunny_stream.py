@@ -205,7 +205,7 @@ def step_extract_metadata(task: dict, config: Config) -> str:
         "duration": 0.0,
         "description": "",
         "chapters": [],
-        "source_url": source_url,
+        "source_url": url_for_display(source_url),
     }
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))

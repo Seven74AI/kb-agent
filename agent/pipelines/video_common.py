@@ -152,6 +152,25 @@ def resolve_threads_video_path(config: Config, task: dict) -> Path:
     return Path(config.temp_dir) / threads_video_filename(task)
 
 
+def threads_raw_path(config: Config, task: dict) -> Path:
+    """Canonical temp path for threads raw JSON (detect / extract writers)."""
+    stem = _artifact_stem(task)
+    return Path(config.temp_dir) / f"{stem}_threads_raw.json"
+
+
+def resolve_threads_raw_path(config: Config, task: dict) -> Path:
+    """Resolve threads raw JSON for synthesis reads (consumer slug, batch id fallback)."""
+    slug_path = threads_raw_path(config, {**task, "_batch_ingest": False})
+    if slug_path.is_file():
+        return slug_path
+    task_id = (task.get("id") or "").strip()
+    if task_id:
+        batch_sidecar = Path(config.temp_dir) / f"{task_id}_threads_raw.json"
+        if batch_sidecar.is_file():
+            return batch_sidecar
+    return slug_path
+
+
 def _find_video_file(config: Config, slug: str) -> Path:
     """Locate the downloaded video for a slug across the known naming schemes."""
     for name in (f"{slug}.webm", f"{slug}.mp4", f"{slug}_threads_video.mp4"):

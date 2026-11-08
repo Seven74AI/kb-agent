@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from agent.archival import append_note_tags
 from agent.config import Config
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
 from agent.db import init_db, LOGS_SCHEMA
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
@@ -324,6 +325,9 @@ def _book_child_slug(parent_slug: str, file_path: str) -> str:
     return f"{base[:prefix_len]}_{digest}"
 
 
+_CHILD_SLUG_HASH_SUFFIX = re.compile(r"_[0-9a-f]{10}$", re.IGNORECASE)
+
+
 def _vault_frontmatter_source_url(source_url: str) -> str:
     """Vault-safe source_url: redact local paths and Mega decryption fragments."""
     from agent.core.status import redact_source_url_for_display
@@ -580,11 +584,29 @@ def _resolve_local_book_path(
         ]
         if matches:
             slug_lower = slug.lower()
+            exact_stem = [f for f in matches if f.stem.lower() == slug_lower]
+            if exact_stem:
+                return sorted(exact_stem, key=lambda f: f.name)[0]
+
+            if _CHILD_SLUG_HASH_SUFFIX.search(slug):
+                raise StepError(
+                    f"No book file ({', '.join(sorted(extensions))}) with exact "
+                    f"stem matching hash-suffixed slug {slug}",
+                    error_type=ErrorType.FAIL,
+                    step_name=step_name,
+                )
+
             slug_matches = [
                 f for f in matches if slug_lower in f.name.lower()
             ]
-            if slug_matches:
-                return sorted(slug_matches, key=lambda f: f.name)[0]
+            if len(slug_matches) == 1:
+                return slug_matches[0]
+            if len(slug_matches) > 1:
+                raise StepError(
+                    f"Ambiguous book file match for slug {slug} under {dl_dir}",
+                    error_type=ErrorType.FAIL,
+                    step_name=step_name,
+                )
             return sorted(matches, key=lambda f: f.name)[0]
 
     raise StepError(
@@ -1161,7 +1183,12 @@ tags: [book, book-summary]
 **Author:** {author}
 
 """
-    note_path.write_text(frontmatter + note_content, encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(
+            frontmatter + redact_http_urls_in_text(note_content),
+        ),
+        encoding="utf-8",
+    )
     append_note_tags(note_path, task.get("tags"))
 
     return str(note_path)
@@ -1515,7 +1542,7 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
             )
         else:
             content = content[:3] + "\n" + block + content[3:]
-        note_path.write_text(content, encoding="utf-8")
+        note_path.write_text(scrub_vault_note_content(content), encoding="utf-8")
 
     return json.dumps({
         "uploaded": uploaded,

@@ -163,6 +163,25 @@ def _ingest_download_stem(task: dict) -> str:
     return task["id"]
 
 
+def copy_threads_raw_for_synthesize(config, q: dict, storage_slug: str) -> None:
+    """Align batch id-keyed threads detect JSON with synthesize slug-keyed reads."""
+    from agent.pipelines.video_common import _slug_path, threads_raw_path
+
+    src = threads_raw_path(
+        config,
+        {
+            "id": q["id"],
+            "slug": q.get("slug", q["id"][:8]),
+            "_batch_ingest": True,
+        },
+    )
+    if not src.is_file():
+        return
+    dest = Path(config.temp_dir) / f"{_slug_path(storage_slug)}_threads_raw.json"
+    if dest.resolve() != src.resolve():
+        shutil.copy2(src, dest)
+
+
 def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
     """Run one link's download-phase steps. Returns (video_path, error)."""
     from agent.pipelines import get_pipeline
@@ -269,6 +288,8 @@ def _process_videos(video_links: list[dict], config, conn, run_id: int) -> tuple
                 content_type=q["content_type"],
                 parent_slug=q.get("parent_slug"),
             )
+            if q["content_type"] == "threads_video":
+                copy_threads_raw_for_synthesize(config, q, storage_slug)
             try:
                 upload_file_to_minio(
                     vdest,
@@ -370,7 +391,6 @@ def refresh_parent_media_manifest(conn, config, parent_slug: str) -> None:
     config.temp_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(config.temp_dir) / f"{parent_slug}_media.json"
     payload = {
-        "url": deferral["source_url"],
         "content_type": deferral["content_type"],
         "total": deferral["expected_total"],
         "media_changed": bool(int(deferral.get("media_changed") or 0)),

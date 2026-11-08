@@ -192,6 +192,19 @@ def test_find_note_in_vault_unique(tmp_path):
     assert find_note_in_vault(url, vault) == expected
 
 
+def test_find_note_in_vault_matches_display_safe_submit_url(tmp_path):
+    """Lookup uses url_for_display so query/fragment on submit URL still resolves."""
+    from agent.redact import url_for_display
+
+    vault = tmp_path / "vault"
+    stored = "https://mega.nz/file/abc123"
+    submit = "https://mega.nz/file/abc123#key-material"
+    expected = _write_vault_note(vault, stored, "mega.md")
+    assert find_notes_in_vault(submit, vault) == [expected]
+    assert find_note_in_vault(submit, vault) == expected
+    assert url_for_display(submit) == stored
+
+
 def test_find_note_in_vault_missing(tmp_path):
     vault = tmp_path / "vault"
     (vault / "Knowledge base" / "articles").mkdir(parents=True, exist_ok=True)

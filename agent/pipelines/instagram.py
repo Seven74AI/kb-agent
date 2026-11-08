@@ -509,7 +509,6 @@ def step_ig_carousel_metadata(task: dict, config: Config) -> str:
     )
 
     metadata = {
-        "url": url,
         "title": "",
         "uploader": "",
         "like_count": 0,
@@ -661,10 +660,13 @@ asyncio.run(main())
 
     # Write extracted slides
     slides_path = Path(config.temp_dir) / f"{safe_slug}_carousel_slides.json"
+    slides_persisted = [
+        {"slide": s["slide"], "alt_text": s.get("alt_text", "")}
+        for s in slides
+    ]
     slides_data = {
-        "url": url,
-        "slides": slides,
-        "slide_count": len(slides),
+        "slides": slides_persisted,
+        "slide_count": len(slides_persisted),
         "cap_note": f"Hard cap: {CAROUSEL_SLIDE_CAP} slides. Slides beyond {CAROUSEL_SLIDE_CAP} are not extractable.",
     }
     slides_path.write_text(json.dumps(slides_data, indent=2, ensure_ascii=False))

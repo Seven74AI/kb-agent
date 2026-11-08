@@ -15,6 +15,7 @@ INGEST_MAX_MEDIA_ATTEMPTS = 3
 # Substrings in task/step pause reasons that mean deferred media still blocks synthesis.
 DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
     "awaiting media",
+    "awaiting substack cookies",
     "deferred to batch synthesis",
     "batch synthesis dispatched or completed",
     "deferred synthesis paused",

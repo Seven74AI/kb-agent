@@ -17,6 +17,7 @@ from agent.detection import (
     detect_content_subtype,
     preflight_health,
 )
+from agent.redact import url_for_display
 
 
 @pytest.fixture
@@ -40,7 +41,9 @@ def test_dedup_check_uses_grep_fixed_string(core_config, monkeypatch):
     dedup_check(url, core_config.vault_path)
     assert captured
     assert "-F" in captured[0]
-    assert f"source_url: {url}" in captured[0]
+    vault_url = url_for_display(url)
+    assert f"source_url: {vault_url}" in captured[0]
+    assert "?v=" not in captured[0]
 
 
 def test_dedup_check_returncode_one_means_not_in_vault(core_config, monkeypatch):
@@ -164,6 +167,36 @@ def test_comment_id_on_non_instagram_does_not_route_to_comment(monkeypatch):
     monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: None)
     monkeypatch.setattr("agent.detection.route_jev", lambda u, c: "web")
     assert detect_content_subtype(url, "web") == "web"
+
+
+MEGA_WITH_KEY = "https://mega.nz/file/abc123#decryptionkey"
+MEGA_CANONICAL = "https://mega.nz/file/abc123"
+REEL_TRACKED = (
+    "https://www.instagram.com/reel/AbCd/?igsh=noise&utm_source=x"
+)
+
+
+def test_dedup_check_matches_display_safe_mega_fragment(core_config):
+    """Vault stores fragment-stripped source_url; submit URL may carry Mega #key."""
+    kb = core_config.vault_path / "Knowledge base" / "articles"
+    kb.mkdir(parents=True, exist_ok=True)
+    (kb / "mega.md").write_text(
+        f"---\nsource_url: {MEGA_CANONICAL}\n---\n",
+        encoding="utf-8",
+    )
+    assert dedup_check(MEGA_WITH_KEY, core_config.vault_path)
+
+
+def test_dedup_check_matches_display_safe_instagram_query(core_config):
+    """Vault stores query-stripped source_url; tracking params must not break dedup."""
+    kb = core_config.vault_path / "Knowledge base" / "articles"
+    kb.mkdir(parents=True, exist_ok=True)
+    stored = url_for_display(REEL_TRACKED)
+    (kb / "ig.md").write_text(
+        f"---\nsource_url: {stored}\n---\n",
+        encoding="utf-8",
+    )
+    assert dedup_check(REEL_TRACKED, core_config.vault_path)
 
 
 def test_dedup_check_no_false_positive_from_regex_dot(core_config):

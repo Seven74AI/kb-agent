@@ -208,6 +208,7 @@ def test_queue_ingest_same_url_different_parent_creates_two_rows(tmp_path):
     "pause_reason",
     [
         "awaiting media: 2 images enqueued",
+        "awaiting substack cookies — paywalled/login HTML without article body",
         "deferred to batch synthesis — parent must not inline synthesize",
         "batch synthesis dispatched or completed — parent must not re-enter synthesis",
         "media gate: ingest rows 1 != manifest total 2",
@@ -232,6 +233,45 @@ def test_resume_deferred_media_denies_bulk_resume(tmp_path, pause_reason):
     assert is_deferred_media_pause(pause_reason)
     assert resume_tasks_by_reason(conn, f"%{pause_reason[:12]}%") == 0
     assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "paused"
+
+
+def test_get_next_step_blocks_synthesize_on_substack_paywall_pause(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = (
+        "awaiting substack cookies — paywalled/login HTML without article body"
+    )
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note", "quality_gate"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    )
+    defer_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (pause_reason, defer_id),
+    )
+    conn.commit()
+
+    assert is_deferred_media_pause(pause_reason)
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "substack_embedded_media"
+    assert nxt["status"] == "paused"
 
 
 def test_get_next_step_blocks_pending_synthesize_when_embedded_media_paused(tmp_path):

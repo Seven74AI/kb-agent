@@ -21,6 +21,8 @@ from agent.pipelines.video_common import (
     check_density,
     resolve_instagram_reel_video,
     resolve_threads_video_path,
+    resolve_threads_raw_path,
+    threads_raw_path,
     step_fetch_transcript,
 )
 from agent.pipelines.instagram import step_ig_cleanup, step_ig_minio_upload
@@ -289,6 +291,37 @@ def test_check_density_uses_artifact_stem_metadata(config, tmp_path):
         json.dumps(meta), encoding="utf-8"
     )
     check_density(note_path, config, task)
+
+
+def test_threads_raw_path_writer_uses_artifact_stem(config):
+    ingest_id = "ingest-threads-raw-001"
+    slug = "threads.net_user_post_X"
+    batch_task = {
+        "id": ingest_id,
+        "slug": slug,
+        "_batch_ingest": True,
+    }
+    assert threads_raw_path(config, batch_task).name == f"{ingest_id}_threads_raw.json"
+    consumer = {"id": ingest_id, "slug": slug}
+    assert threads_raw_path(config, consumer).name == f"{slug}_threads_raw.json"
+
+
+def test_resolve_threads_raw_path_finds_batch_sidecar_for_synthesize_slug(config):
+    ingest_id = "ingest-threads-raw-002"
+    slug = "threads.net_user_post_Y"
+    payload = {
+        "author": "threaduser",
+        "captions": ["caption from batch detect"],
+        "parent_context": "parent post text",
+    }
+    (config.temp_dir / f"{ingest_id}_threads_raw.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    synth_task = {"id": ingest_id, "slug": slug}
+    resolved = resolve_threads_raw_path(config, synth_task)
+    assert resolved.is_file()
+    assert json.loads(resolved.read_text(encoding="utf-8"))["author"] == "threaduser"
 
 
 def test_resolve_video_paths_match_download_stems(config):

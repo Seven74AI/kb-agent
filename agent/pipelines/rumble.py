@@ -27,6 +27,7 @@ from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import _artifact_stem, ensure_h264
+from agent.redact import url_for_display
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -164,6 +165,23 @@ def resolve_rumble(url: str) -> tuple[str, list[dict]]:
     return title, formats
 
 
+def _formats_for_metadata_sidecar(formats: list[dict]) -> list[dict]:
+    """Persist only resolution — signed CDN mp4 URLs must not sit on disk."""
+    return [{"height": int(f["height"])} for f in formats if "height" in f]
+
+
+def _merge_resolved_format_urls(sidecar: list[dict], resolved: list[dict]) -> list[dict]:
+    by_height = {int(f["height"]): f["url"] for f in resolved if f.get("url")}
+    merged: list[dict] = []
+    for row in sidecar:
+        height = int(row["height"])
+        url = by_height.get(height)
+        if not url:
+            return resolved
+        merged.append({"height": height, "url": url})
+    return merged
+
+
 def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
     """Use cached ``{stem}_metadata.json`` from extract_metadata when still fresh."""
     stem = _download_artifact_stem(task)
@@ -178,8 +196,15 @@ def _load_rumble_formats(task: dict, config: Config) -> list[dict]:
                 meta = None
             if meta:
                 formats = meta.get("formats")
-                url_ok = meta.get("source_url", source_url) == source_url
+                cached_url = meta.get("source_url")
+                if cached_url is None:
+                    url_ok = True
+                else:
+                    url_ok = url_for_display(cached_url) == url_for_display(source_url)
                 if url_ok and isinstance(formats, list) and formats:
+                    if all("url" not in f for f in formats):
+                        _, resolved = resolve_rumble(source_url)
+                        return _merge_resolved_format_urls(formats, resolved)
                     return formats
     _, formats = resolve_rumble(source_url)
     return formats
@@ -192,7 +217,11 @@ def step_rumble_extract_metadata(task: dict, config: Config) -> str:
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.write_text(
         json.dumps(
-            {"title": title, "formats": formats, "source_url": task["source_url"]},
+            {
+                "title": title,
+                "formats": _formats_for_metadata_sidecar(formats),
+                "source_url": url_for_display(task["source_url"]),
+            },
             ensure_ascii=False,
         ),
         encoding="utf-8",

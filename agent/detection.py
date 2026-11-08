@@ -119,10 +119,15 @@ def _resolve_threads_cookie_path() -> Path:
 
 def _curl_netscape_cookie_config(cookie_file: Path) -> tuple[list[str], Path | None]:
     """Write a transient curl --config sidecar; callers must unlink via ``_unlink_curl_netscape_sidecar``."""
+    from agent.curl_config import curl_config_quoted_assignment
+
     if not cookie_file.is_file():
         return [], None
     conf_path = cookie_file.parent / f".curl-{cookie_file.name}.conf"
-    conf_path.write_text(f'cookie = "{cookie_file}"\n', encoding="utf-8")
+    conf_path.write_text(
+        f"{curl_config_quoted_assignment('cookie', str(cookie_file))}\n",
+        encoding="utf-8",
+    )
     os.chmod(conf_path, 0o600)
     return ["--config", str(conf_path)], conf_path
 
@@ -660,6 +665,9 @@ def dedup_check(url: str, vault_path: Path) -> bool:
     Returns:
         True if the URL already exists in the vault, False otherwise.
     """
+    from agent.redact import url_for_display
+
+    vault_source_url = url_for_display(url)
     kb_dir = vault_path / "Knowledge base"
     if not kb_dir.is_dir():
         return False
@@ -670,7 +678,7 @@ def dedup_check(url: str, vault_path: Path) -> bool:
                 "-F",
                 "-rl",
                 "--",
-                f"source_url: {url}",
+                f"source_url: {vault_source_url}",
                 str(kb_dir),
             ],
             capture_output=True, text=True, timeout=30,
