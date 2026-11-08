@@ -1353,6 +1353,155 @@ class TestChildProcessLogScrubbing:
         assert "[credential redacted]" in logged
         assert "ocr status: reading complete" in logged
 
+    def test_process_videos_scrubs_download_failure_line(self, config, conn, monkeypatch, capsys):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        ingest_id = queue_ingest(
+            conn, "https://www.youtube.com/watch?v=dlfail", "youtube", "yt_dl_scrub",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        leaky = "download_video failed: cookiefile /root/kb-agent/cookies/yt.txt password=sekret"
+        monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (None, leaky))
+
+        batch_ingest._process_videos([q], config, conn, 503)
+        logged = capsys.readouterr().out
+        assert "/root/kb-agent" not in logged
+        assert "sekret" not in logged
+        assert "[path]" in logged
+        assert "[credential redacted]" in logged
+        assert "download_video failed" in logged
+
+    def test_process_videos_scrubs_upload_and_dispatch_lines(self, config, conn, monkeypatch, capsys):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        config.kb_agent_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = queue_ingest(
+            conn, "https://www.youtube.com/watch?v=upfail", "youtube", "yt_up_scrub",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        fake_video = config.temp_dir / "yt_up_scrub.mp4"
+        fake_video.write_bytes(b"x" * 200)
+        monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+        class _UploadExc(Exception):
+            pass
+
+        upload_calls = {"n": 0}
+
+        def flaky_upload(*_a, **_k):
+            upload_calls["n"] += 1
+            if upload_calls["n"] == 1:
+                raise _UploadExc("minio: /root/.minio/creds token=upload_leak")
+
+        monkeypatch.setattr(batch_ingest, "upload_file_to_minio", flaky_upload)
+
+        ingest_dispatch = queue_ingest(
+            conn, "https://www.youtube.com/watch?v=disfail", "youtube", "yt_dispatch_scrub",
+        )[0]
+        q_dispatch = dict(
+            conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_dispatch,)).fetchone(),
+        )
+        fake_video_2 = config.temp_dir / "yt_dispatch_scrub.mp4"
+        fake_video_2.write_bytes(b"y" * 200)
+
+        def fake_run(cmd, **kwargs):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for item in (ingest_id, ingest_dispatch):
+                    (out_dir / f"{item}.json").write_text(
+                        json.dumps({"segments": [{"text": "hi"}]}),
+                        encoding="utf-8",
+                    )
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            batch_ingest,
+            "dispatch_synthesize",
+            lambda *_a, **_k: {
+                "status": "error",
+                "error": "dispatch denied at /root/kb-agent/data token=badkey",
+            },
+        )
+
+        batch_ingest._process_videos([q, q_dispatch], config, conn, 504)
+        logged = capsys.readouterr().out
+        assert "upload_leak" not in logged
+        assert "badkey" not in logged
+        assert "/root" not in logged
+        assert "[credential redacted]" in logged
+        assert "upload failed" in logged
+        assert "dispatch failed" in logged
+
+    def test_main_scrubs_media_kind_and_submit_errors(self, config, conn, monkeypatch, capsys):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        queue_ingest(
+            conn,
+            "https://example.com/x.png",
+            "substack",
+            "bad_kind",
+            parent_slug="parent_bad",
+            media_kind="bogus",
+        )
+        queue_ingest(conn, "https://example.com/page", "web", "nonvid_fail")
+
+        monkeypatch.setattr(batch_ingest, "load_config", lambda: config)
+        monkeypatch.setattr(batch_ingest, "acquire", lambda _c: True)
+        monkeypatch.setattr(batch_ingest, "release", lambda _c: None)
+        monkeypatch.setattr(batch_ingest, "recover_stale_ingest", lambda _c: None)
+        monkeypatch.setattr(batch_ingest, "recover_failed_media", lambda _c: 0)
+        monkeypatch.setattr(batch_ingest, "record_batch_run", lambda _c: 9)
+        monkeypatch.setattr(
+            batch_ingest,
+            "submit_url",
+            lambda *_a, **_k: {
+                "status": "error",
+                "error": "firecrawl refused /root/.hermes/profiles api_key=xyz",
+            },
+        )
+        monkeypatch.setattr(batch_ingest, "finish_batch_run", lambda *a: None)
+        monkeypatch.setattr(batch_ingest, "_reconcile_deferred_parent_syntheses", lambda *a: None)
+
+        def init_with_test_db(*a, **k):
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(batch_ingest, "init_db", init_with_test_db)
+
+        def claim_all(_c):
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM ingest_queue WHERE status='queued'",
+                ).fetchall()
+            ]
+
+        monkeypatch.setattr(batch_ingest, "claim_ingest_items", claim_all)
+
+        batch_ingest.main()
+        logged = capsys.readouterr().out
+        assert "xyz" not in logged
+        assert "/root/.hermes" not in logged
+        assert "[credential redacted]" in logged
+        assert "[failed]" in logged
+
+
+class TestBatchIngestLogScrubExemptions:
+    """Scripts outside batch_ingest/transcribe/ocr with raw stderr tails are exempt.
+
+    Persistent batch cron stdout is captured in batch_manual.log; other scripts either
+    scrub at rest (rotate_logs.py) or write only to ephemeral operator stderr
+    (tdah_daily_check.py, watch_sources_poll.py, diarize.py usage hints).
+    """
+
 
 class TestCorruptJsonHandling:
     def test_corrupt_ocr_json_marks_failed(self, config, conn, monkeypatch):

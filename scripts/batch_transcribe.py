@@ -14,10 +14,16 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 # Isolate from the Hermes runtime's py3.14 PYTHONPATH (cross-venv cffi mismatch
 # in the modal/yt-dlp subprocesses).
 os.environ.pop("PYTHONPATH", None)
+
+_bootstrap_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_bootstrap_root))
+sys.path.insert(0, "/root/kb-agent")
+from agent.notify import sanitize_visible_message  # noqa: E402
 
 MODAL = "/root/modal"
 VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov")
@@ -27,6 +33,23 @@ FFMPEG_TIMEOUT = 900
 
 def sh(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def _child_captured_output(result: subprocess.CompletedProcess[str]) -> str:
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    return stdout or stderr
+
+
+def _print_scrubbed_child_tail(
+    result: subprocess.CompletedProcess[str],
+    *,
+    tail_chars: int = 1500,
+) -> None:
+    raw = _child_captured_output(result)
+    if not raw:
+        return
+    print(sanitize_visible_message(raw[-tail_chars:]))
 
 
 def extract_wav(video_path: str, wav_path: str) -> subprocess.CompletedProcess:
@@ -91,14 +114,15 @@ def main():
                 continue
             if r.returncode != 0:
                 err = (r.stderr or r.stdout or "").strip()
-                print(f"[error] {f}: ffmpeg failed ({err or r.returncode})")
+                detail = sanitize_visible_message(err) if err else str(r.returncode)
+                print(f"[error] {f}: ffmpeg failed ({detail})")
                 continue
             names.append(base)
         elif f.lower().endswith(".wav"):
             shutil.copy(p, os.path.join(wav_dir, f))
             names.append(base)
     if not names:
-        print("no videos or .wav files found in", in_dir)
+        print("no videos or .wav files found in", sanitize_visible_message(in_dir))
         return 1
     print(f"batch: {len(names)} input(s) -> one Modal run")
 
@@ -111,7 +135,7 @@ def main():
     if prompt:
         cmd += ["--initial-prompt", prompt]
     r = sh(cmd, cwd=MODAL, timeout=3600)
-    print((r.stdout or r.stderr)[-1500:])
+    _print_scrubbed_child_tail(r)
     if r.returncode != 0:
         print(f"[error] Modal run failed ({r.returncode}); aborting")
         return r.returncode

@@ -210,6 +210,7 @@ def test_queue_ingest_same_url_different_parent_creates_two_rows(tmp_path):
         "awaiting media: 2 images enqueued",
         "deferred to batch synthesis — parent must not inline synthesize",
         "batch synthesis dispatched or completed — parent must not re-enter synthesis",
+        "media gate: ingest rows 1 != manifest total 2",
     ],
 )
 def test_resume_deferred_media_denies_bulk_resume(tmp_path, pause_reason):
@@ -320,6 +321,94 @@ def test_get_next_step_does_not_skip_paused_synthesize_deferral(tmp_path, pause_
 )
 def test_is_deferred_media_pause_execute_gate_synthesis(pause_reason):
     assert is_deferred_media_pause(pause_reason)
+
+
+def test_is_deferred_media_pause_media_gate_mismatch():
+    reason = "media gate: ingest rows 1 != manifest total 2"
+    assert is_deferred_media_pause(reason)
+
+
+def test_get_next_step_blocks_on_media_gate_pause(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    pause_reason = "media gate: ingest rows 1 != manifest total 2"
+    task_id = create_task(
+        conn,
+        "https://blog.substack.com/p/post",
+        "substack_text",
+        "parent_slug",
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note", "quality_gate"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = ? WHERE id = ?",
+        (pause_reason, task_id),
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    )
+    defer_id = conn.execute(
+        "SELECT id FROM task_steps WHERE task_id = ? AND name = 'substack_embedded_media'",
+        (task_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = ? WHERE id = ?",
+        (pause_reason, defer_id),
+    )
+    conn.commit()
+
+    assert is_deferred_media_pause(pause_reason)
+    assert resume_tasks_by_reason(conn, "%media gate%") == 0
+    nxt = get_next_step(conn, task_id)
+    assert nxt is not None
+    assert nxt["name"] == "substack_embedded_media"
+    assert nxt["status"] == "paused"
+
+
+def test_bootstrap_parent_media_deferral_refuses_sibling_under_high_water(tmp_path):
+    from agent.db import (
+        bootstrap_parent_media_deferral_from_siblings,
+        get_parent_media_deferral,
+        parent_deferral_synthesize_execute_blocked,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "hw_parent"
+    url = "https://blog.substack.com/p/high-water"
+    task_id = create_task(
+        conn,
+        url,
+        "substack_text",
+        parent,
+        ["substack_cleanup", "substack_embedded_media", "synthesize_note"],
+        status="paused",
+    )
+    conn.execute(
+        """
+        UPDATE task_steps SET status = 'paused', output = ?
+        WHERE task_id = ? AND name = 'substack_embedded_media'
+        """,
+        ("awaiting media: 2 images + 0 videos enqueued", task_id),
+    )
+    queue_ingest(
+        conn,
+        "https://example.com/one.png",
+        "substack_image",
+        "img1",
+        parent_slug=parent,
+        media_kind="image",
+    )
+    conn.commit()
+
+    bootstrap_parent_media_deferral_from_siblings(conn, parent, tmp_path)
+    assert get_parent_media_deferral(conn, parent) is None
+
+    raw = tmp_path / f"{parent}_raw.md"
+    raw.write_text("# parent\n", encoding="utf-8")
+    reason = parent_deferral_synthesize_execute_blocked(conn, parent, raw_path=raw)
+    assert reason == "deferred synthesis paused — sibling media still pending"
 
 
 def test_parent_deferral_synthesize_blocked_without_deferral_row_pending_siblings(

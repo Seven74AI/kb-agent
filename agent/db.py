@@ -18,7 +18,13 @@ DEFERRED_MEDIA_PAUSE_MARKERS: tuple[str, ...] = (
     "deferred to batch synthesis",
     "batch synthesis dispatched or completed",
     "deferred synthesis paused",
+    "media gate",
     "media_deferred:",
+)
+
+_EMBEDDED_MEDIA_AWAITING_RE = re.compile(
+    r"awaiting media:\s*(\d+)\s*images\s*\+\s*(\d+)\s*videos",
+    re.IGNORECASE,
 )
 
 
@@ -423,6 +429,43 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             (ingest_id, url, content_type, slug, status, serialize_tags(tags), parent_key, media_kind),
         )
     return ingest_id, True
+
+
+def _embedded_media_high_water_hint(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    temp_dir: Path | None,
+) -> int:
+    """Largest persisted embedded-media total from manifest or parent task-step output."""
+    if not parent_slug:
+        return 0
+    hints: list[int] = []
+    if temp_dir is not None:
+        manifest_path = temp_dir / f"{parent_slug}_media.json"
+        if manifest_path.is_file():
+            try:
+                data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                total = data.get("total")
+                if total is not None:
+                    hints.append(int(total))
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                pass
+    rows = conn.execute(
+        """
+        SELECT ts.output FROM task_steps ts
+        JOIN tasks t ON t.id = ts.task_id
+        WHERE t.slug = ? AND ts.name = 'substack_embedded_media' AND ts.output IS NOT NULL
+        """,
+        (parent_slug,),
+    ).fetchall()
+    for row in rows:
+        out = row[0] if not hasattr(row, "keys") else row["output"]
+        if not out:
+            continue
+        match = _EMBEDDED_MEDIA_AWAITING_RE.search(out)
+        if match:
+            hints.append(int(match.group(1)) + int(match.group(2)))
+    return max(hints) if hints else 0
 
 
 def _parent_sibling_media_count(conn: sqlite3.Connection, parent_slug: str) -> int:
@@ -1195,9 +1238,13 @@ def bootstrap_parent_media_deferral_from_siblings(
         bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, temp_dir)
         if get_parent_media_deferral(conn, parent_slug):
             return
-    expected = _parent_sibling_media_count(conn, parent_slug)
-    if expected == 0:
+    sibling_n = _parent_sibling_media_count(conn, parent_slug)
+    high_water = _embedded_media_high_water_hint(conn, parent_slug, temp_dir)
+    if sibling_n == 0 and high_water == 0:
         return
+    if high_water > 0 and sibling_n < high_water:
+        return
+    expected = max(sibling_n, high_water)
     conn.row_factory = sqlite3.Row
     parent_row = conn.execute(
         "SELECT source_url, content_type FROM tasks "

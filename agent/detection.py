@@ -333,7 +333,7 @@ def _detect_substack_subtype(url: str) -> str:
     except Exception as exc:
         logger.warning(
             "Substack subtype fetch/parse failed for %s — defaulting to substack_text: %s",
-            url,
+            _safe_url_for_log(url),
             exc,
             exc_info=True,
         )
@@ -536,7 +536,7 @@ def _check_flaresolverr() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [
-                "curl", "-s", "-X", "POST", FLARESOLVERR_URL,
+                "curl", "-s", "--max-redirs", "0", "-X", "POST", FLARESOLVERR_URL,
                 "-H", "Content-Type: application/json",
                 "-d", json.dumps({"cmd": "sessions.list"}),
                 "--max-time", "10",
@@ -561,7 +561,10 @@ def _check_firecrawl() -> tuple[bool, str]:
     """Check Firecrawl health via /scrape endpoint."""
     try:
         result = subprocess.run(
-            ["curl", "-s", "--max-time", "10", "http://localhost:3002/v2/scrape"],
+            [
+                "curl", "-s", "--max-redirs", "0",
+                "--max-time", "10", "http://localhost:3002/v2/scrape",
+            ],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:
