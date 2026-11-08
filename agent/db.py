@@ -8,7 +8,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from agent.deferral_fsm import (
-    DEFERRED_MEDIA_PAUSE_MARKERS,
     REQUEUE_SUPERSEDE_GUARD,
     SUPERSEDE_DEFERRED_PARENT_REASON,
     SYNTHESIZE_IN_FLIGHT_STATUSES,
@@ -355,8 +354,7 @@ def _migrate_ingest_queue_url_parent_unique(conn: sqlite3.Connection) -> None:
 
 _ACTIVE_SYNTHESIZE_SLUG_INDEX = "idx_tasks_one_active_synthesize_per_slug"
 _ACTIVE_DELEGATE_SLUG_CONTENT_TYPE_INDEX = "idx_tasks_one_active_delegate_per_slug_ct"
-_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES = "'pending', 'in_progress', 'paused'"
-_DELEGATE_IN_FLIGHT_SQL_STATUSES = _SYNTHESIZE_IN_FLIGHT_SQL_STATUSES
+_DELEGATE_IN_FLIGHT_SQL_STATUSES = SYNTHESIZE_IN_FLIGHT_STATUSES
 _DELEGATE_CHILD_CONTENT_TYPES = frozenset({
     "book_epub",
     "book_mobi",
@@ -377,7 +375,7 @@ def _migrate_dedupe_in_flight_synthesize_owners(conn: sqlite3.Connection) -> Non
         f"""
         SELECT slug FROM tasks
         WHERE content_type GLOB '*_synthesize'
-          AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+          AND status IN ({SYNTHESIZE_IN_FLIGHT_STATUSES})
         GROUP BY slug HAVING COUNT(*) > 1
         """
     ).fetchall()
@@ -388,7 +386,7 @@ def _migrate_dedupe_in_flight_synthesize_owners(conn: sqlite3.Connection) -> Non
             f"""
             SELECT id FROM tasks
             WHERE slug = ? AND content_type GLOB '*_synthesize'
-              AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+              AND status IN ({SYNTHESIZE_IN_FLIGHT_STATUSES})
             ORDER BY created_at ASC, id ASC
             LIMIT 1
             """,
@@ -401,7 +399,7 @@ def _migrate_dedupe_in_flight_synthesize_owners(conn: sqlite3.Connection) -> Non
             UPDATE tasks
             SET status = 'failed', error = ?, updated_at = datetime('now')
             WHERE slug = ? AND content_type GLOB '*_synthesize'
-              AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+              AND status IN ({SYNTHESIZE_IN_FLIGHT_STATUSES})
               AND id != ?
             """,
             (supersede_error, slug, keep[0]),
@@ -504,7 +502,7 @@ def _migrate_active_synthesize_slug_unique(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX {_ACTIVE_SYNTHESIZE_SLUG_INDEX}
         ON tasks(slug)
         WHERE content_type GLOB '*_synthesize'
-          AND status IN ({_SYNTHESIZE_IN_FLIGHT_SQL_STATUSES})
+          AND status IN ({SYNTHESIZE_IN_FLIGHT_STATUSES})
         """
     )
 
@@ -773,7 +771,7 @@ def _reset_dispatched_parent_siblings_if_deferral_cycle(
             """
             UPDATE ingest_queue
             SET status = 'queued', media_appended = 0, error = NULL,
-                updated_at = datetime('now')
+                dispatched_at = NULL, updated_at = datetime('now')
             WHERE parent_slug = ? AND status = 'dispatched'
             """,
             (parent_slug,),
@@ -1282,13 +1280,19 @@ def _deferral_synthesize_task_fresh(
     return row is not None
 
 
+_MEDIA_LANDING_ANCHOR_ROW_FILTER = (
+    "(status = 'dispatched' OR (dispatched_at IS NOT NULL AND status = 'failed'))"
+)
+
+
 def _deferral_media_landing_anchor(
     conn: sqlite3.Connection, slug: str, deferral: dict,
 ) -> str:
     """Latest sibling ``dispatched_at`` or deferral ``updated_at``, whichever is later."""
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT MAX(dispatched_at) AS latest FROM ingest_queue WHERE parent_slug = ?",
+        f"SELECT MAX(dispatched_at) AS latest FROM ingest_queue "
+        f"WHERE parent_slug = ? AND {_MEDIA_LANDING_ANCHOR_ROW_FILTER}",
         (slug,),
     ).fetchone()
     latest = None
@@ -1306,9 +1310,10 @@ def _deferral_media_landing_anchor(
 
 def _parent_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
     conn.row_factory = sqlite3.Row
+    op = deferral_cycle_cmp({})
     row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
+        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
         f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
@@ -1318,9 +1323,10 @@ def _parent_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: s
 
 def _synthesize_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: str) -> bool:
     conn.row_factory = sqlite3.Row
+    op = deferral_cycle_cmp({})
     row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        "AND status IN ('done', 'completed') AND datetime(updated_at) > datetime(?) "
+        f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
         f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
@@ -1419,7 +1425,8 @@ def _embedded_media_landing_anchor(conn: sqlite3.Connection, slug: str) -> str |
     """Latest sibling ``dispatched_at`` when embedded media rows exist."""
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT MAX(dispatched_at) AS latest FROM ingest_queue WHERE parent_slug = ?",
+        f"SELECT MAX(dispatched_at) AS latest FROM ingest_queue "
+        f"WHERE parent_slug = ? AND {_MEDIA_LANDING_ANCHOR_ROW_FILTER}",
         (slug,),
     ).fetchone()
     if row is None:
@@ -1949,7 +1956,7 @@ def ensure_parent_media_deferral(
                 """
                 UPDATE ingest_queue
                 SET status = 'queued', media_appended = 0, error = NULL,
-                    updated_at = datetime('now')
+                    dispatched_at = NULL, updated_at = datetime('now')
                 WHERE parent_slug = ? AND status = 'dispatched'
                 """,
                 (parent_slug,),

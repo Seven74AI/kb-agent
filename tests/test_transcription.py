@@ -129,6 +129,74 @@ def test_step_diarize_cpu_uses_pyannote(base_config, task_dict):
     assert out == str(output_path)
 
 
+TOKENIZED = "https://cdn.example.com/spoken.mp3?token=secret&expires=999"
+
+
+def test_cpu_transcription_scripts_wired_to_sidecar_writer():
+    for name in ("diarize.py", "transcribe.py"):
+        text = (Path(__file__).resolve().parents[1] / "scripts" / name).read_text(
+            encoding="utf-8",
+        )
+        assert "write_transcription_sidecar_json" in text
+        assert "json.dump(" not in text
+
+
+def test_step_diarize_cpu_rescrubs_sidecar_after_subprocess(base_config, task_dict):
+    slug = task_dict["slug"]
+    (base_config.temp_dir / f"{slug}_8k.wav").write_bytes(b"8k")
+    output_path = base_config.temp_dir / f"{slug}_diarization.json"
+    leaky = {
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "speaker": "SPEAKER_00",
+                "text": f"api_key=spokenleak see {TOKENIZED}",
+            },
+        ],
+    }
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        output_path.write_text(json.dumps(leaky))
+        step_diarize(task_dict, base_config)
+
+    parsed = json.loads(output_path.read_text(encoding="utf-8"))
+    text = parsed["segments"][0]["text"]
+    assert "spokenleak" not in text
+    assert "token=secret" not in text
+    assert "[credential redacted]" in text
+
+
+def test_step_transcribe_cpu_rescrubs_sidecar_after_subprocess(base_config, task_dict):
+    slug = task_dict["slug"]
+    (base_config.temp_dir / f"{slug}_16k.wav").write_bytes(b"16k")
+    (base_config.temp_dir / f"{slug}_metadata.json").write_text(
+        json.dumps({"duration": 60}),
+    )
+    output_path = base_config.temp_dir / f"{slug}_transcript.json"
+    leaky = {
+        "language": "en",
+        "duration": 60.0,
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "text": f"sessionid=spokencookie {TOKENIZED}",
+            },
+        ],
+    }
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        output_path.write_text(json.dumps(leaky))
+        step_transcribe(task_dict, base_config)
+
+    parsed = json.loads(output_path.read_text(encoding="utf-8"))
+    text = parsed["segments"][0]["text"]
+    assert "spokencookie" not in text
+    assert "token=secret" not in text
+    assert "sessionid=[REDACTED]" in text
+
+
 def test_step_transcribe_modal_skips_cpu_script(base_config, task_dict):
     slug = task_dict["slug"]
     trans_out = base_config.temp_dir / f"{slug}_transcript.json"

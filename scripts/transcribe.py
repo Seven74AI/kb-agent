@@ -6,7 +6,14 @@ Usage: python3 transcribe.py <audio_path> <output_json_path> <duration_seconds>
 This is the ONLY transcription script workers should use. Never generate ad-hoc
 scripts in /tmp/ — they will use the wrong model (small/medium/base/tiny).
 """
-import json, sys, time
+import sys
+import time
+from pathlib import Path
+
+_bootstrap_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_bootstrap_root))
+sys.path.insert(0, "/root/kb-agent")
+
 from faster_whisper import WhisperModel
 
 audio_path = sys.argv[1]
@@ -43,12 +50,17 @@ for seg in segments:
               f"({round(elapsed/60)}min elapsed, {round(elapsed/(seg.end or 1), 1)}x realtime)", flush=True)
         last_report = seg.end
 
-with open(output_path, "w") as f:
-    json.dump({
+from agent.redact import write_transcription_sidecar_json
+
+write_transcription_sidecar_json(
+    Path(output_path),
+    {
         "language": info.language,
         "duration": info.duration,
-        "segments": transcript_segments
-    }, f, indent=2, ensure_ascii=False)
+        "segments": transcript_segments,
+    },
+    indent=2,
+)
 
 elapsed = time.time() - start
 print(f"[{time.strftime('%H:%M:%S')}] DONE: {len(transcript_segments)} segments, lang={info.language}, "

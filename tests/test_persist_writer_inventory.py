@@ -19,6 +19,10 @@ def _py_files_under(*roots: tuple[str, ...]) -> list[Path]:
         out.extend(sorted(base.rglob("*.py")))
     for pattern in ("scripts/batch_*.py",):
         out.extend(sorted(_REPO.glob(pattern)))
+    for rel in ("scripts/diarize.py", "scripts/transcribe.py"):
+        path = _REPO / rel
+        if path.is_file():
+            out.append(path)
     return out
 
 
@@ -85,6 +89,12 @@ def test_inventory_no_raw_disk_writers_outside_persist_and_allowlist():
         errors.extend(_collect_raw_disk_writers(tree, rel))
     for path in sorted(_REPO.glob("scripts/batch_*.py")):
         rel = str(path.relative_to(_REPO))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        errors.extend(_collect_raw_disk_writers(tree, rel))
+    for rel in ("scripts/diarize.py", "scripts/transcribe.py"):
+        path = _REPO / rel
+        if not path.is_file():
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         errors.extend(_collect_raw_disk_writers(tree, rel))
     assert not errors, "raw durable writers outside persist:\n" + "\n".join(errors)

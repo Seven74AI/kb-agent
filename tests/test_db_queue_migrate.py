@@ -3016,12 +3016,20 @@ def test_maybe_dispatch_does_not_skip_when_siblings_after_inline_complete(tmp_pa
     conn.row_factory = sqlite3.Row
     parent = "inline_done_parent"
     url = "https://blog.substack.com/p/inline-done"
-    create_task(conn, url, "substack_text", parent, ["synthesize_note"], status="completed")
+    parent_id = create_task(conn, url, "substack_text", parent, ["synthesize_note"], status="completed")
+    conn.execute(
+        "UPDATE tasks SET updated_at = '2020-01-01 00:00:00' WHERE id = ?",
+        (parent_id,),
+    )
     queue_ingest(
         conn, "https://example.com/i1", "substack_image", "i1",
         parent_slug=parent, media_kind="image",
     )
-    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now') WHERE parent_slug=?",
+        (parent,),
+    )
     conn.commit()
 
     config = Config(
@@ -3865,11 +3873,112 @@ def test_queue_ingest_resets_dispatched_siblings_when_media_changed(tmp_path):
         parent_slug=parent, media_kind="image",
     )
     rows = conn.execute(
-        "SELECT status, media_appended FROM ingest_queue WHERE parent_slug=?",
+        "SELECT status, media_appended, dispatched_at FROM ingest_queue WHERE parent_slug=?",
         (parent,),
     ).fetchall()
     assert all(r["status"] == "queued" for r in rows)
     assert all(r["media_appended"] == 0 for r in rows)
+    assert all(r["dispatched_at"] is None for r in rows)
+
+
+def test_deferral_growth_requeue_clears_dispatched_at(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "growth_requeue_clear"
+    url = "https://blog.substack.com/p/growth-requeue"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    queue_ingest(
+        conn, "https://example.com/i1.png", "substack_image", "i1",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at=datetime('now') WHERE parent_slug=?",
+        (parent,),
+    )
+    conn.commit()
+
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
+    row = conn.execute(
+        "SELECT status, dispatched_at FROM ingest_queue WHERE parent_slug=?",
+        (parent,),
+    ).fetchone()
+    assert row["status"] == "queued"
+    assert row["dispatched_at"] is None
+    assert get_parent_media_deferral(conn, parent)["media_changed"] == 1
+
+
+def test_deferral_media_landing_anchor_ignores_non_dispatched_rows(tmp_path):
+    """INVARIANT: landing anchor only considers dispatched (or failed+dispatched_at) siblings."""
+    from agent.db import _deferral_media_landing_anchor, ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "landing_anchor_filter"
+    url = "https://blog.substack.com/p/anchor-filter"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 2)
+    deferral = get_parent_media_deferral(conn, parent)
+    conn.execute(
+        "UPDATE parent_media_deferral SET updated_at = '2024-01-15 10:00:00' WHERE parent_slug = ?",
+        (parent,),
+    )
+    deferral = get_parent_media_deferral(conn, parent)
+
+    queue_ingest(
+        conn, "https://example.com/stale.png", "substack_image", "stale",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='queued', "
+        "dispatched_at='2024-06-01 12:00:00' WHERE slug='stale'",
+    )
+    queue_ingest(
+        conn, "https://example.com/live.png", "substack_image", "live",
+        parent_slug=parent, media_kind="image",
+    )
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched', "
+        "dispatched_at='2024-01-15 11:00:00' WHERE slug='live'",
+    )
+    conn.commit()
+
+    anchor = _deferral_media_landing_anchor(conn, parent, deferral)
+    assert anchor == "2024-01-15 11:00:00"
+
+
+def test_terminal_after_anchor_treats_same_second_as_fresh(tmp_path):
+    """INVARIANT: terminal-after-anchor probes use deferral_cycle_cmp (>=), not strict >."""
+    from agent.db import (
+        _parent_terminal_after_anchor,
+        _synthesize_terminal_after_anchor,
+        ensure_parent_media_deferral,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "anchor_same_second"
+    url = "https://blog.substack.com/p/anchor-same"
+    ensure_parent_media_deferral(conn, slug, url, "substack_text", 1)
+    anchor = "2024-03-01 12:00:00"
+
+    parent_id = create_task(
+        conn, url, "substack_text", slug, ["synthesize_note"], status="completed",
+    )
+    syn_id = create_task(
+        conn, url, "substack_text_synthesize", slug, ["synthesize_note"], status="completed",
+    )
+    conn.execute(
+        "UPDATE tasks SET error = NULL, updated_at = ? WHERE id IN (?, ?)",
+        (anchor, parent_id, syn_id),
+    )
+    conn.commit()
+
+    assert _parent_terminal_after_anchor(conn, slug, anchor) is True
+    assert _synthesize_terminal_after_anchor(conn, slug, anchor) is True
 
 
 def test_dispatch_synthesize_redispatches_stale_done_under_media_changed(tmp_path):
