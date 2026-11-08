@@ -56,6 +56,23 @@ from agent.config import load_config  # noqa: E402
 from agent.core.detect import detect_type  # noqa: E402
 from agent.core.submit import submit_url  # noqa: E402
 from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
+from agent.redact import url_for_display  # noqa: E402
+
+
+def _run_manifest_record_for_jsonl(record: dict) -> dict:
+    """Display-safe manifest line (no query-bearing submit URLs)."""
+    out = dict(record)
+    url = out.get("url")
+    if url:
+        out["url"] = url_for_display(str(url))
+    return out
+
+
+def append_run_manifest_line(manifest_path: Path, record: dict) -> None:
+    """Append one JSONL row to ``run_manifest.jsonl`` with display-safe URLs."""
+    safe = _run_manifest_record_for_jsonl(record)
+    with manifest_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(safe) + "\n")
 
 
 def _enrich_content_types(rows: list[dict]) -> list[dict]:
@@ -161,8 +178,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     ignore_dedup=args.ignore_dedup,
                 )
             results.append(record)
-            with manifest_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+            append_run_manifest_line(manifest_path, record)
     finally:
         if conn is not None:
             conn.close()

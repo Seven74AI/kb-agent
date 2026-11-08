@@ -101,6 +101,20 @@ def test_slugify_basic():
     assert slugify("https://example.com/foo/bar") == "example.com_foo_bar"
 
 
+def test_slugify_strips_netloc_userinfo():
+    """INVARIANT: credential userinfo never enters slug or derived durable keys."""
+    cred_url = "https://user:sekret@example.com/path"
+    slug = slugify(cred_url)
+    assert "user" not in slug
+    assert "sekret" not in slug
+    assert slug == slugify("https://example.com/path")
+
+
+def test_slugify_credential_free_url_unchanged():
+    plain = "https://example.com/foo/bar"
+    assert slugify(plain) == "example.com_foo_bar"
+
+
 def test_slugify_youtube_watch_v_param():
     url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     assert slugify(url).endswith("_v_dQw4w9WgXcQ")

@@ -1962,6 +1962,71 @@ def test_fresh_deferral_generation_ignores_superseded_parent(tmp_path):
     assert has_completed_parent_synthesis(conn, slug) is False
 
 
+def test_supersede_deferred_parent_task_canonical_reason(tmp_path):
+    """Batch and web paths share one supersede error string."""
+    from agent.db import (
+        SUPERSEDE_DEFERRED_PARENT_REASON,
+        supersede_deferred_parent_task,
+    )
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "sup_canonical"
+    url = "https://blog.substack.com/p/canonical"
+    parent_id = create_task(
+        conn, url, "substack_text", slug,
+        ["synthesize_note"], status="paused",
+    )
+    conn.commit()
+
+    assert supersede_deferred_parent_task(conn, slug) == 1
+    row = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?", (parent_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert row["error"] == SUPERSEDE_DEFERRED_PARENT_REASON
+
+
+def test_supersede_deferred_parent_task_cas_stays_terminal(tmp_path):
+    """Stale complete_task cannot revive a batch-superseded parent row."""
+    from agent.db import complete_task, supersede_deferred_parent_task
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "sup_cas"
+    url = "https://blog.substack.com/p/cas"
+    parent_id = create_task(
+        conn, url, "substack_text", slug,
+        ["synthesize_note"], status="in_progress",
+    )
+    conn.commit()
+
+    assert supersede_deferred_parent_task(conn, slug) == 1
+    assert complete_task(conn, parent_id) is False
+    row = conn.execute(
+        "SELECT status, error FROM tasks WHERE id = ?", (parent_id,),
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert "superseded" in (row["error"] or "").lower()
+
+
+def test_supersede_deferred_parent_task_idempotent(tmp_path):
+    from agent.db import supersede_deferred_parent_task
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "sup_idem"
+    url = "https://blog.substack.com/p/idem"
+    create_task(
+        conn, url, "substack_text", slug,
+        ["synthesize_note"], status="paused",
+    )
+    conn.commit()
+
+    assert supersede_deferred_parent_task(conn, slug) == 1
+    assert supersede_deferred_parent_task(conn, slug) == 0
+
+
 def test_has_completed_parent_synthesis_monotonic_pending_with_fresh_synth_deferral(
     tmp_path,
 ):

@@ -11,7 +11,12 @@ from typing import Any
 
 from agent.config import Config
 from agent.core.slugify import slugify
-from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
+from agent.redact import (
+    failure_text_for_display,
+    redact_http_urls_in_text,
+    scrub_vault_note_content,
+    url_for_display,
+)
 from agent.quality import (
     count_fact_checks,
     quality_gate_book,
@@ -280,6 +285,8 @@ def _side_for_json(side: dict[str, Any]) -> dict[str, Any]:
     scrubbed = {**side, "content": None}
     if side.get("note_path") is not None:
         scrubbed["note_path"] = _note_path_for_display(str(side["note_path"]))
+    failures = side.get("failures") or []
+    scrubbed["failures"] = [failure_text_for_display(f) for f in failures]
     return scrubbed
 
 
@@ -326,7 +333,9 @@ def build_review_html(entries: list[dict[str, Any]]) -> str:
             status = "pass" if data["passed"] else "fail"
             metrics = data.get("metrics") or {}
             metric_bits = ", ".join(f"{k}={v}" for k, v in sorted(metrics.items()))
-            failures = data.get("failures") or []
+            failures = [
+                failure_text_for_display(f) for f in (data.get("failures") or [])
+            ]
             fail_html = ""
             if failures:
                 fail_html = (

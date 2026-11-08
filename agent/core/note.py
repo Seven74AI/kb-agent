@@ -6,7 +6,6 @@ from pathlib import Path
 from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.core.slugify import SLUG_MAX_LEN
 from agent.redact import (
-    prepare_vault_note_for_write,
     redact_http_urls_in_text,
     scrub_vault_note_content,
     write_vault_note,

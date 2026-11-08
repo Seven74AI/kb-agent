@@ -533,19 +533,40 @@ def _foreign_platform_from_url(url: str) -> str | None:
     return None
 
 
+def _embed_carrier_pause_label(url: str) -> str | None:
+    """PAUSE label for an embed-carrier URL the deferral gate cannot enqueue.
+
+    Handled platforms (Substack-native / YouTube / Rumble) return None. Known foreign
+    platforms return their rule label; any other embed carrier fails closed on host
+    (or ``unknown`` when no host is present).
+    """
+    if not url or _HANDLED_EMBED_URL_RE.search(url):
+        return None
+    platform = _foreign_platform_from_url(url)
+    if platform:
+        return platform
+    host = urlparse(url).hostname
+    return host if host else "unknown"
+
+
 def _detect_unsupported_foreign_embed(html: str) -> str | None:
     """First foreign embed platform in article HTML that the deferral gate cannot enqueue.
 
-    Invariant: only embed carriers (iframe ``src``, oEmbed provider fields, embed-class
-    markers, and anchor ``href`` values whose URL looks like a player/embed endpoint).
-    Plain outbound citation links must not trigger a foreign pause. Substack-native,
-    YouTube, and Rumble embeds are exempt (handled by the existing extractors).
+    Invariant: any DOM embed carrier (blockquote embed class, data-*-permalink, iframe,
+    oEmbed) that is not a handled platform must fail closed (PAUSE), never fall through
+    to inline synthesis as ``no embedded media``. Plain outbound citation ``<a href>``
+    links must not trigger a pause. Substack-native, YouTube, and Rumble embeds are
+    exempt (handled by the existing extractors).
     """
     decoded = _html_unescape(html)
     if "data-instgrm-permalink" in decoded or "instagram-media" in decoded:
         return "instagram"
     if "tiktok-embed" in decoded:
         return "tiktok"
+    if "data-text-post-permalink" in decoded or "text-post-media" in decoded:
+        return "threads"
+    if "twitter-tweet" in decoded or "twitter-timeline" in decoded:
+        return "twitter"
     candidates: list[str] = []
     for pattern in (_IFRAME_SRC_RE, _OEMBED_PROVIDER_RE):
         candidates.extend(m.group(1) for m in pattern.finditer(decoded))
@@ -554,9 +575,9 @@ def _detect_unsupported_foreign_embed(html: str) -> str | None:
         if _EMBED_CARRIER_URL_RE.search(url):
             candidates.append(url)
     for url in candidates:
-        platform = _foreign_platform_from_url(url)
-        if platform:
-            return platform
+        label = _embed_carrier_pause_label(url)
+        if label:
+            return label
     return None
 
 
@@ -1034,20 +1055,6 @@ def _parent_article_deferred_to_batch(task: dict, config: Config, conn) -> bool:
     return int(sibling_count) > 0
 
 
-def _supersede_deferred_parent_task(conn, parent_slug: str) -> None:
-    """Mark the original Substack parent ingestion task terminal after batch synthesis."""
-    reason = "deferred synthesis dispatched; parent ingestion superseded"
-    with conn:
-        conn.execute(
-            """
-            UPDATE tasks SET status = 'completed', error = ?, updated_at = datetime('now')
-            WHERE slug = ? AND content_type NOT GLOB '*_synthesize'
-            AND status IN ('paused', 'pending', 'in_progress')
-            """,
-            (reason, parent_slug),
-        )
-
-
 def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
     """Parent Substack tasks must not inline-synthesize when batch owns the slug.
 
@@ -1056,7 +1063,12 @@ def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
     content_type = task.get("content_type", "")
     if content_type not in _SUBSTACK_PARENT_CONTENT_TYPES:
         return False
-    from agent.db import AGENT_SCHEMA, has_completed_parent_synthesis, init_db
+    from agent.db import (
+        AGENT_SCHEMA,
+        has_completed_parent_synthesis,
+        init_db,
+        supersede_deferred_parent_task,
+    )
 
     slug = task.get("slug", task["id"][:8])
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
@@ -1067,7 +1079,7 @@ def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
             vault_path=config.vault_path,
             temp_dir=Path(config.temp_dir),
         ):
-            _supersede_deferred_parent_task(conn, slug)
+            supersede_deferred_parent_task(conn, slug)
             return True
         if not _parent_article_deferred_to_batch(task, config, conn):
             return False

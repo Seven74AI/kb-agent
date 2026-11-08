@@ -17,6 +17,7 @@ from agent.notify import redact_credential_shapes
 _ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
 
 _HTTP_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
+_ABS_PATH_IN_TEXT_RE = re.compile(r"/(?:[\w.-]+/)+[\w.-]+")
 
 
 def _http_netloc_for_display(parsed) -> str:
@@ -58,6 +59,25 @@ def redact_http_urls_in_text(text: str) -> str:
         return url_for_display(match.group(0))
 
     return _HTTP_URL_IN_TEXT.sub(repl, text or "")
+
+
+def failure_text_for_display(text: str) -> str:
+    """Scrub quality-gate / benchmark failure lines for durable artifacts (URLs + host paths)."""
+    placeholders: list[str] = []
+
+    def shield_url(match: re.Match[str]) -> str:
+        placeholders.append(url_for_display(match.group(0)))
+        return f"__KB_FAIL_URL_{len(placeholders) - 1}__"
+
+    shielded = _HTTP_URL_IN_TEXT.sub(shield_url, text or "")
+
+    def path_repl(match: re.Match[str]) -> str:
+        return url_for_display(match.group(0))
+
+    scrubbed = _ABS_PATH_IN_TEXT_RE.sub(path_repl, shielded)
+    for index, safe in enumerate(placeholders):
+        scrubbed = scrubbed.replace(f"__KB_FAIL_URL_{index}__", safe)
+    return scrubbed
 
 
 def url_for_display(url: str) -> str:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agent.notify import redact_credential_shapes
 from agent.core.note import write_vault_note
+from agent.redact import url_for_display
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def quality_gate_web(note_path: Path, config, vault_path: Path | None = None) ->
 
     # ── Tier 1: Programmatic checks ──
     if not note_path.exists():
-        return False, [f"Note not found: {note_path}"]
+        return False, [f"Note not found: {url_for_display(str(note_path))}"]
 
     content = note_path.read_text(encoding="utf-8")
     lines = content.split("\n")
@@ -128,7 +129,7 @@ def quality_gate_book(note_path: Path, config, vault_path: Path | None = None) -
     failures: list[str] = []
 
     if not note_path.exists():
-        return False, [f"Note not found: {note_path}"]
+        return False, [f"Note not found: {url_for_display(str(note_path))}"]
 
     content = note_path.read_text(encoding="utf-8")
     lines = content.split("\n")
@@ -220,7 +221,7 @@ def quality_gate_youtube(note_path: Path, config, vault_path: Path | None = None
     failures: list[str] = []
 
     if not note_path.exists():
-        return False, [f"Note not found: {note_path}"]
+        return False, [f"Note not found: {url_for_display(str(note_path))}"]
 
     content = note_path.read_text(encoding="utf-8")
     lines = content.split("\n")
@@ -274,7 +275,7 @@ def quality_gate_threads_video(note_path: Path, config, vault_path: Path | None 
     failures: list[str] = []
 
     if not note_path.exists():
-        return False, [f"Note not found: {note_path}"]
+        return False, [f"Note not found: {url_for_display(str(note_path))}"]
 
     lines = note_path.read_text(encoding="utf-8").split("\n")
 

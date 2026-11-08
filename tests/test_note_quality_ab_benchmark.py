@@ -179,6 +179,49 @@ def test_build_review_html_redacts_tracking_query_on_url():
     assert "https://example.com/article" in html
 
 
+def test_benchmark_artifacts_scrub_failures_with_url_and_absolute_path(tmp_path):
+    """comparison.json and review.html must redact URLs and absolute paths in failure text."""
+    secret_url = "https://cdn.example.com/v.mp4?token=deadbeef"
+    host_path = "/root/kb-agent/vault/Knowledge base/leaked-note.md"
+    raw_failure = f"fetch failed for {secret_url} at {host_path}"
+    entries = [
+        {
+            "url": "https://example.com/x",
+            "content_type": "web",
+            "kb_agent": {
+                "note_path": host_path,
+                "passed": False,
+                "failures": [raw_failure],
+                "metrics": {},
+                "content": "(missing)",
+            },
+            "hermes": {
+                "note_path": None,
+                "passed": False,
+                "failures": ["Note not found"],
+                "metrics": {},
+                "content": "",
+            },
+        }
+    ]
+    html = build_review_html(entries)
+    assert "token=deadbeef" not in html
+    assert "deadbeef" not in html
+    assert "/root/kb-agent" not in html
+    assert "leaked-note.md" in html
+    assert "https://cdn.example.com/v.mp4" in html
+
+    out_dir = tmp_path / "report"
+    paths = write_comparison_report(entries, out_dir)
+    raw_json = paths["json"].read_text(encoding="utf-8")
+    assert "token=deadbeef" not in raw_json
+    assert "/root/kb-agent" not in raw_json
+    payload = json.loads(raw_json)
+    kb_failures = payload["entries"][0]["kb_agent"]["failures"]
+    assert any("leaked-note.md" in f for f in kb_failures)
+    assert all("token=" not in f for f in kb_failures)
+
+
 def test_build_review_html_side_by_side_content():
     html = build_review_html(
         [
@@ -328,6 +371,25 @@ def _run_compare(*extra: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+def test_run_manifest_appends_display_safe_url(tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("note_quality_ab_benchmark", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    manifest = tmp_path / "run_manifest.jsonl"
+    tracked = "https://example.com/article?utm_campaign=secret&sig=abc"
+    mod.append_run_manifest_line(
+        manifest,
+        {"url": tracked, "content_type": "web", "kb_agent": {"status": "pending"}},
+    )
+    line = json.loads(manifest.read_text(encoding="utf-8").strip())
+    assert line["url"] == "https://example.com/article"
+    assert "utm_campaign" not in manifest.read_text(encoding="utf-8")
 
 
 def test_cli_compare_summary_semantics(tmp_path):

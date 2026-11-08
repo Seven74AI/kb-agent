@@ -27,7 +27,6 @@ from agent.pipelines.youtube import (
     _format_transcript_for_llm,
     _build_speaker_summary,
     _check_density,
-    _slug_path,
     step_extract_metadata,
     step_download_video,
     step_extract_audio,
@@ -312,6 +311,8 @@ def test_step_extract_metadata_success(config, task_dict):
     # Check file was written
     meta_file = Path(config.temp_dir) / f"{task_dict['slug']}_metadata.json"
     assert meta_file.exists()
+    slug_marker = Path(config.temp_dir) / f"{task_dict['slug']}_slug.txt"
+    assert not slug_marker.exists()
 
 
 def test_step_extract_metadata_with_chapters(config, task_dict):

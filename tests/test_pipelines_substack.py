@@ -571,6 +571,58 @@ class TestSubstackVideoMetadata:
         )
         assert _detect_unsupported_foreign_embed(html) == "instagram"
 
+    def test_detect_foreign_embed_threads_text_post_blockquote(self):
+        html = (
+            "<html><body><p>See below</p>"
+            '<blockquote class="text-post-media" '
+            'data-text-post-permalink="https://www.threads.net/@user/post/abc123">'
+            "</blockquote>"
+            '<script async src="https://www.threads.net/embed.js"></script>'
+            "</body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "threads"
+
+    def test_detect_foreign_embed_twitter_tweet_blockquote(self):
+        html = (
+            "<html><body>"
+            '<blockquote class="twitter-tweet">'
+            '<a href="https://twitter.com/user/status/123">tweet</a>'
+            "</blockquote></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "twitter"
+
+    def test_detect_foreign_embed_twitter_timeline_blockquote(self):
+        html = (
+            "<html><body>"
+            '<blockquote class="twitter-timeline" data-widget-id="1">'
+            "</blockquote></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "twitter"
+
+    def test_detect_foreign_embed_unknown_iframe_host_fail_closed(self):
+        html = (
+            "<html><body>"
+            '<iframe src="https://open.spotify.com/embed/track/abc123"></iframe>'
+            "</body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) == "open.spotify.com"
+
+    def test_detect_foreign_embed_absent_on_plain_twitter_citation_link(self):
+        html = (
+            "<html><body><p>As noted in "
+            '<a href="https://twitter.com/user/status/123">this tweet</a>'
+            "</p></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) is None
+
+    def test_detect_foreign_embed_absent_on_plain_threads_citation_link(self):
+        html = (
+            "<html><body><p>As noted in "
+            '<a href="https://www.threads.net/@user/post/abc">this thread</a>'
+            "</p></body></html>"
+        )
+        assert _detect_unsupported_foreign_embed(html) is None
+
     @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._enqueue_embedded_media")
     def test_youtube_iframe_with_instagram_citation_still_defers(
@@ -603,6 +655,44 @@ class TestSubstackVideoMetadata:
             step_substack_embedded_media(task_dict, config)
         assert exc.value.error_type == ErrorType.PAUSE
         assert "unsupported embed: instagram" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_foreign_threads_blockquote_pauses_not_inline(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = (
+            "<html><body><p>Intro</p>"
+            '<blockquote class="text-post-media" '
+            'data-text-post-permalink="https://www.threads.net/@u/post/1">'
+            "</blockquote></body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed: threads" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_foreign_twitter_blockquote_pauses_not_inline(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = (
+            "<html><body>"
+            '<blockquote class="twitter-tweet">'
+            '<a href="https://x.com/i/status/1">x</a>'
+            "</blockquote></body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed: twitter" in str(exc.value)
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_unknown_iframe_embed_pauses_not_inline(self, mock_fetch, config, task_dict):
+        mock_fetch.return_value = (
+            "<html><body>"
+            '<iframe src="https://open.spotify.com/embed/track/abc"></iframe>'
+            "</body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed: open.spotify.com" in str(exc.value)
 
     @patch("agent.pipelines.web._fetch_substack_html")
     def test_zero_embeds_with_pending_siblings_pauses_not_inline(

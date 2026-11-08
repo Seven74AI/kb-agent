@@ -1,8 +1,9 @@
 """Tests for the Mega.nz video pipeline."""
 
+import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -39,6 +40,16 @@ def task_dict():
         "content_type": "mega_video",
         "slug": "mega_video_test",
     }
+
+
+@patch("agent.pipelines.mega_video.subprocess.run")
+def test_extract_metadata_writes_metadata_only_no_slug_marker(mock_run, config, task_dict):
+    mock_run.return_value = MagicMock(returncode=0, stdout="clip.mp4\n", stderr="")
+    meta_json = step_mega_extract_metadata(task_dict, config)
+    assert json.loads(meta_json)["title"] == "clip"
+    stem = task_dict["slug"]
+    assert (config.temp_dir / f"{stem}_metadata.json").is_file()
+    assert not (config.temp_dir / f"{stem}_slug.txt").exists()
 
 
 class TestMegaVideoSsrf:

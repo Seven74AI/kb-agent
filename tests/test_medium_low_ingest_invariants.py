@@ -197,6 +197,7 @@ def test_carousel_extract_sanitizes_subprocess_details(config, monkeypatch):
     with pytest.raises(StepError) as excinfo:
         step_ig_carousel_extract(task, config)
     assert excinfo.value.error_type == ErrorType.RETRY
+    assert excinfo.value.step_name == "ig_carousel_extract"
     assert excinfo.value.details is not None
     assert len(excinfo.value.details) <= 500
 

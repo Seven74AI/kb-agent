@@ -1116,6 +1116,11 @@ def _is_superseded_parent_error(error: str | None) -> bool:
     return bool(error and "superseded" in error.lower())
 
 
+SUPERSEDE_DEFERRED_PARENT_REASON = (
+    "deferred synthesis dispatched; parent ingestion superseded"
+)
+
+
 def _deferral_cycle_cmp(deferral: dict) -> str:
     """SQL comparison operator for deferral-generation freshness.
 
@@ -2081,6 +2086,31 @@ def task_execution_aborted(conn: sqlite3.Connection, task_id: str) -> bool:
     if _is_superseded_parent_error(err):
         return True
     return status in ("failed", "completed", "done")
+
+
+def supersede_deferred_parent_task(
+    conn: sqlite3.Connection, parent_slug: str,
+) -> int:
+    """Mark the original parent ingestion task terminal after batch synthesis.
+
+    Compare-and-swap: only active non-synthesize rows transition; superseded or
+    already-terminal parents are left unchanged so ``complete_task`` cannot revive
+    them.
+    """
+    if not parent_slug:
+        return 0
+    with conn:
+        cur = conn.execute(
+            """
+            UPDATE tasks SET status = 'completed', error = ?, updated_at = datetime('now')
+            WHERE slug = ?
+              AND content_type NOT GLOB '*_synthesize'
+              AND status IN ('paused', 'pending', 'in_progress')
+              AND (error IS NULL OR LOWER(error) NOT LIKE '%superseded%')
+            """,
+            (SUPERSEDE_DEFERRED_PARENT_REASON, parent_slug),
+        )
+        return cur.rowcount
 
 
 def complete_task(conn: sqlite3.Connection, task_id: str) -> bool:

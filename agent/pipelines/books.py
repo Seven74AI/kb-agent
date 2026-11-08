@@ -475,7 +475,7 @@ def _pdf_preflight(pdf_path: Path) -> tuple[str, int]:
         'degraded', or 'text', and score is 0-100.
     """
     if not HAS_PYMUPDF:
-        return "text", 100  # Assume clean if pymupdf unavailable
+        return "degraded", 0
 
     try:
         doc = pymupdf.open(str(pdf_path))
@@ -583,7 +583,7 @@ def quality_score(pdf_path: str | Path) -> int:
         Quality score 0-100.
     """
     if not HAS_PYMUPDF:
-        return 100
+        return 0
 
     try:
         doc = pymupdf.open(str(pdf_path))
@@ -664,11 +664,10 @@ def _quality_score(doc, page_count: int) -> int:
             scores_count += 1
 
         except Exception:
-            total_score += 50
             scores_count += 1
 
     if scores_count == 0:
-        return 100
+        return 0
 
     return min(100, int(total_score / scores_count))
 
