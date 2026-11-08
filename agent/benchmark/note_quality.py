@@ -384,8 +384,10 @@ def write_comparison_report(
             for e in entries
         ],
     }
+    from agent.persist import persist_durable_json, persist_durable_text
+
     json_path = out_dir / "comparison.json"
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    persist_durable_json(json_path, payload, policy="boundary4")
     html_path = out_dir / "review.html"
-    html_path.write_text(build_review_html(entries), encoding="utf-8")
+    persist_durable_text(html_path, build_review_html(entries), policy="boundary4")
     return {"json": json_path, "html": html_path}

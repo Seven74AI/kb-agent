@@ -99,9 +99,10 @@ def _book_classify_manifest_path(config: Config, task: dict) -> Path:
 
 
 def _write_book_classify_manifest(config: Config, task: dict, payload: dict) -> Path:
+    from agent.persist import persist_durable_json
+
     path = _book_classify_manifest_path(config, task)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    persist_durable_json(path, payload, policy="machine_local", indent=None)
     return path
 
 
@@ -774,12 +775,14 @@ def step_extract_epub(task: dict, config: Config) -> str:
         all_text.sort(key=lambda x: x[0])
 
         # Write full text — unique path per slug
-        output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        from agent.persist import persist_durable_text
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            for idx, chars, text in all_text:
-                f.write(f"\n\n=== CHAPTER {idx} ===\n\n")
-                f.write(prepare_ocr_reading_for_write(text))
+        output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        chunks: list[str] = []
+        for idx, _chars, text in all_text:
+            chunks.append(f"\n\n=== CHAPTER {idx} ===\n\n")
+            chunks.append(text)
+        persist_durable_text(output_path, "".join(chunks), policy="boundary4")
 
         total = sum(c for _, c, _ in all_text)
 
@@ -866,9 +869,10 @@ def step_extract_pdf(task: dict, config: Config) -> str:
 
         doc.close()
 
+        from agent.persist import persist_durable_text
+
         output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(prepare_ocr_reading_for_write("\n\n".join(full_text)))
+        persist_durable_text(output_path, "\n\n".join(full_text), policy="boundary4")
 
         total_chars = sum(len(t) for t in full_text)
 
@@ -908,9 +912,10 @@ def _write_pdf_full_text(
     full_text = [page.get_text() for page in doc]
     doc.close()
 
+    from agent.persist import persist_durable_text
+
     output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(prepare_ocr_reading_for_write("\n\n".join(full_text)))
+    persist_durable_text(output_path, "\n\n".join(full_text), policy="boundary4")
 
     total_chars = sum(len(t) for t in full_text)
     payload = {
@@ -1021,8 +1026,10 @@ def step_extract_pdf_scanned(task: dict, config: Config) -> str:
         )
 
     combined = "\n\n".join(p.read_text(encoding="utf-8", errors="replace") for p in md_files)
+    from agent.persist import persist_durable_text
+
     output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
-    output_path.write_text(prepare_ocr_reading_for_write(combined), encoding="utf-8")
+    persist_durable_text(output_path, combined, policy="boundary4")
 
     task["_book_title"] = pdf_path.stem
     task["_book_author"] = "Unknown"

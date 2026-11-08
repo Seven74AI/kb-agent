@@ -86,7 +86,13 @@ def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
     os.chmod(xdg_root, 0o700)
     os.chmod(conf_dir, 0o700)
     conf_path = conf_dir / "config"
-    conf_path.write_text(f"--cookies\n{cookie_path}\n", encoding="utf-8")
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(
+        conf_path,
+        f"--cookies\n{cookie_path}\n",
+        policy="machine_local",
+    )
     os.chmod(conf_path, 0o600)
     env = os.environ.copy()
     env["XDG_CONFIG_HOME"] = str(xdg_root)
@@ -278,7 +284,9 @@ def step_extract_metadata(task: dict, config: Config) -> str:
 
     # Save metadata to temp
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
-    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(meta_path, metadata, policy="boundary4")
 
     return json.dumps(metadata)
 
@@ -737,7 +745,9 @@ Respond with ONLY valid JSON:
         debug_root.mkdir(parents=True, exist_ok=True)
         os.chmod(debug_root, 0o700)
         debug_path = debug_root / f"{slug}_pass1_debug.txt"
-        debug_path.write_text(redact_http_urls_in_text(content), encoding="utf-8")
+        from agent.persist import persist_durable_text
+
+        persist_durable_text(debug_path, content, policy="boundary4")
         os.chmod(debug_path, 0o600)
         raise StepError(
             f"Pass 1 concepts JSON parse failed. Raw output saved to {debug_path.name}",

@@ -20,6 +20,7 @@ from agent.detection import (
     normalize_url,
     preflight_health,
 )
+from agent.notify import scrub_outbound_visible_message
 from agent.redact import redact_outward_url_field, url_for_display
 
 
@@ -55,7 +56,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
             return {
                 "status": "error",
                 "http_status": 500,
-                "error": _persist_visible_error(f"dedup check failed: {exc}"),
+                "error": scrub_outbound_visible_message(f"dedup check failed: {exc}"),
                 "platform": platform,
             }
         if in_vault:
@@ -92,7 +93,7 @@ def plan_submission(url: str, config: Config, *, ignore_dedup: bool = False) -> 
         ok = False
         reason = reason or "Threads subtype fetch failed — retry when cookies or network recover"
     slug = slugify(url, content_type=subtype)
-    pause_reason = _persist_visible_error(reason) if (not ok and reason) else None
+    pause_reason = reason if (not ok and reason) else None
 
     return {
         "status": "paused" if not ok else "pending",
@@ -119,7 +120,7 @@ def submit_plan(agent_conn: sqlite3.Connection, plan: dict, tags=None) -> dict:
         return {
             "status": "paused",
             "http_status": 200,
-            "reason": pause_reason,
+            "reason": scrub_outbound_visible_message(pause_reason),
             "platform": plan["platform"],
             "task_id": task_id,
         }

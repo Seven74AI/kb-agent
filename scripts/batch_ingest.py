@@ -62,6 +62,7 @@ from agent.core.submit import (  # noqa: E402
     submit_plan,
 )
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
+from agent.notify import scrub_outbound_visible_message  # noqa: E402
 from agent.redact import ensure_merged_transcript_file_redacted  # noqa: E402
 
 # Reject staging huge images to Modal (GPU OOM / pixel bombs).
@@ -87,12 +88,12 @@ def _print_scrubbed_child_tail(
     raw = _child_captured_output(result)
     if not raw:
         return
-    print(_persist_visible_error(raw[-tail_chars:]))
+    print(scrub_outbound_visible_message(raw[-tail_chars:]))
 
 
 def _scrub_for_log(fragment: object) -> str:
     """Scrub exception/subprocess fragments before writing batch cron stdout."""
-    return _persist_visible_error(str(fragment) if fragment is not None else "")
+    return scrub_outbound_visible_message(str(fragment) if fragment is not None else "")
 
 
 def _persist_cause(fragment: object) -> str:
@@ -427,10 +428,9 @@ def refresh_parent_media_manifest(conn, config, parent_slug: str) -> None:
         "total": deferral["expected_total"],
         "media_changed": bool(int(deferral.get("media_changed") or 0)),
     }
-    manifest_path.write_text(
-        json.dumps(payload, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(manifest_path, payload, policy="boundary4", indent=None)
 
 
 def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:

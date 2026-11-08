@@ -221,16 +221,17 @@ def step_rumble_extract_metadata(task: dict, config: Config) -> str:
     title, formats = resolve_rumble(task["source_url"])
     title = redact_http_urls_in_text(title)
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
-    meta_path.write_text(
-        json.dumps(
-            {
-                "title": title,
-                "formats": _formats_for_metadata_sidecar(formats),
-                "source_url": url_for_display(task["source_url"]),
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(
+        meta_path,
+        {
+            "title": title,
+            "formats": _formats_for_metadata_sidecar(formats),
+            "source_url": url_for_display(task["source_url"]),
+        },
+        policy="boundary4",
+        indent=None,
     )
     return f"title={title[:60]} formats={len(formats)}"
 

@@ -71,7 +71,9 @@ def step_mega_extract_metadata(task: dict, config: Config) -> str:
 
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(meta_path, metadata, policy="boundary4")
 
     return json.dumps(metadata)
 
@@ -105,7 +107,9 @@ def _update_metadata_duration(config: Config, slug: str, duration: float) -> Non
         return
     metadata = json.loads(meta_path.read_text())
     metadata["duration"] = duration
-    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(meta_path, metadata, policy="boundary4")
 
 
 def step_mega_download_video(task: dict, config: Config) -> str:

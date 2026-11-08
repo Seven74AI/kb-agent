@@ -186,17 +186,19 @@ def main(image_dir: str = None, out_dir: str = "."):
 
     results = read_images.remote(items)
     for r in results:
-        p = os.path.join(out_dir, f"{r['name']}.ocr.json")
-        with open(p, "w") as f:
-            if r.get("error"):
-                json.dump(ocr_error_json(r["error"]), f, ensure_ascii=False, indent=2)
-            else:
-                from agent.redact import prepare_ocr_reading_for_write
+        from agent.persist import persist_durable_json
 
-                json.dump(
-                    {"reading": prepare_ocr_reading_for_write(r["reading"])},
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+        p = os.path.join(out_dir, f"{r['name']}.ocr.json")
+        if r.get("error"):
+            persist_durable_json(
+                p,
+                ocr_error_json(r["error"]),
+                policy="boundary4",
+            )
+        else:
+            persist_durable_json(
+                p,
+                {"reading": r["reading"]},
+                policy="boundary4",
+            )
         print("wrote", _sanitize_emit(p))

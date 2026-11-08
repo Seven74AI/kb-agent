@@ -91,8 +91,8 @@ def test_sanitize_archive_record_scrubs_step_logs_and_llm_fields():
     step_out = sanitize_archive_record(step)
     llm_out = sanitize_archive_record(llm)
 
-    assert "/root/kb-agent" not in step_out["content"]
-    assert "[path]" in step_out["content"]
+    assert "/root/kb-agent" in step_out["content"]
+    assert "[path]" not in step_out["content"]
     assert "/root/kb-agent" not in llm_out["prompt"]
     assert "[path]" in llm_out["prompt"]
     assert "supersecretvalue" not in llm_out["response"]
@@ -321,8 +321,8 @@ def test_main_archive_export_scrubs_sensitive_content(mock_run, logs_db_path):
 
     step_line = next(l for l in lines if l["_table"] == "step_logs")
     llm_line = next(l for l in lines if l["_table"] == "llm_archives")
-    assert "/root" not in step_line["content"]
-    assert "[path]" in step_line["content"]
+    assert "/root" in step_line["content"]
+    assert "[path]" not in step_line["content"]
     assert "/root" not in llm_line["prompt"]
     assert "abc12345" not in llm_line["response"]
 

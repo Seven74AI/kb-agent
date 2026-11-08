@@ -199,7 +199,9 @@ def write_threads_raw_sidecar(config: Config, task: dict, record: dict) -> Path:
     """Write ``{stem}_threads_raw.json`` with display-safe URL fields and redacted free text."""
     raw_path = threads_raw_path(config, task)
     safe = sanitize_threads_raw_sidecar(record)
-    raw_path.write_text(json.dumps(safe, indent=2, ensure_ascii=False))
+    from agent.persist import persist_durable_json
+
+    persist_durable_json(raw_path, safe, policy="boundary4")
     return raw_path
 
 
@@ -812,6 +814,12 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
 
     meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     if not meta_path.exists():
-        meta_path.write_text(json.dumps({"duration": _duration_from_merged(data)}), encoding="utf-8")
+        from agent.persist import persist_durable_json
+
+        persist_durable_json(
+            meta_path,
+            {"duration": _duration_from_merged(data)},
+            policy="boundary4",
+        )
 
     return str(merged_path)

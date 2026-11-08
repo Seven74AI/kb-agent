@@ -240,7 +240,9 @@ def test_tdah_dispatch_and_modal_tail_strip_url_query(monkeypatch, capsys, tmp_p
     assert "token=SECRET" not in out
 
     tail = f"modal stderr: fetch {_LEAKY_URL}\n"
-    printed = mod._persist_visible_error(tail[-1500:])
+    from agent.notify import scrub_outbound_visible_message
+
+    printed = scrub_outbound_visible_message(tail[-1500:])
     assert "token=SECRET" not in printed
 
 

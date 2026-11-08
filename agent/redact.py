@@ -129,9 +129,9 @@ def prepare_vault_note_for_write(content: str) -> str:
 
 def write_vault_note(note_path: Path, content: str) -> None:
     """Write a vault note with outbound URL redaction applied to body and frontmatter."""
-    note_path = Path(note_path)
-    note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(prepare_vault_note_for_write(content), encoding="utf-8")
+    from agent.persist import persist_durable_text
+
+    persist_durable_text(note_path, content, policy="vault")
 
 
 def scrub_vault_note_content(content: str) -> str:
@@ -180,11 +180,10 @@ def write_transcription_sidecar_json(
     indent: int | None = 2,
 ) -> None:
     """Persist diarization/transcript sidecar JSON with URL + credential scrub on segment text."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from agent.persist import persist_durable_json
+
     redacted = redact_transcription_sidecar_payload(data)
-    payload = json.dumps(redacted, indent=indent, ensure_ascii=False)
-    path.write_text(payload, encoding="utf-8")
+    persist_durable_json(path, redacted, policy="boundary4", indent=indent)
 
 
 def redact_merged_transcript_payload(data: dict) -> dict:
@@ -204,11 +203,10 @@ def write_merged_transcript_json(
     indent: int | None = 2,
 ) -> None:
     """Persist merged transcript JSON with segment text redacted for archival upload."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from agent.persist import persist_durable_json
+
     redacted = redact_merged_transcript_payload(data)
-    payload = json.dumps(redacted, indent=indent, ensure_ascii=False)
-    path.write_text(payload, encoding="utf-8")
+    persist_durable_json(path, redacted, policy="boundary4", indent=indent)
 
 
 def ensure_merged_transcript_file_redacted(path: Path) -> None:
