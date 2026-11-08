@@ -19,7 +19,12 @@ from agent.redact import redact_http_urls_in_text, url_for_display, write_vault_
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import _artifact_stem, _find_video_file, resolve_artifact_stem
+from agent.pipelines.video_common import (
+    _artifact_stem,
+    _find_video_file,
+    _resolve_slug,
+    resolve_artifact_stem,
+)
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -458,11 +463,12 @@ def step_quality_gate(task: dict, config: Config) -> str:
 
 def step_minio_upload(task: dict, config: Config) -> str:
     """Upload MP4, MP3, and merged transcript JSON to MinIO."""
-    stem = _artifact_stem(task)
+    stem = resolve_artifact_stem(task)
+    storage_slug = _resolve_slug(task)
     display_slug = task.get("slug", task["id"][:8])
     video_path = _find_video_file(config, stem)
 
-    uploaded = upload_video_artifacts(stem, config, video_path)
+    uploaded = upload_video_artifacts(stem, storage_slug, config, video_path)
 
     _update_note_source_files(display_slug, config, uploaded)
     return f"Uploaded: {', '.join(uploaded)}"
