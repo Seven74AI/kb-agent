@@ -20,6 +20,8 @@ from agent.pipelines.youtube import step_merge_and_identify, _download_artifact_
 from agent.quality import _resynthesize
 from agent.consumer import recover_orphan_tasks
 
+TOKENIZED = "https://cdn.example.com/article?token=secret&expires=999"
+
 
 @pytest.fixture
 def agent_db(tmp_path):
@@ -111,6 +113,59 @@ def test_step_see_also_reported_count_ignores_body_wikilinks(config):
 
     assert "Added 1 See Also links" in result
     assert "Added 4" not in result
+
+
+def test_step_see_also_redacts_tracking_urls_in_llm_section(config):
+    """See Also LLM output must not persist query/fragment URLs into the vault note."""
+    task_dict = {"slug": "see-also-url-redact", "content_type": "web", "id": "task-see-url"}
+    folder = config.vault_path / "Knowledge base" / "articles"
+    note_path = folder / f"{task_dict['slug']}.md"
+    note_path.write_text(
+        "---\nsource_url: https://example.com/base\n---\n\n# Note\n\nBody.\n",
+        encoding="utf-8",
+    )
+    other = folder / "peer.md"
+    other.write_text("# Peer\n", encoding="utf-8")
+
+    with patch("agent.pipelines.see_also._search_vault", return_value=[other]), patch(
+        "agent.pipelines.see_also.get_llm_client"
+    ) as mock_llm:
+        mock_llm.return_value.call.return_value = MagicMock(
+            content=(
+                f"## See Also\n"
+                f"- [[peer]] — see {TOKENIZED} for context\n"
+            )
+        )
+        step_see_also(task_dict, config)
+
+    written = note_path.read_text(encoding="utf-8")
+    assert "token=secret" not in written
+    assert "https://cdn.example.com/article" in written
+
+
+def test_resynthesize_scrubs_source_url_on_vault_write(tmp_path, config):
+    """Re-synthesize must scrub frontmatter source_url before writing the vault note."""
+    slug = "resynth_url_scrub"
+    note_path = tmp_path / f"{slug}.md"
+    note_path.write_text(
+        f"---\nsource_url: {TOKENIZED}\n---\n\n# Old\n",
+        encoding="utf-8",
+    )
+    (Path(config.temp_dir)).mkdir(parents=True, exist_ok=True)
+    (Path(config.temp_dir) / f"{slug}_raw.md").write_text("source text", encoding="utf-8")
+
+    llm = MagicMock()
+    llm.call.return_value = MagicMock(
+        content=(
+            f"---\nsource_url: {TOKENIZED}\n---\n\n"
+            f"# Rewritten\n\nAlso links {TOKENIZED}.\n"
+        )
+    )
+
+    assert _resynthesize(note_path, config, llm, ["too short"]) is True
+    written = note_path.read_text(encoding="utf-8")
+    assert "token=secret" not in written
+    assert "https://cdn.example.com/article" in written
 
 
 def test_step_see_also_refreshes_when_body_has_many_wikilinks(config):

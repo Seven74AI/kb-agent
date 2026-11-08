@@ -153,7 +153,7 @@ def main():
             "--language", LANG, "--initial-prompt", INITIAL_PROMPT, "--hotwords", HOTWORDS],
             cwd=MODAL, timeout=3600)
     tail = (r.stdout or r.stderr)[-1500:]
-    print("Modal output tail:\n" + tail)
+    print("Modal output tail:\n" + sanitize_visible_message(tail))
 
     # 5. merge + upload + dispatch
     made = []

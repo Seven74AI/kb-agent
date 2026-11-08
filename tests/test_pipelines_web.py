@@ -146,6 +146,30 @@ def test_firecrawl_extract_short_content_raises_step_error_fail(
     assert "Content too short" in str(exc.value)
 
 
+@patch("agent.pipelines.web.subprocess.run")
+def test_firecrawl_extract_redacts_tracking_urls_in_raw_md(
+    mock_run, config, task_dict, tmp_path,
+):
+    config.temp_dir = tmp_path / "tmp"
+    config.temp_dir.mkdir(parents=True, exist_ok=True)
+    tracked = "https://partner.example/out?click_id=SECRET&utm_source=mail"
+    long_markdown = (
+        "# Article\n\n"
+        f"Read more at {tracked}.\n\n"
+        + ("Paragraph with body text. " * 40)
+    )
+    mock_run.return_value = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"data": {"markdown": long_markdown}}),
+        stderr="",
+    )
+    out_path = step_firecrawl_extract(task_dict, config)
+    body = Path(out_path).read_text(encoding="utf-8")
+    assert "click_id=SECRET" not in body
+    assert "utm_source" not in body
+    assert "https://partner.example/out" in body
+
+
 def test_enqueue_embedded_media_logs_submit_failures(config, caplog):
     import logging
 

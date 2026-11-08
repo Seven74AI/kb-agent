@@ -11,8 +11,13 @@ import pytest
 
 from agent.config import Config
 from agent.pipelines.bunny_stream import step_extract_metadata
-from agent.pipelines.instagram import step_ig_carousel_extract, step_ig_carousel_metadata
+from agent.pipelines.instagram import (
+    step_ig_carousel_extract,
+    step_ig_carousel_metadata,
+    step_ig_comment_fetch,
+)
 from agent.pipelines.rumble import step_rumble_extract_metadata
+from agent.pipelines.threads import step_threads_detect, step_threads_extract_text
 from agent.redact import url_for_display
 import scripts.batch_ingest as batch_ingest
 from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, init_db
@@ -134,6 +139,32 @@ def test_instagram_carousel_sidecars_omit_tracking_urls(
     assert "src" not in slides["slides"][0]
 
 
+@patch("agent.pipelines.instagram._fetch_ig_comment")
+def test_instagram_ig_comment_sidecar_redacts_urls(mock_fetch, sidecar_config):
+    mock_fetch.return_value = {
+        "comment_id": "42",
+        "comment_text": "See https://track.example/x?jwt=SECRET for more",
+        "comment_author": "commenter",
+        "comment_created_at": 1,
+        "parent_shortcode": "ABC123",
+        "parent_url": "https://www.instagram.com/reel/ABC123/?igsh=deadbeef",
+        "parent_caption": "Caption with https://cdn.example/img.jpg?sig=TOKEN",
+        "parent_author": "poster",
+    }
+    task = {
+        "id": "ig-comment-1",
+        "slug": "instagram.com_reel_ABC123",
+        "source_url": "https://www.instagram.com/reel/ABC123/?comment_id=42&igsh=deadbeef",
+    }
+    step_ig_comment_fetch(task, sidecar_config)
+    raw_path = sidecar_config.temp_dir / "instagram.com_reel_ABC123_ig_comment.json"
+    data = json.loads(raw_path.read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert data["parent_url"] == url_for_display(mock_fetch.return_value["parent_url"])
+    assert "jwt=SECRET" not in data["comment_text"]
+    assert "sig=TOKEN" not in data["parent_caption"]
+
+
 @patch(
     "agent.pipelines.web._fetch_substack_html",
     return_value=(
@@ -163,6 +194,58 @@ def test_substack_media_manifest_omits_parent_url(mock_enqueue, _mock_html, side
     _assert_sidecar_has_no_sensitive_url_strings(manifest)
     assert "url" not in manifest
     assert manifest["total"] == 1
+
+
+@patch("agent.pipelines.threads._fetch_parent_post")
+@patch("agent.pipelines.threads._curl_threads")
+def test_threads_detect_raw_sidecar_sanitizes_urls(mock_curl, mock_parent, sidecar_config):
+    task = {
+        "id": "thr-detect-1",
+        "slug": "threads_detect_slug",
+        "source_url": "https://www.threads.net/@u/post/ABC?igsh=track#frag",
+    }
+    html = (
+        '{"caption":{"text":"See https://evil.com/x?secret=1 for more"},'
+        '"username":"u","is_reply":true,"parent_post":{"code":"PARENT1"}}'
+        '<div class="_ab6c">x</div>'
+    )
+    mock_curl.return_value = html
+    mock_parent.return_value = (
+        "Parent body with https://parent.example.com/p?jwt=SECRET embedded"
+    )
+    step_threads_detect(task, sidecar_config)
+    raw_path = sidecar_config.temp_dir / "threads_detect_slug_threads_raw.json"
+    data = json.loads(raw_path.read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert data["url"] == url_for_display(task["source_url"])
+    assert data["parent_url"] == "https://www.threads.net/t/PARENT1"
+    assert "jwt=SECRET" not in (data.get("parent_context") or "")
+    assert "secret=1" not in "".join(data.get("captions") or [])
+
+
+@patch("agent.pipelines.threads._fetch_parent_post")
+@patch("agent.pipelines.threads._curl_threads")
+def test_threads_extract_text_raw_sidecar_sanitizes_urls(
+    mock_curl, mock_parent, sidecar_config,
+):
+    task = {
+        "id": "thr-extract-1",
+        "slug": "threads_extract_slug",
+        "source_url": "https://www.threads.net/@u/post/XYZ?utm=camp#top",
+    }
+    html = (
+        '{"caption":{"text":"Link https://track.example/a?key=1"},'
+        '"username":"u","is_reply":true,"parent_post":{"code":"PAR99"}}'
+    )
+    mock_curl.return_value = html
+    mock_parent.return_value = "Replying to https://threads.net/t/PAR99?ref=old"
+    raw_path = step_threads_extract_text(task, sidecar_config)
+    data = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+    _assert_sidecar_has_no_sensitive_url_strings(data)
+    assert data["url"] == url_for_display(task["source_url"])
+    assert data["parent_url"] == "https://www.threads.net/t/PAR99"
+    assert "ref=old" not in (data.get("parent_context") or "")
+    assert "key=1" not in "".join(data.get("captions") or [])
 
 
 def test_refresh_parent_media_manifest_omits_deferral_source_url(tmp_path):

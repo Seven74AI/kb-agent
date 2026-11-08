@@ -1734,6 +1734,53 @@ class TestChildProcessLogScrubbing:
         assert "[credential redacted]" in logged
         assert "[failed]" in logged
 
+    def test_main_scrubs_requeue_stdout(self, config, conn, monkeypatch, capsys):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        queue_ingest(conn, "https://example.com/page", "web", "nonvid_pause")
+
+        monkeypatch.setattr(batch_ingest, "load_config", lambda: config)
+        monkeypatch.setattr(batch_ingest, "acquire", lambda _c: True)
+        monkeypatch.setattr(batch_ingest, "release", lambda _c: None)
+        monkeypatch.setattr(batch_ingest, "recover_stale_ingest", lambda _c: None)
+        monkeypatch.setattr(batch_ingest, "recover_failed_media", lambda _c: 0)
+        monkeypatch.setattr(batch_ingest, "record_batch_run", lambda _c: 10)
+        monkeypatch.setattr(
+            batch_ingest,
+            "submit_standalone_non_video_for_batch",
+            lambda *_a, **_k: {
+                "status": "paused",
+                "reason": "missing cookies at /root/kb-agent/cookies/web.txt token=leaked",
+            },
+        )
+        monkeypatch.setattr(batch_ingest, "finish_batch_run", lambda *a: None)
+        monkeypatch.setattr(batch_ingest, "_reconcile_deferred_parent_syntheses", lambda *a: None)
+
+        def init_with_test_db(*a, **k):
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(batch_ingest, "init_db", init_with_test_db)
+
+        def claim_all(_c):
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM ingest_queue WHERE status='queued'",
+                ).fetchall()
+            ]
+
+        monkeypatch.setattr(batch_ingest, "claim_ingest_items", claim_all)
+
+        batch_ingest.main()
+        logged = capsys.readouterr().out
+        assert "leaked" not in logged
+        assert "/root/kb-agent" not in logged
+        assert "[requeue]" in logged
+        assert "[credential redacted]" in logged
+        assert "[path]" in logged
+
 
 class TestBatchIngestLogScrubExemptions:
     """Scripts outside batch_ingest/transcribe/ocr with raw stderr tails are exempt.

@@ -14,6 +14,7 @@ from agent.archival import CONTENT_TYPE_TO_VAULT_FOLDER as CONTENT_TYPE_FOLDERS
 from agent.config import Config
 from agent.llm import get_llm_client
 from agent.pipelines.video_common import _slug_path
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content
 
 
 def _get_folder(content_type: str) -> str:
@@ -130,7 +131,10 @@ def step_see_also(task: dict, config: Config) -> str:
     if updated == note_content:
         updated = note_content.rstrip() + "\n\n" + see_also_content
 
-    note_path.write_text(updated, encoding="utf-8")
+    note_path.write_text(
+        scrub_vault_note_content(redact_http_urls_in_text(updated)),
+        encoding="utf-8",
+    )
 
     link_count = _see_also_link_count(updated, see_also_header)
     return f"Added {link_count} See Also links to {slug}"

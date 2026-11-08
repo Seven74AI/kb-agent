@@ -435,6 +435,35 @@ class TestCarouselExtract:
         assert '\\"); import os' in script
         assert 'page.goto("https://www.instagram.com/p/DEF456/");' not in script
 
+    @patch("subprocess.run")
+    def test_extract_playwright_script_omits_tracking_query(self, mock_run, config, post_task):
+        post_task["source_url"] = "https://www.instagram.com/p/ABC/?igsh=deadbeef"
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            script_path = Path(args[0][1])
+            captured["script"] = script_path.read_text(encoding="utf-8")
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = "[]"
+            r.stderr = ""
+            return r
+
+        mock_run.side_effect = fake_run
+        step_ig_carousel_extract(post_task, config)
+        script = captured["script"]
+        assert "igsh" not in script
+        assert "deadbeef" not in script
+        assert "www.instagram.com/p/ABC/" in script
+
+    @patch("subprocess.run")
+    def test_extract_unlinks_playwright_script_on_failure(self, mock_run, config, post_task):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="timeout")
+        script_path = Path(config.temp_dir) / f"{post_task['slug']}_playwright.py"
+        with pytest.raises(StepError, match="Playwright carousel extraction failed"):
+            step_ig_carousel_extract(post_task, config)
+        assert not script_path.exists()
+
 
 class TestCarouselSynthesis:
     """Tests for step_ig_carousel_synthesize."""

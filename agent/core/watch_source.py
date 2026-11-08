@@ -180,7 +180,7 @@ def register_watch_source(
         (page_url,),
     ).fetchone()
     if existing:
-        raise ValueError(f"watch source already registered: {page_url}")
+        raise ValueError(f"watch source already registered: {_display_page_url(page_url)}")
 
     last_seen: frozenset[str] = frozenset()
     if baseline and fetch_html is not None:
@@ -240,7 +240,7 @@ def poll_watch_source(
     """Poll one registered source; submit URLs for newly discovered items."""
     row = get_watch_source(conn, page_url)
     if row is None:
-        raise ValueError(f"watch source not registered: {page_url}")
+        raise ValueError(f"watch source not registered: {_display_page_url(page_url)}")
     if not row["enabled"]:
         return {
             "page_url": _display_page_url(page_url),

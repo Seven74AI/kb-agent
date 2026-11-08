@@ -1195,6 +1195,43 @@ class TestSubstackVideoMetadata:
         assert "deferred to batch synthesis" in str(exc.value).lower()
         assert not (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").exists()
 
+    def test_deferred_row_without_manifest_or_siblings_blocks_parent_inline(
+        self, config, task_dict, tmp_path,
+    ):
+        """Deferral row alone must block parent inline synth after partial cleanup."""
+        from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ensure_parent_media_deferral(conn, slug, post, "substack_text", 1)
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(StepError) as exc:
+            step_synthesize_web(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "deferred to batch synthesis" in str(exc.value).lower()
+        assert not (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").exists()
+
+    @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")
+    @patch("agent.pipelines.web.get_llm_client")
+    def test_parent_inline_synthesize_allowed_without_deferral_signals(
+        self, _mock_llm, mock_single_pass, config, task_dict, tmp_path,
+    ):
+        """Plain parent article with no deferral row, manifest, or siblings may synthesize."""
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        (config.temp_dir / f"{slug}_raw.md").write_text("# Post\n\nBody.\n", encoding="utf-8")
+
+        step_synthesize_web(task_dict, config)
+        mock_single_pass.assert_called_once()
+        assert (config.vault_path / "Knowledge base" / "articles" / f"{slug}.md").is_file()
+
     @patch("agent.pipelines.web._synthesize_single_pass")
     @patch("agent.pipelines.web.get_llm_client")
     def test_parent_skips_synthesize_when_synthesis_already_completed(

@@ -23,7 +23,7 @@ from agent.detection import (
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
-from agent.redact import scrub_vault_note_content, url_for_display
+from agent.redact import redact_http_urls_in_text, scrub_vault_note_content, url_for_display
 
 logger = logging.getLogger(__name__)
 from agent.llm import get_llm_client, LLMClient
@@ -888,7 +888,7 @@ def step_firecrawl_extract(task: dict, config: Config) -> str:
         )
 
     raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
-    raw_path.write_text(markdown, encoding="utf-8")
+    raw_path.write_text(redact_http_urls_in_text(markdown), encoding="utf-8")
 
     return str(raw_path)
 
@@ -899,8 +899,17 @@ _SUBSTACK_PARENT_CONTENT_TYPES = frozenset({"substack_text", "substack_image"})
 
 
 def _parent_article_deferred_to_batch(task: dict, config: Config, conn) -> bool:
-    """True when this parent slug has a durable deferral manifest or marker."""
+    """True when the parent slug is batch-deferred (any durable deferral signal).
+
+    Invariant: ``parent_media_deferral`` is authoritative — a surviving deferral row
+    must block parent inline synthesis even when temp manifest, siblings, and step
+    markers were wiped (partial cleanup, ``remove_ingest``, temp_dir reset).
+    """
+    from agent.db import get_parent_media_deferral
+
     slug = task.get("slug", task["id"][:8])
+    if get_parent_media_deferral(conn, slug) is not None:
+        return True
     if (Path(config.temp_dir) / f"{slug}_media.json").is_file():
         return True
     if _parent_media_was_deferred(conn, task.get("id", ""), slug):
