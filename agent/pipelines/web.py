@@ -586,6 +586,7 @@ class EmbeddedMediaEnqueueStats(NamedTuple):
 
     success_count: int
     queue_count: int
+    failure_lines: tuple[str, ...] = ()
 
 
 def _submit_embed_succeeded(result: dict) -> bool:
@@ -607,6 +608,7 @@ def _bump_embed_success_or_warn(
     media_kind: str,
     result: dict,
     success_count: int,
+    failure_lines: list[str],
 ) -> int:
     if _submit_embed_succeeded(result):
         return success_count + 1
@@ -617,7 +619,32 @@ def _bump_embed_success_or_warn(
         parent_slug,
         sanitize_visible_message(str(status) if status is not None else "missing"),
     )
+    failure_lines.append(
+        sanitize_visible_message(
+            f"embedded media enqueue not accepted ({media_kind}): "
+            f"{status if status is not None else 'missing'}",
+        ),
+    )
     return success_count
+
+
+def _enqueue_exception_line(media_kind: str, exc: Exception) -> str:
+    return sanitize_visible_message(
+        f"embedded media enqueue failed ({media_kind}): {type(exc).__name__}: {exc}",
+    )
+
+
+def _enqueue_failure_block(failure_lines: tuple[str, ...]) -> str:
+    if not failure_lines:
+        return ""
+    return "enqueue failures:\n" + "\n".join(failure_lines)
+
+
+def _message_with_enqueue_failures(message: str, stats: EmbeddedMediaEnqueueStats) -> str:
+    block = _enqueue_failure_block(stats.failure_lines)
+    if not block:
+        return message
+    return f"{message}\n{block}" if message else block
 
 
 def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],
@@ -640,6 +667,7 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     success_count = 0
+    failure_lines: list[str] = []
     try:
         for img_url in images:
             try:
@@ -647,16 +675,17 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     img_url, config, conn, content_type="substack_image", tags=tags,
                     parent_slug=parent_slug, media_kind="image",
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "embedded media enqueue failed (image) parent=%s url=%s",
                     parent_slug,
                     _safe_url_for_log(img_url),
                     exc_info=True,
                 )
+                failure_lines.append(_enqueue_exception_line("image", exc))
                 continue
             success_count = _bump_embed_success_or_warn(
-                parent_slug, "image", result, success_count,
+                parent_slug, "image", result, success_count, failure_lines,
             )
         for vid in youtube_ids:
             try:
@@ -664,16 +693,17 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     f"https://www.youtube.com/watch?v={vid}", config, conn, tags=tags,
                     parent_slug=parent_slug, media_kind="video",
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "embedded media enqueue failed (youtube) parent=%s id=%s",
                     parent_slug,
                     vid,
                     exc_info=True,
                 )
+                failure_lines.append(_enqueue_exception_line("youtube", exc))
                 continue
             success_count = _bump_embed_success_or_warn(
-                parent_slug, "youtube", result, success_count,
+                parent_slug, "youtube", result, success_count, failure_lines,
             )
         for url in rumble_urls:
             try:
@@ -681,16 +711,17 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     url, config, conn, content_type="rumble", tags=tags,
                     parent_slug=parent_slug, media_kind="video",
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "embedded media enqueue failed (rumble) parent=%s url=%s",
                     parent_slug,
                     _safe_url_for_log(url),
                     exc_info=True,
                 )
+                failure_lines.append(_enqueue_exception_line("rumble", exc))
                 continue
             success_count = _bump_embed_success_or_warn(
-                parent_slug, "rumble", result, success_count,
+                parent_slug, "rumble", result, success_count, failure_lines,
             )
         for vid in native_video_ids:
             try:
@@ -698,23 +729,26 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                     f"{post_url}#{vid}", config, conn, content_type="substack_video", tags=tags,
                     parent_slug=parent_slug, media_kind="video",
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "embedded media enqueue failed (native video) parent=%s id=%s",
                     parent_slug,
                     vid,
                     exc_info=True,
                 )
+                failure_lines.append(_enqueue_exception_line("native_video", exc))
                 continue
             success_count = _bump_embed_success_or_warn(
-                parent_slug, "native_video", result, success_count,
+                parent_slug, "native_video", result, success_count, failure_lines,
             )
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
             (parent_slug,),
         ).fetchone()
         queue_count = row["n"] if hasattr(row, "keys") else row[0]
-        return EmbeddedMediaEnqueueStats(success_count, int(queue_count))
+        return EmbeddedMediaEnqueueStats(
+            success_count, int(queue_count), tuple(failure_lines),
+        )
     finally:
         conn.close()
 
@@ -728,21 +762,28 @@ def _persist_parent_media_deferral(conn, task_id: str, slug: str) -> None:
     Written to ``substack_cleanup`` step output (not ``substack_embedded_media``) so
     ``retry_task`` clearing that step onward does not erase the deferral signal.
     """
+    from agent.db import update_step
+
     if not task_id:
         return
     marker = f"{MEDIA_DEFERRED_MARKER_PREFIX}{slug}"
-    with conn:
-        conn.execute(
-            """
-            UPDATE task_steps SET output = CASE
-                WHEN output IS NULL OR output = '' THEN ?
-                WHEN instr(COALESCE(output, ''), ?) > 0 THEN output
-                ELSE COALESCE(output, '') || char(10) || ?
-            END
-            WHERE task_id = ? AND name = 'substack_cleanup'
-            """,
-            (marker, MEDIA_DEFERRED_MARKER_PREFIX, marker, task_id),
-        )
+    row = conn.execute(
+        "SELECT id, status, output FROM task_steps "
+        "WHERE task_id = ? AND name = 'substack_cleanup'",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return
+    step_id = row["id"] if hasattr(row, "keys") else row[0]
+    status = row["status"] if hasattr(row, "keys") else row[1]
+    current = (row["output"] if hasattr(row, "keys") else row[2]) or ""
+    if MEDIA_DEFERRED_MARKER_PREFIX in current:
+        merged = current
+    elif not current:
+        merged = marker
+    else:
+        merged = f"{current}\n{marker}"
+    update_step(conn, step_id, status, merged)
 
 
 def _parent_media_was_deferred(conn, task_id: str, slug: str) -> bool:
@@ -881,8 +922,12 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
     gate_total = max(extracted_total, enqueued_success, prior_manifest_total)
 
+    from agent.db import normalize_deferral_parent_content_type
+
     manifest = {
-        "content_type": task.get("content_type", "substack_text"),
+        "content_type": normalize_deferral_parent_content_type(
+            task.get("content_type", "substack_text"),
+        ),
         "total": gate_total,
     }
     manifest_path.write_text(
@@ -914,14 +959,17 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             f"enqueued {enqueued_success}",
         )
         raise StepError(
-            shortfall,
+            _message_with_enqueue_failures(shortfall, enqueue_stats),
             error_type=ErrorType.PAUSE,
             step_name="substack_embedded_media",
         )
 
     if queue_count != extracted_total:
         raise StepError(
-            f"media gate: ingest rows {queue_count} != extracted total {extracted_total}",
+            _message_with_enqueue_failures(
+                f"media gate: ingest rows {queue_count} != extracted total {extracted_total}",
+                enqueue_stats,
+            ),
             error_type=ErrorType.PAUSE,
             step_name="substack_embedded_media",
         )
@@ -953,14 +1001,19 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                     error_type=ErrorType.PAUSE,
                     step_name="substack_embedded_media",
                 )
-            return "media ready — deferred to batch"
+            return _message_with_enqueue_failures(
+                "media ready — deferred to batch", enqueue_stats,
+            )
 
         _persist_parent_media_deferral(conn, task.get("id", ""), slug)
     finally:
         conn.close()
 
     raise StepError(
-        f"awaiting media: {len(images)} images + {n_videos} videos enqueued",
+        _message_with_enqueue_failures(
+            f"awaiting media: {len(images)} images + {n_videos} videos enqueued",
+            enqueue_stats,
+        ),
         error_type=ErrorType.PAUSE, step_name="substack_embedded_media",
     )
 
@@ -1067,7 +1120,9 @@ def _guard_parent_deferred_batch_synthesis(task: dict, config: Config) -> bool:
 
     Returns True when synthesis already finished and the caller must skip the LLM.
     """
-    content_type = task.get("content_type", "")
+    from agent.db import normalize_deferral_parent_content_type
+
+    content_type = normalize_deferral_parent_content_type(task.get("content_type", ""))
     if content_type not in _SUBSTACK_PARENT_CONTENT_TYPES:
         return False
     from agent.db import (

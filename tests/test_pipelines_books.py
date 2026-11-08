@@ -22,6 +22,7 @@ from agent.pipelines.books import (
     _chunked_book_synthesis,
     _detect_boundaries_llm,
     _resolve_local_book_path,
+    _quality_score,
     _vault_frontmatter_source_url,
     _pdf_preflight,
     quality_score,
@@ -278,11 +279,11 @@ class TestQualityScore:
         assert score < PDF_QUALITY_SCORE_THRESHOLD
 
     @patch("agent.pipelines.books.pymupdf")
-    def test_pdf_preflight_open_error_returns_degraded(self, mock_pymupdf):
-        """Corrupt/password PDFs must not be classified as clean text."""
+    def test_pdf_preflight_open_error_returns_unreadable(self, mock_pymupdf):
+        """Corrupt/unopenable PDFs must not be routed to degraded OCR."""
         mock_pymupdf.open.side_effect = RuntimeError("cannot open encrypted pdf")
         classification, score = _pdf_preflight(Path("/fake/bad.pdf"))
-        assert classification == "degraded"
+        assert classification == "unreadable"
         assert score == 0
 
     @patch("agent.pipelines.books.HAS_PYMUPDF", False)
@@ -348,7 +349,33 @@ class TestQualityScore:
         mock_pymupdf.open.return_value = mock_doc
 
         score = quality_score("/fake/partially-corrupt.pdf")
-        assert score < PDF_QUALITY_SCORE_THRESHOLD
+        assert score >= PDF_QUALITY_SCORE_THRESHOLD
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_quality_score_page_errors_not_counted_in_average(self, mock_pymupdf):
+        """Failed page samples must not inflate the denominator of the average."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 16
+        clean_text = (
+            "The quick brown fox jumps over the lazy dog. "
+            "This is a perfectly normal sentence with standard "
+            "English text and common punctuation marks. "
+            * 5
+        )
+
+        def page_at(idx):
+            page = MagicMock()
+            if idx == 0:
+                page.get_text.return_value = clean_text
+            else:
+                page.get_text.side_effect = RuntimeError("corrupt page")
+            return page
+
+        mock_doc.__getitem__.side_effect = page_at
+        mock_pymupdf.open.return_value = mock_doc
+
+        score = _quality_score(mock_doc, mock_doc.page_count)
+        assert score >= PDF_QUALITY_SCORE_THRESHOLD
 
     @patch("agent.pipelines.books.pymupdf")
     def test_pdf_preflight_partial_page_failures_not_text_tier(
@@ -611,6 +638,39 @@ class TestPdfExtraction:
         with pytest.raises(StepError) as excinfo:
             step_extract_pdf(book_task, config)
         assert "needs OCR" in str(excinfo.value)
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_extract_pdf_unreadable_fails_closed(self, mock_pymupdf, config, book_task):
+        """Unreadable PDF must fail extract_pdf — not silently degrade to OCR."""
+        pdf_path = Path(config.temp_dir) / "test_book.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_text("dummy pdf content")
+        book_task["source_url"] = str(pdf_path)
+        mock_pymupdf.open.side_effect = [
+            MagicMock(),
+            RuntimeError("cannot open document"),
+        ]
+
+        with pytest.raises(StepError) as excinfo:
+            step_extract_pdf(book_task, config)
+        assert excinfo.value.error_type == ErrorType.FAIL
+        assert "unreadable" in str(excinfo.value).lower()
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_extract_pdf_degraded_unreadable_fails_closed(
+        self, mock_pymupdf, config, book_task,
+    ):
+        """Unreadable PDF must not run degraded extraction."""
+        pdf_path = Path(config.temp_dir) / "test_book.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_text("dummy pdf content")
+        book_task["source_url"] = str(pdf_path)
+        mock_pymupdf.open.side_effect = RuntimeError("cannot open document")
+
+        with pytest.raises(StepError) as excinfo:
+            step_extract_pdf_degraded(book_task, config)
+        assert excinfo.value.error_type == ErrorType.FAIL
+        assert "unreadable" in str(excinfo.value).lower()
 
 
 # ── Book Quality Gate Tests ───────────────────────────────────────────────────
@@ -1490,6 +1550,40 @@ class TestBookMinioUpload:
         assert f"books/{child_slug}.epub" in data["uploaded"]
         uploaded_paths = [Path(c[0][0]) for c in mock_upload.call_args_list]
         assert epub.resolve() in {p.resolve() for p in uploaded_paths}
+
+    @patch("agent.archival.upload_file_to_minio")
+    def test_minio_upload_source_failure_surfaces_step_error(
+        self, mock_upload, config, tmp_path,
+    ):
+        """Source epub/pdf archival failure must fail the step, not return success."""
+        child_slug = "mega_batch_child"
+        epub = tmp_path / "child.epub"
+        epub.write_text("epub bytes")
+        full_txt = Path(config.temp_dir) / f"book_{child_slug}_full.txt"
+        full_txt.parent.mkdir(parents=True, exist_ok=True)
+        full_txt.write_text("extracted book text " * 20)
+
+        def upload_side_effect(src, dest, timeout=60):
+            if str(src).endswith(".txt"):
+                return None
+            raise StepError(
+                "minio put failed",
+                error_type=ErrorType.RETRY,
+                step_name="upload_file_to_minio",
+            )
+
+        mock_upload.side_effect = upload_side_effect
+
+        task = {
+            "id": "child-task",
+            "slug": child_slug,
+            "source_url": str(epub),
+        }
+        with pytest.raises(StepError) as excinfo:
+            step_book_minio_upload(task, config)
+        assert excinfo.value.step_name == "book_minio_upload"
+        assert "Source book MinIO upload failed" in str(excinfo.value)
+        assert mock_upload.call_count == 2
 
 
 class TestBookSourceUrlSurfaces:

@@ -15,7 +15,13 @@ from agent.detection import (
     detect_content_subtype_with_signals,
 )
 from agent.exceptions import ErrorType, StepError
-from agent.pipelines.instagram import step_ig_carousel_extract
+from agent.pipelines.instagram import (
+    _carousel_meta_path,
+    _carousel_slides_path,
+    _ig_comment_sidecar_path,
+    step_ig_carousel_extract,
+    step_ig_carousel_metadata,
+)
 from agent.pipelines.video_common import (
     _artifact_stem,
     check_density,
@@ -305,6 +311,58 @@ def test_threads_raw_path_writer_uses_artifact_stem(config):
     assert threads_raw_path(config, batch_task).name == f"{ingest_id}_threads_raw.json"
     consumer = {"id": ingest_id, "slug": slug}
     assert threads_raw_path(config, consumer).name == f"{slug}_threads_raw.json"
+
+
+@patch("agent.pipelines.instagram._validate_ig_cookies")
+@patch("subprocess.run")
+def test_ig_carousel_sidecars_use_artifact_stem_batch(mock_run, _mock_cookies, config):
+    ingest_id = "ingest-ig-carousel-001"
+    slug = "instagram.com_p_DEF456"
+    task = {
+        "id": ingest_id,
+        "slug": slug,
+        "source_url": "https://www.instagram.com/p/DEF456/",
+        "content_type": "instagram_post",
+        "_batch_ingest": True,
+    }
+    mock_run.return_value = MagicMock(returncode=0, stdout="t||u||0||2", stderr="")
+    meta_written = step_ig_carousel_metadata(task, config)
+    assert Path(meta_written).name == f"{ingest_id}_carousel_meta.json"
+    assert _carousel_meta_path(config, task).is_file()
+    assert not (config.temp_dir / f"{slug}_carousel_meta.json").exists()
+
+
+def test_ig_carousel_path_helpers_match_consumer_slug_when_not_batch(config):
+    slug = "instagram.com_p_DEF456"
+    task = {"id": "solo-id", "slug": slug, "content_type": "instagram_post"}
+    assert _carousel_slides_path(config, task).name == f"{slug}_carousel_slides.json"
+    assert _ig_comment_sidecar_path(config, task).name == f"{slug}_ig_comment.json"
+
+
+def test_ig_cleanup_batch_removes_carousel_and_comment_sidecars(config):
+    ingest_id = "ingest-ig-cleanup-001"
+    slug = "instagram.com_p_XYZ"
+    task = {
+        "id": ingest_id,
+        "slug": slug,
+        "content_type": "instagram_post",
+        "_batch_ingest": True,
+        "source_url": "https://www.instagram.com/p/XYZ/",
+    }
+    temp = config.temp_dir
+    for name in (
+        f"{ingest_id}_carousel_slides.json",
+        f"{ingest_id}_carousel_meta.json",
+        f"{ingest_id}_ig_comment.json",
+        f"{ingest_id}_playwright.py",
+    ):
+        Path(temp / name).write_text("{}", encoding="utf-8")
+    decoy = Path(temp / f"{slug}_carousel_meta.json")
+    decoy.write_text("{}", encoding="utf-8")
+    step_ig_cleanup(task, config)
+    assert not Path(temp / f"{ingest_id}_carousel_slides.json").exists()
+    assert not Path(temp / f"{ingest_id}_carousel_meta.json").exists()
+    assert decoy.exists()
 
 
 def test_resolve_threads_raw_path_finds_batch_sidecar_for_synthesize_slug(config):

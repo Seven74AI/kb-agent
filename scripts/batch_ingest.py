@@ -469,9 +469,12 @@ def _maybe_dispatch_parent_synthesize(conn, config, parent_slug: str) -> bool:
     deferral = get_parent_media_deferral(conn, parent_slug)
     if deferral is not None and int(deferral.get("media_changed") or 0):
         supersede_stale_deferral_synthesize_tasks(conn, parent_slug, deferral)
+    from agent.db import normalize_deferral_parent_content_type
+
+    parent_ct = normalize_deferral_parent_content_type(deferral["content_type"])
     rr = dispatch_synthesize(
         deferral["source_url"], config, conn,
-        content_type=f"{deferral['content_type']}_synthesize", slug=parent_slug,
+        content_type=f"{parent_ct}_synthesize", slug=parent_slug,
         tags=_parent_tags(conn, parent_slug),
     )
     if rr.get("status") == "error":

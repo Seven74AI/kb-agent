@@ -736,12 +736,14 @@ class TestCleanup:
         assert not xdg_root.exists()
 
     def test_cleanup_removes_carousel_artifacts_success_path(self, config, post_task):
-        slug = post_task["slug"]
+        from agent.pipelines.video_common import _artifact_stem
+
+        stem = _artifact_stem(post_task)
         temp = config.temp_dir
         for name in (
-            f"{slug}_playwright.py",
-            f"{slug}_carousel_slides.json",
-            f"{slug}_carousel_meta.json",
+            f"{stem}_playwright.py",
+            f"{stem}_carousel_slides.json",
+            f"{stem}_carousel_meta.json",
         ):
             Path(temp / name).write_text("{}", encoding="utf-8")
         _ytdlp_subprocess_env(config)
@@ -749,16 +751,34 @@ class TestCleanup:
         result = step_ig_cleanup(post_task, config)
         assert "ytdlp_xdg" in result
         for name in (
-            f"{slug}_playwright.py",
-            f"{slug}_carousel_slides.json",
-            f"{slug}_carousel_meta.json",
+            f"{stem}_playwright.py",
+            f"{stem}_carousel_slides.json",
+            f"{stem}_carousel_meta.json",
         ):
             assert not Path(temp / name).exists()
 
+    def test_cleanup_removes_batch_id_keyed_carousel_sidecars(self, config, post_task):
+        """Batch ingest writes id-keyed sidecars; cleanup must remove those, not slug-only decoys."""
+        from agent.pipelines.video_common import _artifact_stem
+
+        batch_task = {**post_task, "_batch_ingest": True}
+        stem = _artifact_stem(batch_task)
+        assert stem == batch_task["id"]
+        temp = config.temp_dir
+        Path(temp / f"{stem}_carousel_meta.json").write_text("{}", encoding="utf-8")
+        slug_decoy = Path(temp / f"{post_task['slug']}_carousel_slides.json")
+        slug_decoy.write_text("{}", encoding="utf-8")
+
+        step_ig_cleanup(batch_task, config)
+        assert not Path(temp / f"{stem}_carousel_meta.json").exists()
+        assert slug_decoy.exists()
+
     def test_cleanup_removes_carousel_artifacts_failure_residual(self, config, post_task):
         """Failed carousel extract can leave playwright; ig_cleanup must remove it."""
-        slug = post_task["slug"]
-        script = Path(config.temp_dir) / f"{slug}_playwright.py"
+        from agent.pipelines.video_common import _artifact_stem
+
+        stem = _artifact_stem(post_task)
+        script = Path(config.temp_dir) / f"{stem}_playwright.py"
         script.write_text("# failed extract leftover\n", encoding="utf-8")
         _ytdlp_subprocess_env(config)
 

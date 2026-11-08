@@ -1008,6 +1008,14 @@ def is_synthesize_content_type(content_type: str) -> bool:
     return (content_type or "").endswith("_synthesize")
 
 
+def normalize_deferral_parent_content_type(content_type: str) -> str:
+    """Map legacy bare ``substack`` parent rows to ``substack_text`` for deferral/dispatch."""
+    ct = (content_type or "").strip()
+    if ct == "substack":
+        return "substack_text"
+    return ct
+
+
 _ACTIVE_TASK_STATUSES = (
     "'pending', 'in_progress', 'paused', 'done', 'completed'"
 )
@@ -1805,6 +1813,7 @@ def ensure_parent_media_deferral(
     """Persist the deferral manifest total (never lowered; may grow on conflict)."""
     if not parent_slug:
         return
+    content_type = normalize_deferral_parent_content_type(content_type)
     prior = get_parent_media_deferral(conn, parent_slug)
     prior_total = int(prior["expected_total"]) if prior else 0
     with conn:
@@ -1814,6 +1823,7 @@ def ensure_parent_media_deferral(
                 (parent_slug, source_url, content_type, expected_total)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(parent_slug) DO UPDATE SET
+                content_type = excluded.content_type,
                 expected_total = MAX(parent_media_deferral.expected_total, excluded.expected_total),
                 updated_at = CASE
                     WHEN excluded.expected_total > parent_media_deferral.expected_total
@@ -2240,14 +2250,65 @@ def get_last_log_line(conn: sqlite3.Connection, task_id: str) -> str | None:
     return row[0] if row else None
 
 
+def reset_task_steps_for_retry(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    slug: str | None,
+    error: str | None,
+    task_status: str,
+) -> None:
+    """Reset failed/paused/running steps when re-queueing a task.
+
+    Shared by :func:`agent.core.resume.retry_task` and
+    :func:`resume_tasks_by_reason` so bulk and single-task resume share the
+    same deferral-preserving step rewind policy.
+    """
+    in_cycle = task_status == "paused" and task_in_deferred_media_cycle(
+        conn, task_id, slug=slug, error=error,
+    )
+    if task_status == "paused" and in_cycle:
+        embed = conn.execute(
+            """
+            SELECT step_order FROM task_steps
+            WHERE task_id = ? AND name = 'substack_embedded_media'
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if embed is not None:
+            preserve_embed = task_deferred_retry_preserves_embed_step(
+                conn, task_id, slug,
+            )
+            step_filter = "step_order > ?" if preserve_embed else "step_order >= ?"
+            conn.execute(
+                f"""
+                UPDATE task_steps
+                SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+                WHERE task_id = ? AND {step_filter}
+                AND status IN ('failed', 'paused', 'running')
+                """,
+                (task_id, embed[0]),
+            )
+    else:
+        conn.execute(
+            """
+            UPDATE task_steps
+            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+            WHERE task_id = ? AND status IN ('failed', 'paused', 'running')
+            """,
+            (task_id,),
+        )
+
+
 def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int:
     """Resume all paused tasks matching a reason pattern.
 
     Resets retries to 0, clears task error, and sets status to ``pending``.
-    Paused ``task_steps`` on resumed tasks are reset to ``pending`` (output
-    cleared) so the consumer re-runs them in order — same step reset as
-    :func:`agent.core.resume.retry_task`. Tasks paused for deferred Substack
-    media (structured deferral pause markers) are excluded and left paused.
+    Step reset matches :func:`agent.core.resume.retry_task` (failed/paused/running
+    steps rewound). Skips tasks whose slug has an in-flight ``*_synthesize`` sibling
+    and tasks in an open deferred-media cycle (``task_in_deferred_media_cycle``),
+    same ownership/deferral gates as ``retry_task``.
 
     Args:
         conn: Agent database connection.
@@ -2257,34 +2318,27 @@ def resume_tasks_by_reason(conn: sqlite3.Connection, reason_pattern: str) -> int
     Returns:
         Number of tasks resumed.
     """
-    exclusion, ex_params = _deferred_media_resume_sql_exclusion()
+    rows = conn.execute(
+        "SELECT id, slug, error FROM tasks WHERE status = 'paused' AND error LIKE ?",
+        (reason_pattern,),
+    ).fetchall()
+    resumed = 0
     with conn:
-        task_ids = [
-            row[0]
-            for row in conn.execute(
-                f"SELECT id FROM tasks WHERE status = 'paused' AND error LIKE ? "
-                f"AND {exclusion}",
-                (reason_pattern, *ex_params),
-            ).fetchall()
-        ]
-        if not task_ids:
-            return 0
-        placeholders = ",".join("?" * len(task_ids))
-        conn.execute(
-            "UPDATE tasks SET status = 'pending', retries = 0, "
-            "error = NULL, updated_at = datetime('now') "
-            f"WHERE id IN ({placeholders})",
-            task_ids,
-        )
-        conn.execute(
-            f"""
-            UPDATE task_steps
-            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
-            WHERE task_id IN ({placeholders}) AND status = 'paused'
-            """,
-            task_ids,
-        )
-        return len(task_ids)
+        for task_id, slug, error in rows:
+            if slug and has_active_synthesize_task(conn, slug):
+                continue
+            if task_in_deferred_media_cycle(conn, task_id, slug=slug, error=error):
+                continue
+            conn.execute(
+                "UPDATE tasks SET status = 'pending', retries = 0, "
+                "error = NULL, updated_at = datetime('now') WHERE id = ?",
+                (task_id,),
+            )
+            reset_task_steps_for_retry(
+                conn, task_id, slug=slug, error=error, task_status="paused",
+            )
+            resumed += 1
+    return resumed
 
 
 def get_task_steps(conn: sqlite3.Connection, task_id: str) -> list[dict]:
