@@ -4811,7 +4811,7 @@ def test_create_delegate_task_concurrent_single_active_child(tmp_path):
 
 
 def test_has_stale_deferral_synthesize_terminal_ignores_superseded_rows(tmp_path):
-    """INVARIANT: stale synthesize probe shares _TERMINAL_SUPERSEDE_FILTER with sibling probes."""
+    """INVARIANT: stale synthesize probe shares REQUEUE_SUPERSEDE_GUARD with sibling probes."""
     from agent.db import (
         _has_stale_deferral_synthesize_terminal,
         ensure_parent_media_deferral,

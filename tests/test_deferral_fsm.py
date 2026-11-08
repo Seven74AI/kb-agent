@@ -21,6 +21,7 @@ from agent.db import (
 )
 from agent.deferral_fsm import (
     ALLOWED_TRANSITIONS,
+    REQUEUE_SUPERSEDE_GUARD,
     SUPERSEDE_DEFERRED_PARENT_REASON,
     DeferralState,
     classify_deferral_state,
@@ -142,6 +143,34 @@ def test_allowed_transitions_covers_cas_edges(src, dst):
 )
 def test_terminal_deferral_states_have_no_outbound_edges(terminal):
     assert ALLOWED_TRANSITIONS[terminal] == ()
+
+
+_SUPERSEDE_INSTR_LITERAL = "instr(LOWER(COALESCE(error, '')), 'superseded')"
+
+
+def test_requeue_supersede_guard_leaf_constant_definition():
+    """INVARIANT: terminal-supersede CAS SQL matches the leaf REQUEUE_SUPERSEDE_GUARD."""
+    assert REQUEUE_SUPERSEDE_GUARD == (
+        "AND (error IS NULL OR instr(LOWER(COALESCE(error, '')), 'superseded') = 0)"
+    )
+
+
+def test_db_supersede_cas_predicates_use_leaf_guard_only():
+    """INVARIANT: agent.db has no duplicate supersede CAS SQL literals."""
+    repo = Path(__file__).resolve().parents[1]
+    db_text = (repo / "agent" / "db.py").read_text(encoding="utf-8")
+    assert "_TERMINAL_SUPERSEDE_FILTER" not in db_text
+    assert _SUPERSEDE_INSTR_LITERAL not in db_text
+    assert "NOT LIKE '%superseded%'" not in db_text
+    assert "REQUEUE_SUPERSEDE_GUARD" in db_text
+
+    offenders = [
+        p.relative_to(repo)
+        for p in (repo / "agent").rglob("*.py")
+        if p.name != "deferral_fsm.py"
+        and _SUPERSEDE_INSTR_LITERAL in p.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
 
 
 def test_requeue_task_for_retry_cas_refuses_superseded(tmp_path):

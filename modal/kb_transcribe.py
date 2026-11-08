@@ -42,6 +42,23 @@ CACHE = "/cache"
 
 hf_secret = modal.Secret.from_name("hf-token")  # HF_TOKEN=...
 
+
+def _sanitize_emit(message: object) -> str:
+    """Route Modal stdout lines that may carry paths/URLs through notify scrub."""
+    import sys
+    from pathlib import Path
+
+    for root in (Path(__file__).resolve().parent.parent, Path("/root/kb-agent")):
+        if root.is_dir():
+            root_s = str(root)
+            if root_s not in sys.path:
+                sys.path.insert(0, root_s)
+            break
+    from agent.notify import sanitize_visible_message
+
+    return sanitize_visible_message(str(message))
+
+
 # Language/hotwords/prompt are passed per-batch via CLI flags (--language / --hotwords /
 # --initial-prompt). Default None = auto-detect, no bias. The TDAH cron passes French + TDAH
 # vocabulary explicitly.
@@ -149,4 +166,4 @@ def main(audio_dir: str = None, out_dir: str = ".", language: str = None, initia
         for k in ("diarization", "transcript"):
             p = os.path.join(out_dir, f"{name}.{k}.json")
             write_transcription_sidecar_json(p, r[k], indent=2)
-            print(f"wrote {p}")
+            print(f"wrote {_sanitize_emit(p)}")

@@ -12,6 +12,11 @@ import os
 import sys
 from pathlib import Path
 
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
+
+from agent.redact import write_vault_note  # noqa: E402
+
 _vault_env = (os.environ.get("KB_VAULT_PATH") or "").strip()
 VAULT = Path(_vault_env) if _vault_env else Path()
 KB = VAULT / "Knowledge base"
@@ -46,7 +51,7 @@ def main() -> int:
             total += 1
             changed_notes.append(str(p.relative_to(KB)))
             if APPLY:
-                p.write_text(text, encoding="utf-8")
+                write_vault_note(p, text)
     for n in changed_notes:
         print(("migrated" if APPLY else "would-migrate"), n)
     print(f"\n{total} notes {'migrated' if APPLY else 'would be migrated'} (apply={APPLY})")

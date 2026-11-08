@@ -14,6 +14,7 @@ _bootstrap_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_bootstrap_root))
 sys.path.insert(0, "/root/kb-agent")
 
+from agent.notify import sanitize_visible_message
 from faster_whisper import WhisperModel
 
 audio_path = sys.argv[1]
@@ -24,7 +25,11 @@ print(f"[{time.strftime('%H:%M:%S')}] Loading large-v3 (int8, CPU)...", flush=Tr
 model = WhisperModel("large-v3", device="cpu", compute_type="int8", cpu_threads=6)
 
 dur_str = f" (~{round(duration_hint/60)}min estimated)" if duration_hint else ""
-print(f"[{time.strftime('%H:%M:%S')}] Transcribing {audio_path}{dur_str}...", flush=True)
+print(
+    f"[{time.strftime('%H:%M:%S')}] Transcribing "
+    f"{sanitize_visible_message(audio_path)}{dur_str}...",
+    flush=True,
+)
 
 start = time.time()
 segments, info = model.transcribe(
