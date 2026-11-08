@@ -56,11 +56,11 @@ def step_see_also(task: dict, config: Config) -> str:
 
     note_content = note_path.read_text(encoding="utf-8")
 
-    # Skip if See Also already has substantive links (3+ wikilinks)
-    existing_links = re.findall(r'\[\[([^\]]+)\]\]', note_content)
     see_also_header = "## Voir aussi" if content_type == "bunny_stream" else "## See Also"
-    if len(existing_links) >= 3 and see_also_header in note_content:
-        return f"See Also already populated with {len(existing_links)} links for {slug}"
+    # Skip only when the See Also section itself already has 3+ wikilinks (body links ignored).
+    section_link_count = _see_also_link_count(note_content, see_also_header)
+    if section_link_count >= 3:
+        return f"See Also already populated with {section_link_count} links for {slug}"
 
     # Extract keywords from the note for searching
     keywords = _extract_keywords(note_content)
@@ -136,6 +136,19 @@ def step_see_also(task: dict, config: Config) -> str:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _see_also_link_count(note_content: str, header: str) -> int:
+    """Count wikilinks inside the See Also / Voir aussi section only."""
+    pattern = (
+        r"## Voir aussi.*?(?=\n## |\Z)"
+        if header == "## Voir aussi"
+        else r"## See Also.*?(?=\n## |\Z)"
+    )
+    match = re.search(pattern, note_content, flags=re.DOTALL)
+    if not match:
+        return 0
+    return len(re.findall(r"\[\[([^\]]+)\]\]", match.group(0)))
+
 
 def _extract_keywords(note_content: str, max_keywords: int = 8) -> list[str]:
     """Extract meaningful keywords from a note for vault search.

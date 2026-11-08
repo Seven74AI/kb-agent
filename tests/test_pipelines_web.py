@@ -175,6 +175,66 @@ def test_enqueue_embedded_media_logs_submit_failures(config, caplog):
     assert warns[0].exc_info is not None
 
 
+def test_enqueue_embedded_media_logs_redact_image_url_query(config, caplog):
+    import logging
+
+    from agent.pipelines.web import _enqueue_embedded_media
+
+    caplog.set_level(logging.WARNING, logger="agent.pipelines.web")
+    sensitive_img = "https://cdn.substack.com/img.png?token=leak&X-Amz-Signature=abc"
+
+    with patch("agent.core.submit.submit_ingest", side_effect=RuntimeError("db locked")):
+        with patch("agent.db.init_db") as mock_init:
+            conn = MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"n": 0}
+            mock_init.return_value = conn
+            _enqueue_embedded_media(
+                "parent_slug",
+                [sensitive_img],
+                [],
+                [],
+                [],
+                "https://example.com/post",
+                config,
+                None,
+            )
+
+    combined = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "leak" not in combined
+    assert "X-Amz-Signature" not in combined
+    assert "cdn.substack.com/img.png" in combined
+
+
+def test_enqueue_embedded_media_logs_redact_rumble_url_query(config, caplog):
+    import logging
+
+    from agent.pipelines.web import _enqueue_embedded_media
+
+    caplog.set_level(logging.WARNING, logger="agent.pipelines.web")
+    sensitive_rumble = "https://rumble.com/vabc-post?key=secret&ref=track"
+
+    with patch("agent.core.submit.submit_ingest", side_effect=RuntimeError("db locked")):
+        with patch("agent.db.init_db") as mock_init:
+            conn = MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"n": 0}
+            mock_init.return_value = conn
+            _enqueue_embedded_media(
+                "parent_slug",
+                [],
+                [],
+                [sensitive_rumble],
+                [],
+                "https://example.com/post",
+                config,
+                None,
+            )
+
+    combined = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "secret" not in combined
+    assert "key=" not in combined
+    assert "rumble.com/vabc-post" in combined
+
+
 # ── _estimate_tokens tests ────────────────────────────────────────────────────
 
 def test_estimate_tokens_empty():

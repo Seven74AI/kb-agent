@@ -27,6 +27,7 @@ from agent.config import Config
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.db import init_db, LOGS_SCHEMA
 from agent.exceptions import ErrorType, StepError
+from agent.notify import sanitize_visible_message
 from agent.llm import get_llm_client
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
@@ -1094,13 +1095,14 @@ def _fetch_ig_comment(url: str, config: Config) -> dict:
             try:
                 data = json.loads(result.stdout)
             except json.JSONDecodeError:
+                snippet = sanitize_visible_message(result.stdout[:200])
                 raise StepError(
-                    f"Comment API returned non-JSON: {result.stdout[:200]}",
+                    f"Comment API returned non-JSON: {snippet}",
                     error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
                 )
             if data.get("status") == "fail":
                 raise StepError(
-                    f"Comment API failed: {data.get('message', '')}",
+                    f"Comment API failed: {sanitize_visible_message(data.get('message', ''))}",
                     error_type=ErrorType.RETRY, step_name="ig_comment_fetch",
                 )
 

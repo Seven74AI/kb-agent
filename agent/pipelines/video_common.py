@@ -49,6 +49,13 @@ def _resolve_slug(task: dict) -> str:
     return _slug_path(task.get("slug", task["id"][:8]))
 
 
+def _artifact_stem(task: dict) -> str:
+    """Temp-dir artifact stem: ingest id in batch runs, else filesystem-safe slug."""
+    if task.get("_batch_ingest"):
+        return task["id"]
+    return _resolve_slug(task)
+
+
 def ensure_h264(video_path: Path) -> Path:
     """Transcode a downloaded video to H.264/MP4 if it isn't already.
 
@@ -145,7 +152,7 @@ def extract_dual_wav(video_path: Path, slug: str, config: Config,
 
 def step_extract_audio(task: dict, config: Config) -> str:
     """Extract dual WAV audio (16kHz + 8kHz) from the downloaded video."""
-    slug = _resolve_slug(task)
+    slug = _artifact_stem(task)
     video_path = _find_video_file(config, slug)
     return json.dumps(extract_dual_wav(video_path, slug, config))
 
@@ -158,7 +165,7 @@ def step_diarize(task: dict, config: Config) -> str:
     MUST run before transcription (sequential — RAM safety).
     Returns the path to the diarization JSON file.
     """
-    slug = _resolve_slug(task)
+    slug = _artifact_stem(task)
     audio_8k = Path(config.temp_dir) / f"{slug}_8k.wav"
     output_json = Path(config.temp_dir) / f"{slug}_diarization.json"
 
@@ -255,7 +262,7 @@ def step_transcribe(task: dict, config: Config) -> str:
     MUST run after diarization (sequential — RAM safety).
     Returns the path to the transcript JSON file.
     """
-    slug = _resolve_slug(task)
+    slug = _artifact_stem(task)
     audio_16k = Path(config.temp_dir) / f"{slug}_16k.wav"
     output_json = Path(config.temp_dir) / f"{slug}_transcript.json"
 

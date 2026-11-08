@@ -2,9 +2,40 @@
 
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
 from agent.db import get_all_tasks, get_last_log_line, get_task_steps
 from agent.notify import sanitize_visible_message
+
+_ALLOWED_SOURCE_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def redact_source_url_for_display(source_url: str) -> str:
+    """Dashboard/MCP-safe source_url: http(s) unchanged; local filesystem paths redacted."""
+    if not source_url:
+        return source_url
+    stripped = source_url.strip()
+    parsed = urlparse(stripped)
+    if parsed.scheme in _ALLOWED_SOURCE_URL_SCHEMES:
+        return stripped
+    if parsed.scheme == "file":
+        name = Path(parsed.path).name
+        return name if name else "<local-path>"
+    if parsed.scheme == "" and stripped.startswith("/"):
+        name = Path(stripped).name
+        return name if name else "<local-path>"
+    return stripped
+
+
+def source_url_href(source_url: str) -> str | None:
+    """Return a clickable URL for dashboards, or None when source_url is not http(s)."""
+    if not source_url:
+        return None
+    parsed = urlparse(source_url.strip())
+    if parsed.scheme in _ALLOWED_SOURCE_URL_SCHEMES:
+        return source_url.strip()
+    return None
 
 
 def format_elapsed(created_at: str, now: datetime) -> str:
@@ -105,9 +136,11 @@ def _enrich_task(
     staleness_str, is_stale = compute_staleness(task_row, logs_conn, now)
     raw_error = task_row.get("error")
     error = sanitize_visible_message(raw_error) if raw_error else None
+    raw_source_url = task_row["source_url"]
     return {
         "id": task_row["id"],
-        "source_url": task_row["source_url"],
+        "source_url": redact_source_url_for_display(raw_source_url),
+        "source_url_href": source_url_href(raw_source_url),
         "content_type": task_row["content_type"],
         "status": task_row["status"],
         "error": error,

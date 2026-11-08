@@ -12,6 +12,7 @@ Supports:
 """
 
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -23,7 +24,7 @@ from agent.db import init_db, LOGS_SCHEMA
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.llm import LLMClient, get_llm_client
-from agent.pipelines import Step, register_pipeline
+from agent.pipelines import PIPELINES, Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.quality import quality_gate_book
 
@@ -69,6 +70,17 @@ BOOK_EXTENSIONS = {".epub", ".pdf", ".mobi", ".azw3"}
 # 3-tier PDF pre-flight thresholds
 PDF_MIN_CHARS_SCANNED = 500       # Below this → scanned (no text layer)
 PDF_QUALITY_SCORE_THRESHOLD = 80  # Below this → degraded OCR
+
+# Pipelines assigned by step_classify_content — every value must be registered.
+CLASSIFY_BOOK_PIPELINES = frozenset({
+    "book_epub",
+    "book_mobi",
+    "book_pdf",
+    "book_scanned",
+    "book_degraded",
+})
+
+_log = logging.getLogger(__name__)
 
 
 # ── Mega.nz Download ──────────────────────────────────────────────────────────
@@ -267,7 +279,7 @@ def step_delegate_books(task: dict, config: Config) -> str:
     tasks for each book whose pipeline is registered (e.g. book_epub, book_pdf).
     """
     from agent.core.slugify import SLUG_MAX_LEN
-    from agent.db import AGENT_SCHEMA, create_task, init_db
+    from agent.db import AGENT_SCHEMA, create_task, find_active_task, init_db
     from agent.pipelines import PIPELINES, get_pipeline_names, import_all_pipelines
 
     import_all_pipelines()
@@ -331,14 +343,18 @@ def step_delegate_books(task: dict, config: Config) -> str:
             stem = Path(file_path).stem
             child_slug = f"{parent_slug}_{stem}"[:SLUG_MAX_LEN]
             steps = get_pipeline_names(pipeline, "")
-            child_id = create_task(
-                conn,
-                file_path,
-                pipeline,
-                child_slug,
-                steps,
-                tags=tags,
-            )
+            existing_id = find_active_task(conn, child_slug, pipeline)
+            if existing_id:
+                child_id = existing_id
+            else:
+                child_id = create_task(
+                    conn,
+                    file_path,
+                    pipeline,
+                    child_slug,
+                    steps,
+                    tags=tags,
+                )
             created.append({
                 "task_id": child_id,
                 "slug": child_slug,
@@ -393,8 +409,44 @@ def _pdf_preflight(pdf_path: Path) -> tuple[str, int]:
         else:
             return "degraded", score
 
-    except Exception:
-        return "text", 100  # Assume clean on error
+    except Exception as exc:
+        _log.warning("PDF preflight failed for %s: %s", pdf_path, exc)
+        return "degraded", 0
+
+
+def _resolve_local_book_path(
+    task: dict,
+    config: Config,
+    extensions: set[str],
+    step_name: str,
+) -> Path:
+    """Resolve a local book file for child or batch mega tasks.
+
+    Prefer ``task['source_url']`` when it is an existing local path (delegated
+    mega children). Fall back to ``mega_{slug}`` only when that directory exists
+    (batch/parent download layout).
+    """
+    source = (task.get("source_url") or "").strip()
+    if source:
+        src_path = Path(source)
+        if src_path.is_file() and src_path.suffix.lower() in extensions:
+            return src_path
+
+    slug = task.get("slug", task["id"][:8])
+    dl_dir = Path(config.temp_dir) / f"mega_{slug}"
+    if dl_dir.is_dir():
+        matches = [
+            f for f in dl_dir.rglob("*")
+            if f.suffix.lower() in extensions and "__MACOSX" not in str(f)
+        ]
+        if matches:
+            return sorted(matches, key=lambda f: f.name)[0]
+
+    raise StepError(
+        f"No book file ({', '.join(sorted(extensions))}) found for slug {slug}",
+        error_type=ErrorType.FAIL,
+        step_name=step_name,
+    )
 
 
 def quality_score(pdf_path: str | Path) -> int:
@@ -526,22 +578,9 @@ def step_extract_epub(task: dict, config: Config) -> str:
     """
     slug = task.get("slug", task["id"][:8])
 
-    # Determine ePub source path
-    source = task.get("source_url", "")
-    if source and Path(source).exists():
-        epub_path = Path(source)
-    else:
-        # Check temp dir
-        dl_dir = Path(config.temp_dir) / f"mega_{slug}"
-        epubs = list(dl_dir.rglob("*.epub"))
-        if epubs:
-            epub_path = epubs[0]
-        else:
-            raise StepError(
-                f"No ePub file found for slug {slug}",
-                error_type=ErrorType.FAIL,
-                step_name="extract_epub",
-            )
+    epub_path = _resolve_local_book_path(
+        task, config, {".epub"}, "extract_epub",
+    )
 
     if not HAS_EBOOKLIB:
         raise StepError(
@@ -623,21 +662,9 @@ def step_extract_pdf(task: dict, config: Config) -> str:
     """
     slug = task.get("slug", task["id"][:8])
 
-    # Determine PDF source path
-    source = task.get("source_url", "")
-    if source and Path(source).exists():
-        pdf_path = Path(source)
-    else:
-        dl_dir = Path(config.temp_dir) / f"mega_{slug}"
-        pdfs = list(dl_dir.rglob("*.pdf"))
-        if pdfs:
-            pdf_path = pdfs[0]
-        else:
-            raise StepError(
-                f"No PDF file found for slug {slug}",
-                error_type=ErrorType.FAIL,
-                step_name="extract_pdf",
-            )
+    pdf_path = _resolve_local_book_path(
+        task, config, {".pdf"}, "extract_pdf",
+    )
 
     if not HAS_PYMUPDF:
         raise StepError(
@@ -693,6 +720,179 @@ def step_extract_pdf(task: dict, config: Config) -> str:
             f"PDF extraction failed: {e}",
             error_type=ErrorType.FAIL,
             step_name="extract_pdf",
+        ) from e
+
+
+def _write_pdf_full_text(
+    pdf_path: Path,
+    slug: str,
+    config: Config,
+    *,
+    quality_score: int | None = None,
+    warning: str | None = None,
+) -> dict:
+    """Extract PDF text to book_{slug}_full.txt and return extract JSON fields."""
+    doc = pymupdf.open(str(pdf_path))
+    full_text = [page.get_text() for page in doc]
+    doc.close()
+
+    output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(full_text))
+
+    total_chars = sum(len(t) for t in full_text)
+    payload = {
+        "full_text_path": str(output_path),
+        "page_count": len(full_text),
+        "total_chars": total_chars,
+        "estimated_words": total_chars // 5,
+        "title": pdf_path.stem,
+    }
+    if quality_score is not None:
+        payload["quality_score"] = quality_score
+    if warning:
+        payload["degraded_warning"] = warning
+    return payload
+
+
+def step_extract_mobi(task: dict, config: Config) -> str:
+    """Convert MOBI/AZW3 to ePub via calibre, then extract like digital ePub."""
+    slug = task.get("slug", task["id"][:8])
+    mobi_path = _resolve_local_book_path(
+        task, config, {".mobi", ".azw3"}, "extract_mobi",
+    )
+
+    if not shutil.which("ebook-convert"):
+        raise StepError(
+            "Missing dependency: calibre ebook-convert — install calibre",
+            error_type=ErrorType.PAUSE,
+            step_name="extract_mobi",
+        )
+
+    epub_path = Path(config.temp_dir) / f"book_{slug}_converted.epub"
+    try:
+        result = subprocess.run(
+            ["ebook-convert", str(mobi_path), str(epub_path)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            raise StepError(
+                f"ebook-convert failed: {result.stderr.strip() or result.stdout.strip()}",
+                error_type=ErrorType.FAIL,
+                step_name="extract_mobi",
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise StepError(
+            "ebook-convert timed out",
+            error_type=ErrorType.FAIL,
+            step_name="extract_mobi",
+        ) from exc
+
+    child_task = {**task, "source_url": str(epub_path)}
+    return step_extract_epub(child_task, config)
+
+
+def step_extract_pdf_scanned(task: dict, config: Config) -> str:
+    """OCR a scanned PDF via marker-pdf and write full text for synthesis."""
+    slug = task.get("slug", task["id"][:8])
+    pdf_path = _resolve_local_book_path(
+        task, config, {".pdf"}, "extract_pdf_scanned",
+    )
+
+    marker_bin = shutil.which("marker_single") or shutil.which("marker")
+    if not marker_bin:
+        raise StepError(
+            "Missing dependency: marker-pdf CLI (marker_single) — install marker-pdf",
+            error_type=ErrorType.PAUSE,
+            step_name="extract_pdf_scanned",
+        )
+
+    ocr_dir = Path(config.temp_dir) / f"book_{slug}_ocr"
+    if ocr_dir.exists():
+        shutil.rmtree(ocr_dir)
+    ocr_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = subprocess.run(
+            [marker_bin, str(pdf_path), str(ocr_dir)],
+            capture_output=True,
+            text=True,
+            timeout=7200,
+        )
+        if result.returncode != 0:
+            raise StepError(
+                f"marker-pdf OCR failed: {result.stderr.strip() or result.stdout.strip()}",
+                error_type=ErrorType.FAIL,
+                step_name="extract_pdf_scanned",
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise StepError(
+            "marker-pdf OCR timed out",
+            error_type=ErrorType.FAIL,
+            step_name="extract_pdf_scanned",
+        ) from exc
+
+    md_files = sorted(ocr_dir.rglob("*.md"))
+    if not md_files:
+        raise StepError(
+            f"marker-pdf produced no markdown under {ocr_dir}",
+            error_type=ErrorType.FAIL,
+            step_name="extract_pdf_scanned",
+        )
+
+    combined = "\n\n".join(p.read_text(encoding="utf-8", errors="replace") for p in md_files)
+    output_path = Path(config.temp_dir) / f"book_{slug}_full.txt"
+    output_path.write_text(combined, encoding="utf-8")
+
+    task["_book_title"] = pdf_path.stem
+    task["_book_author"] = "Unknown"
+
+    return json.dumps({
+        "full_text_path": str(output_path),
+        "page_count": len(md_files),
+        "total_chars": len(combined),
+        "estimated_words": len(combined) // 5,
+        "title": task["_book_title"],
+        "ocr_engine": "marker-pdf",
+    })
+
+
+def step_extract_pdf_degraded(task: dict, config: Config) -> str:
+    """Extract degraded PDF text — warn and attempt direct pymupdf extraction."""
+    slug = task.get("slug", task["id"][:8])
+    pdf_path = _resolve_local_book_path(
+        task, config, {".pdf"}, "extract_pdf_degraded",
+    )
+
+    if not HAS_PYMUPDF:
+        raise StepError(
+            "Missing dependency: pymupdf — install with pip install pymupdf",
+            error_type=ErrorType.PAUSE,
+            step_name="extract_pdf_degraded",
+        )
+
+    tier, score = _pdf_preflight(pdf_path)
+    warning = (
+        f"Degraded PDF ingest (preflight={tier!r}, score={score}/100) — "
+        "using existing text layer; quality may be poor"
+    )
+    _log.warning("%s for %s", warning, pdf_path)
+
+    try:
+        payload = _write_pdf_full_text(
+            pdf_path, slug, config, quality_score=score, warning=warning,
+        )
+        task["_book_title"] = pdf_path.stem
+        task["_book_author"] = "Unknown"
+        payload["title"] = task["_book_title"]
+        return json.dumps(payload)
+    except Exception as e:
+        raise StepError(
+            f"Degraded PDF extraction failed: {e}",
+            error_type=ErrorType.FAIL,
+            step_name="extract_pdf_degraded",
         ) from e
 
 
@@ -1139,19 +1339,19 @@ def step_book_minio_upload(task: dict, config: Config) -> str:
     upload_file_to_minio(full_text_path, txt_dest)
     uploaded.append(f"books/{slug}.txt")
 
-    # Try to upload source epub/PDF
-    dl_dir = Path(config.temp_dir) / f"mega_{slug}"
-    source_files = (
-        list(dl_dir.rglob("*.epub")) + list(dl_dir.rglob("*.pdf"))
-    )
-    if source_files:
-        sf = source_files[0]
+    source_suffixes = {".epub", ".pdf", ".mobi", ".azw3"}
+    try:
+        sf = _resolve_local_book_path(
+            task, config, source_suffixes, "book_minio_upload",
+        )
         sf_dest = f"{config.minio_bucket}/books/{slug}{sf.suffix.lower()}"
         try:
             upload_file_to_minio(sf, sf_dest, timeout=120)
             uploaded.append(f"books/{slug}{sf.suffix.lower()}")
         except StepError:
             pass  # Source file upload is best-effort
+    except StepError:
+        pass  # Source file upload is best-effort
 
 
     # Update note frontmatter with source_files URLs
@@ -1245,6 +1445,33 @@ register_pipeline("book_pdf", [
     Step(name="git_push", fn=step_book_git_push, on_error="retry"),
 ])
 
+register_pipeline("book_mobi", [
+    Step(name="extract_text", fn=step_extract_mobi, on_error="fail"),
+    Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
+    Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_book_git_push, on_error="retry"),
+])
+
+register_pipeline("book_scanned", [
+    Step(name="extract_text", fn=step_extract_pdf_scanned, on_error="pause"),
+    Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
+    Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_book_git_push, on_error="retry"),
+])
+
+register_pipeline("book_degraded", [
+    Step(name="extract_text", fn=step_extract_pdf_degraded, on_error="fail"),
+    Step(name="synthesize_note", fn=step_synthesize_book, on_error="retry"),
+    Step(name="quality_gate", fn=step_book_quality_gate, on_error="retry"),
+    Step(name="minio_upload", fn=step_book_minio_upload, on_error="retry"),
+    Step(name="see_also", fn=step_see_also, on_error="fail"),
+    Step(name="git_push", fn=step_book_git_push, on_error="retry"),
+])
+
 register_pipeline("mega", [
     Step(name="megadl_download", fn=step_megadl_download, on_error="pause"),
     Step(name="classify_content", fn=step_classify_content, on_error="retry"),
@@ -1260,3 +1487,9 @@ register_pipeline("book_batch", [
 
 # Registers mega_video pipeline (Mega-hosted video files)
 import agent.pipelines.mega_video  # noqa: F401, E402
+
+_missing_classify = CLASSIFY_BOOK_PIPELINES - set(PIPELINES.keys())
+if _missing_classify:
+    raise RuntimeError(
+        f"Invariant: classify_content pipelines must be registered: {_missing_classify}"
+    )

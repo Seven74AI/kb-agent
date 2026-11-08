@@ -15,6 +15,7 @@ from typing import NamedTuple
 from urllib.parse import urljoin, urlparse
 
 from agent.config import Config
+from agent.detection import _safe_url_for_log
 from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.notify import sanitize_visible_message
@@ -516,7 +517,7 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                 logger.warning(
                     "embedded media enqueue failed (image) parent=%s url=%s",
                     parent_slug,
-                    img_url,
+                    _safe_url_for_log(img_url),
                     exc_info=True,
                 )
                 continue
@@ -548,7 +549,7 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
                 logger.warning(
                     "embedded media enqueue failed (rumble) parent=%s url=%s",
                     parent_slug,
-                    url,
+                    _safe_url_for_log(url),
                     exc_info=True,
                 )
                 continue
@@ -741,7 +742,13 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8",
     )
 
-    from agent.db import AGENT_SCHEMA, count_pending_media, ensure_parent_media_deferral, init_db
+    from agent.db import (
+        AGENT_SCHEMA,
+        count_pending_media,
+        ensure_parent_media_deferral,
+        init_db,
+        parent_media_complete,
+    )
     from agent.notify import sanitize_visible_message
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
@@ -789,6 +796,13 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             if gate_total != queue_count:
                 raise StepError(
                     f"media gate: ingest rows {queue_count} != manifest total {gate_total}",
+                    error_type=ErrorType.PAUSE,
+                    step_name="substack_embedded_media",
+                )
+            raw_path = Path(config.temp_dir) / f"{slug}_raw.md"
+            if not parent_media_complete(conn, slug, raw_path=raw_path):
+                raise StepError(
+                    "media gate: parent media not complete — raw markers or bodies missing",
                     error_type=ErrorType.PAUSE,
                     step_name="substack_embedded_media",
                 )

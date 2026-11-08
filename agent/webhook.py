@@ -458,7 +458,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <tr>
                 <td style="font-family:monospace;font-size:0.8rem;">{{ task.id[:8] }}</td>
                 <td>{{ task.content_type }}</td>
-                <td><div class="url-cell" title="{{ task.source_url }}">{{ task.source_url[:50] }}{% if task.source_url|length > 50 %}…{% endif %}</div>{% if task.source_url %}<a class="url-link" href="{{ task.source_url }}" target="_blank" rel="noopener" title="Open URL">🔗</a>{% endif %}</td>
+                <td><div class="url-cell" title="{{ task.source_url }}">{{ task.source_url[:50] }}{% if task.source_url|length > 50 %}…{% endif %}</div>{% if task.source_url_href %}<a class="url-link" href="{{ task.source_url_href }}" target="_blank" rel="noopener" title="Open URL">🔗</a>{% endif %}</td>
                 <td><span class="status-badge {{ task.status }}" title="{{ status_help.get(task.status, '') }}">{{ task.status }}</span></td>
                 <td>
                     <div class="step-list">

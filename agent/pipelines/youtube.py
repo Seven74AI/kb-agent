@@ -28,6 +28,7 @@ from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
 from agent.pipelines.video_common import (
     VIDEO_DENSITY_MIN,
+    _artifact_stem,
     check_density as _check_density,
     ensure_h264,
     format_transcript_for_llm as _format_transcript_for_llm,
@@ -91,9 +92,7 @@ def _ytdlp_subprocess_env(config: Config) -> dict[str, str]:
 
 def _download_artifact_stem(task: dict) -> str:
     """Temp-dir stem for download-phase artifacts (id-keyed in nightly batch)."""
-    if task.get("_batch_ingest"):
-        return task["id"]
-    return task.get("slug", task["id"][:8])
+    return _artifact_stem(task)
 
 
 # ── Cookie Pre-flight ─────────────────────────────────────────────────────────
@@ -402,10 +401,10 @@ def step_merge_and_identify(task: dict, config: Config) -> str:
     Returns:
         JSON string summarizing merge result.
     """
-    slug = task.get("slug", task["id"][:8])
-    diar_path = Path(config.temp_dir) / f"{slug}_diarization.json"
-    trans_path = Path(config.temp_dir) / f"{slug}_transcript.json"
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    stem = _download_artifact_stem(task)
+    diar_path = Path(config.temp_dir) / f"{stem}_diarization.json"
+    trans_path = Path(config.temp_dir) / f"{stem}_transcript.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
 
     if not diar_path.exists():
         raise FileNotFoundError(f"Diarization not found: {diar_path}")
@@ -432,7 +431,7 @@ def step_merge_and_identify(task: dict, config: Config) -> str:
     trans["chapters"] = chapters
 
     # Write merged transcript
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     merged_path.write_text(json.dumps(trans, indent=2, ensure_ascii=False))
 
     # Count stats

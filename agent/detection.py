@@ -278,9 +278,21 @@ def _detect_threads_subtype(url: str) -> str:
         )
         if re.search(r'"video_versions"\s*:\s*\[', result.stdout):
             return "threads_video"
-    except (subprocess.TimeoutExpired, Exception):
-        pass
-    return "threads_text"
+        return "threads_text"
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Threads subtype fetch timed out for %s — cannot classify",
+            _safe_url_for_log(url),
+        )
+        return "unknown"
+    except Exception as exc:
+        logger.warning(
+            "Threads subtype fetch failed for %s: %s",
+            _safe_url_for_log(url),
+            exc,
+            exc_info=True,
+        )
+        return "unknown"
 
 
 def _detect_substack_subtype(url: str) -> str:

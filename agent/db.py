@@ -428,6 +428,8 @@ def queue_ingest(conn: sqlite3.Connection, url: str, content_type: str, slug: st
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (ingest_id, url, content_type, slug, status, serialize_tags(tags), parent_key, media_kind),
         )
+    if parent_slug:
+        _reconcile_parent_media_deferral_on_new_sibling(conn, parent_slug)
     return ingest_id, True
 
 
@@ -466,6 +468,93 @@ def _embedded_media_high_water_hint(
         if match:
             hints.append(int(match.group(1)) + int(match.group(2)))
     return max(hints) if hints else 0
+
+
+def _lookup_parent_article_metadata(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+) -> tuple[str | None, str | None]:
+    """Resolve source_url and content_type for a parent article slug."""
+    if not parent_slug:
+        return None, None
+    conn.row_factory = sqlite3.Row
+    parent_row = conn.execute(
+        "SELECT source_url, content_type FROM tasks "
+        "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
+        "ORDER BY created_at LIMIT 1",
+        (parent_slug,),
+    ).fetchone()
+    source_url = None
+    content_type = None
+    if parent_row:
+        source_url = parent_row["source_url"]
+        content_type = parent_row["content_type"]
+    if not source_url or not content_type:
+        syn_row = conn.execute(
+            "SELECT source_url, content_type FROM tasks "
+            "WHERE slug = ? AND content_type GLOB '*_synthesize' "
+            "ORDER BY created_at LIMIT 1",
+            (parent_slug,),
+        ).fetchone()
+        if syn_row:
+            source_url = source_url or syn_row["source_url"]
+            syn_ct = syn_row["content_type"]
+            if syn_ct and is_synthesize_content_type(syn_ct):
+                content_type = content_type or syn_ct[: -len("_synthesize")]
+            else:
+                content_type = content_type or syn_ct
+    return source_url, content_type
+
+
+def _mark_parent_media_enqueue_shortfall(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    sibling_n: int,
+    expected_total: int,
+    *,
+    expected_grew: bool = False,
+) -> None:
+    flag = 1 if (sibling_n < expected_total or expected_grew) else 0
+    with conn:
+        conn.execute(
+            """
+            UPDATE parent_media_deferral
+            SET media_changed = ?, updated_at = datetime('now')
+            WHERE parent_slug = ?
+            """,
+            (flag, parent_slug),
+        )
+
+
+def _reconcile_parent_media_deferral_on_new_sibling(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    *,
+    temp_dir: Path | None = None,
+) -> None:
+    """Grow expected_total when a sibling ingest row appears outside embedded_media / manifest sync."""
+    if not parent_slug:
+        return
+    sibling_n = _parent_sibling_media_count(conn, parent_slug)
+    high_water = _embedded_media_high_water_hint(conn, parent_slug, temp_dir)
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    prior_expected = int(deferral["expected_total"]) if deferral else 0
+    expected = max(prior_expected, sibling_n, high_water)
+    if expected == 0:
+        return
+    source_url = deferral["source_url"] if deferral else None
+    content_type = deferral["content_type"] if deferral else None
+    if not source_url or not content_type:
+        source_url, content_type = _lookup_parent_article_metadata(conn, parent_slug)
+    if not source_url or not content_type:
+        return
+    grew = expected > prior_expected
+    ensure_parent_media_deferral(
+        conn, parent_slug, source_url, content_type, expected,
+    )
+    _mark_parent_media_enqueue_shortfall(
+        conn, parent_slug, sibling_n, expected, expected_grew=grew,
+    )
 
 
 def _parent_sibling_media_count(conn: sqlite3.Connection, parent_slug: str) -> int:
@@ -1273,41 +1362,16 @@ def bootstrap_parent_media_deferral_from_siblings(
     high_water = _embedded_media_high_water_hint(conn, parent_slug, temp_dir)
     if sibling_n == 0 and high_water == 0:
         return
-    if high_water > 0 and sibling_n < high_water:
-        return
     expected = max(sibling_n, high_water)
-    conn.row_factory = sqlite3.Row
-    parent_row = conn.execute(
-        "SELECT source_url, content_type FROM tasks "
-        "WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        "ORDER BY created_at LIMIT 1",
-        (parent_slug,),
-    ).fetchone()
-    source_url = None
-    content_type = None
-    if parent_row:
-        source_url = parent_row["source_url"] if hasattr(parent_row, "keys") else parent_row[0]
-        content_type = parent_row["content_type"] if hasattr(parent_row, "keys") else parent_row[1]
-    if not source_url or not content_type:
-        syn_row = conn.execute(
-            "SELECT source_url, content_type FROM tasks "
-            "WHERE slug = ? AND content_type GLOB '*_synthesize' "
-            "ORDER BY created_at LIMIT 1",
-            (parent_slug,),
-        ).fetchone()
-        if syn_row:
-            source_url = source_url or (
-                syn_row["source_url"] if hasattr(syn_row, "keys") else syn_row[0]
-            )
-            syn_ct = syn_row["content_type"] if hasattr(syn_row, "keys") else syn_row[1]
-            if syn_ct and is_synthesize_content_type(syn_ct):
-                content_type = content_type or syn_ct[: -len("_synthesize")]
-            else:
-                content_type = content_type or syn_ct
+    source_url, content_type = _lookup_parent_article_metadata(conn, parent_slug)
     if not source_url or not content_type:
         return
+    grew = expected > 0
     ensure_parent_media_deferral(
         conn, parent_slug, source_url, content_type, expected,
+    )
+    _mark_parent_media_enqueue_shortfall(
+        conn, parent_slug, sibling_n, expected, expected_grew=grew,
     )
 
 
@@ -1412,9 +1476,15 @@ def claim_ingest_items(conn: sqlite3.Connection) -> list[dict]:
     with conn:
         rows = conn.execute(
             "UPDATE ingest_queue SET status='downloading', updated_at=datetime('now') "
-            "WHERE status='queued' RETURNING *"
+            "WHERE id IN ("
+            "  SELECT id FROM ingest_queue WHERE status='queued' "
+            "  ORDER BY created_at ASC, id ASC"
+            ") "
+            "RETURNING *"
         ).fetchall()
-    return [dict(r) for r in rows]
+    claimed = [dict(r) for r in rows]
+    claimed.sort(key=lambda r: (r["created_at"], r["id"]))
+    return claimed
 
 
 def recover_stale_ingest(

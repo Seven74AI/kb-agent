@@ -5,10 +5,13 @@ Tier 2: Structural review (cheap LLM call) — completeness, balance.
 Max 3 retry rounds.
 """
 
-from pathlib import Path
+import logging
 import re
+from pathlib import Path
 
 from agent.notify import redact_credential_shapes
+
+logger = logging.getLogger(__name__)
 
 
 def count_quotes(lines: list[str]) -> int:
@@ -325,7 +328,13 @@ def _resynthesize(note_path: Path, config, llm, failures: list[str]) -> bool:
         response = llm.call(
             system_prompt=system_prompt, user_prompt=user_prompt, role="resynthesize",
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Re-synthesize LLM call failed for %s: %s",
+            note_path.stem,
+            exc,
+            exc_info=True,
+        )
         return False
 
     new_note = response.content.strip()

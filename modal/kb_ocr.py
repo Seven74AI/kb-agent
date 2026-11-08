@@ -115,6 +115,7 @@ def read_images(images: list) -> list:
                 results.append(
                     {
                         "name": name,
+                        "truncated": True,
                         "error": f"OCR output truncated at {MAX_NEW_OCR_TOKENS} tokens",
                     }
                 )
@@ -154,12 +155,20 @@ def main(image_dir: str = None, out_dir: str = "."):
     if not items:
         print("no images found in", image_dir)
         return
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from agent.notify import ocr_error_json
+
     results = read_images.remote(items)
     for r in results:
         p = os.path.join(out_dir, f"{r['name']}.ocr.json")
         with open(p, "w") as f:
             if r.get("error"):
-                json.dump({"error": r["error"]}, f, ensure_ascii=False, indent=2)
+                json.dump(ocr_error_json(r["error"]), f, ensure_ascii=False, indent=2)
             else:
                 json.dump({"reading": r["reading"]}, f, ensure_ascii=False, indent=2)
         print(f"wrote {p}")

@@ -15,10 +15,14 @@ from agent.config import Config
 from agent.detection import _classify_mega_filenames
 from agent.db import AGENT_SCHEMA, create_task, init_db
 from agent.pipelines.books import (
+    CLASSIFY_BOOK_PIPELINES,
     _pdf_preflight,
     quality_score,
     step_extract_epub,
     step_extract_pdf,
+    step_extract_mobi,
+    step_extract_pdf_degraded,
+    step_extract_pdf_scanned,
     step_classify_content,
     step_delegate_books,
     step_book_quality_gate,
@@ -235,6 +239,14 @@ class TestQualityScore:
         classification, score = _pdf_preflight(Path("/fake/degraded.pdf"))
         assert classification == "degraded"
         assert score < PDF_QUALITY_SCORE_THRESHOLD
+
+    @patch("agent.pipelines.books.pymupdf")
+    def test_pdf_preflight_open_error_returns_degraded(self, mock_pymupdf):
+        """Corrupt/password PDFs must not be classified as clean text."""
+        mock_pymupdf.open.side_effect = RuntimeError("cannot open encrypted pdf")
+        classification, score = _pdf_preflight(Path("/fake/bad.pdf"))
+        assert classification == "degraded"
+        assert score == 0
 
 
 # ── ePub Extraction Tests ─────────────────────────────────────────────────────
@@ -722,6 +734,196 @@ class TestDelegateBooks:
             f"{mega_task['slug']}_beta",
         }
 
+    @patch("agent.pipelines.books.pymupdf")
+    def test_delegate_creates_child_for_mobi_and_scanned(
+        self, mock_pymupdf, config, mega_task, tmp_path,
+    ):
+        """delegate registers book_mobi / book_scanned — must not skip."""
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        mobi = dl_dir / "kindle.mobi"
+        pdf = dl_dir / "scan.pdf"
+        mobi.write_bytes(b"mobi")
+        pdf.write_bytes(b"%PDF")
+
+        mock_doc = MagicMock()
+        mock_doc.page_count = 1
+        mock_doc.__getitem__.return_value.get_text.return_value = ""
+        mock_pymupdf.open.return_value = mock_doc
+
+        classify_json = step_classify_content(mega_task, config)
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'done', output = ? "
+            "WHERE task_id = ? AND name = 'classify_content'",
+            (classify_json, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        mega_task["id"] = parent_id
+        result = step_delegate_books(mega_task, config)
+        summary = json.loads(result)
+
+        assert summary["child_tasks_created"] == 2
+        assert summary["skipped"] == 0
+        pipelines = {c["pipeline"] for c in summary["created"]}
+        assert pipelines == {"book_mobi", "book_scanned"}
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        rows = conn.execute(
+            "SELECT content_type FROM tasks WHERE id != ?",
+            (parent_id,),
+        ).fetchall()
+        conn.close()
+        assert {r[0] for r in rows} == {"book_mobi", "book_scanned"}
+
+    def test_delegate_retry_does_not_duplicate_child_tasks(self, config, mega_task, tmp_path):
+        """Re-running delegate after partial completion must not create duplicate child owners."""
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir()
+        data_dir = kb_dir / "data"
+        data_dir.mkdir()
+        config.kb_agent_dir = kb_dir
+
+        dl_dir = Path(config.temp_dir) / f"mega_{mega_task['slug']}"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        (dl_dir / "alpha.epub").write_text("epub a")
+        (dl_dir / "beta.epub").write_text("epub b")
+
+        classify_json = step_classify_content(mega_task, config)
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        parent_id = create_task(
+            conn,
+            mega_task["source_url"],
+            "book_batch",
+            mega_task["slug"],
+            ["megadl_download", "classify_content", "delegate"],
+        )
+        conn.execute(
+            "UPDATE task_steps SET status = 'done', output = ? "
+            "WHERE task_id = ? AND name = 'classify_content'",
+            (classify_json, parent_id),
+        )
+        conn.commit()
+        conn.close()
+
+        mega_task["id"] = parent_id
+        step_delegate_books(mega_task, config)
+        step_delegate_books(mega_task, config)
+
+        conn = init_db(data_dir / "agent.db", AGENT_SCHEMA)
+        rows = conn.execute(
+            "SELECT id, slug FROM tasks WHERE id != ? ORDER BY slug",
+            (parent_id,),
+        ).fetchall()
+        conn.close()
+
+        assert len(rows) == 2
+        slugs = [row[1] for row in rows]
+        assert slugs == sorted(slugs)
+        assert slugs == [
+            f"{mega_task['slug']}_alpha",
+            f"{mega_task['slug']}_beta",
+        ]
+
+
+# ── MinIO upload source resolution ─────────────────────────────────────────────
+
+class TestBookMinioUpload:
+    """MinIO upload must resolve delegated child local paths."""
+
+    @patch("agent.archival.upload_file_to_minio")
+    def test_minio_upload_uses_child_source_url_not_mega_slug_dir(
+        self, mock_upload, config, tmp_path,
+    ):
+        parent_slug = "mega_parent_batch"
+        child_slug = f"{parent_slug}_nested_book"
+        epub = tmp_path / "nested_book.epub"
+        epub.write_text("epub bytes")
+        full_txt = Path(config.temp_dir) / f"book_{child_slug}_full.txt"
+        full_txt.parent.mkdir(parents=True, exist_ok=True)
+        full_txt.write_text("extracted book text " * 20)
+
+        mega_child_dir = Path(config.temp_dir) / f"mega_{child_slug}"
+        mega_child_dir.mkdir(parents=True)
+        assert not list(mega_child_dir.glob("*.epub"))
+
+        task = {
+            "id": "child-task",
+            "slug": child_slug,
+            "source_url": str(epub),
+        }
+        result = step_book_minio_upload(task, config)
+        data = json.loads(result)
+        assert f"books/{child_slug}.txt" in data["uploaded"]
+        assert f"books/{child_slug}.epub" in data["uploaded"]
+        uploaded_paths = [Path(c[0][0]) for c in mock_upload.call_args_list]
+        assert epub.resolve() in {p.resolve() for p in uploaded_paths}
+
+
+class TestBookSourceUrlSurfaces:
+    """Regression: local paths stay in DB for pipelines; status/MCP surfaces redact them."""
+
+    def test_status_redacts_local_source_url(self, tmp_path):
+        from agent.core.status import get_task
+
+        db_path = tmp_path / "agent.db"
+        conn = init_db(db_path, AGENT_SCHEMA)
+        local = "/secret/mega_downloads/hidden_dir/alpha.epub"
+        task_id = create_task(conn, local, "book_epub", "child_alpha", ["extract_epub"])
+        conn.commit()
+        conn.close()
+
+        conn = init_db(db_path, AGENT_SCHEMA)
+        enriched = get_task(conn, task_id)
+        conn.close()
+
+        assert enriched is not None
+        assert enriched["source_url"] == "alpha.epub"
+        assert local not in enriched["source_url"]
+        assert enriched.get("source_url_href") is None
+
+        conn = init_db(db_path, AGENT_SCHEMA)
+        row = conn.execute(
+            "SELECT source_url FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == local
+
+    def test_book_extract_still_resolves_local_source(self, config, book_task, tmp_path):
+        """Child pipeline steps read raw source_url from the task dict (not status API)."""
+        Path(config.temp_dir).mkdir(parents=True, exist_ok=True)
+        epub_path = tmp_path / "resolved.epub"
+        epub_path.write_text("not a real epub")
+        book_task["source_url"] = str(epub_path)
+        book_task["slug"] = "resolved_slug"
+
+        mock_book = MagicMock()
+        mock_book.get_items_of_type.return_value = []
+        mock_book.get_metadata.return_value = []
+
+        with patch("agent.pipelines.books.HAS_EBOOKLIB", True), patch(
+            "agent.pipelines.books.epub.read_epub", return_value=mock_book
+        ):
+            result = json.loads(step_extract_epub(book_task, config))
+
+        assert result["chapter_count"] == 0
+        assert Path(result["full_text_path"]).is_file()
+
 
 # ── Pipeline Registration Tests ───────────────────────────────────────────────
 
@@ -775,6 +977,15 @@ class TestPipelineRegistration:
         assert "git_push" in step_names
         # Web pipeline has firecrawl_extract — book pipeline should not
         assert "firecrawl_extract" not in step_names
+
+    @pytest.mark.parametrize("pipeline_name", sorted(CLASSIFY_BOOK_PIPELINES))
+    def test_classify_book_pipelines_registered(self, pipeline_name):
+        """Invariant: every pipeline from classify_content is registered."""
+        from agent.pipelines import get_pipeline
+
+        pipeline = get_pipeline(pipeline_name)
+        assert pipeline is not None
+        assert "extract_text" in [s.name for s in pipeline]
 
     def test_mega_video_pipeline_registered(self):
         """get_pipeline('mega_video') returns the video pipeline, not web fallback."""
