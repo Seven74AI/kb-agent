@@ -327,7 +327,7 @@ def _html_unescape(s: str) -> str:
 
 _NATIVE_VIDEO_ID_RE = re.compile(
     r'"videoUpload"\s*:\s*\{\s*"id"\s*:\s*"([a-f0-9-]+)"'
-    r'|/api/v1/video/upload/([a-f0-9-]+)/',
+    r'|/api/v1/video/upload/([a-f0-9-]+)/?',
     re.IGNORECASE,
 )
 
@@ -600,6 +600,7 @@ def _handled_embed_covered_by_extraction(
     youtube_ids: list[str],
     rumble_urls: list[str],
     bunny_urls: list[str],
+    native_video_ids: list[str],
 ) -> bool:
     """True when a handled embed-carrier URL has a matching canonical ingest candidate."""
     lower = url.lower()
@@ -615,8 +616,8 @@ def _handled_embed_covered_by_extraction(
         norm = url.rstrip("/")
         return any(norm == b.rstrip("/") or norm.startswith(b.rstrip("/") + "/") for b in bunny_urls)
     if "substack.com/api/v1/video" in lower:
-        return True
-    return True
+        return any(vid in url for vid in native_video_ids)
+    return False
 
 
 def _detect_unenqueued_handled_embed(
@@ -624,12 +625,15 @@ def _detect_unenqueued_handled_embed(
     youtube_ids: list[str],
     rumble_urls: list[str],
     bunny_urls: list[str],
+    native_video_ids: list[str],
 ) -> str | None:
     """First handled embed-carrier URL visible in DOM that extractors did not enqueue."""
     for url in _collect_embed_carrier_urls(html):
         if not _HANDLED_EMBED_CARRIER_URL_RE.search(url):
             continue
-        if not _handled_embed_covered_by_extraction(url, youtube_ids, rumble_urls, bunny_urls):
+        if not _handled_embed_covered_by_extraction(
+            url, youtube_ids, rumble_urls, bunny_urls, native_video_ids,
+        ):
             return url
     return None
 
@@ -639,9 +643,12 @@ def _pause_on_unenqueued_handled_embed(
     youtube_ids: list[str],
     rumble_urls: list[str],
     bunny_urls: list[str],
+    native_video_ids: list[str],
 ) -> None:
     """PAUSE when a handled embed carrier is exempt from foreign-embed PAUSE but not enqueued."""
-    orphan = _detect_unenqueued_handled_embed(html, youtube_ids, rumble_urls, bunny_urls)
+    orphan = _detect_unenqueued_handled_embed(
+        html, youtube_ids, rumble_urls, bunny_urls, native_video_ids,
+    )
     if orphan:
         raise StepError(
             f"media gate: unenqueued handled embed ({orphan})",
@@ -1005,7 +1012,9 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         + len(bunny_urls)
     )
     if extracted_total == 0:
-        _pause_on_unenqueued_handled_embed(html, youtube_ids, rumble_urls, bunny_urls)
+        _pause_on_unenqueued_handled_embed(
+            html, youtube_ids, rumble_urls, bunny_urls, native_video_ids,
+        )
         _pause_on_unsupported_foreign_embed(html)
         if not _substack_cookie_configured(config) and _is_substack_unauth_paywall_shell(html):
             raise StepError(
@@ -1070,16 +1079,21 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         config,
         task.get("tags"),
     )
-    _pause_on_unenqueued_handled_embed(html, youtube_ids, rumble_urls, bunny_urls)
+    _pause_on_unenqueued_handled_embed(
+        html, youtube_ids, rumble_urls, bunny_urls, native_video_ids,
+    )
     enqueued_success = enqueue_stats.success_count
 
     prior_manifest_total = 0
+    prior_manifest_media_changed = False
     if had_manifest:
         try:
             prior = json.loads(manifest_path.read_text(encoding="utf-8"))
             prior_total = prior.get("total")
             if prior_total is not None:
                 prior_manifest_total = int(prior_total)
+            if prior.get("media_changed"):
+                prior_manifest_media_changed = True
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pass
 
@@ -1101,6 +1115,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
         AGENT_SCHEMA,
         count_pending_media,
         ensure_parent_media_deferral,
+        get_parent_media_deferral,
         init_db,
         parent_media_complete,
     )
@@ -1143,13 +1158,20 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
+        deferral_kw: dict = {}
+        if get_parent_media_deferral(conn, slug) is None and prior_manifest_media_changed:
+            deferral_kw["media_changed"] = 1
         ensure_parent_media_deferral(
             conn,
             slug,
             url,
             task.get("content_type", "substack_text"),
             gate_total,
+            **deferral_kw,
         )
+        from scripts.batch_ingest import refresh_parent_media_manifest
+
+        refresh_parent_media_manifest(conn, config, slug)
         pending = count_pending_media(conn, slug)
 
         if pending == 0:
