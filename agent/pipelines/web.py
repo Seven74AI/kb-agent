@@ -483,10 +483,28 @@ def _extract_rumble_urls(html: str) -> list[str]:
     return out
 
 
-# Hosts the deferred-media gate enqueues inline (native Substack / YouTube / Rumble).
+_BUNNY_EMBED_URL_RE = re.compile(
+    r"https?://(?:player\.)?mediadelivery\.net/embed/\d+/[a-f0-9]{8}-[a-f0-9]{4}-"
+    r"[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+    re.IGNORECASE,
+)
+
+
+def _extract_bunny_embed_urls(html: str) -> list[str]:
+    """Bunny Stream player embed URLs from iframe/src carriers, deduped."""
+    decoded = _html_unescape(html)
+    out: list[str] = []
+    for m in _BUNNY_EMBED_URL_RE.finditer(decoded):
+        url = m.group(0)
+        if url not in out:
+            out.append(url)
+    return out
+
+
+# Hosts the deferred-media gate enqueues inline (native Substack / YouTube / Rumble / Bunny).
 _HANDLED_EMBED_URL_RE = re.compile(
     r"(?:youtube(?:-nocookie)?\.com|youtu\.be|rumble\.com|substack-post-media\.|"
-    r"substack\.com/api/v1/video)",
+    r"substack\.com/api/v1/video|(?:player\.)?mediadelivery\.net)",
     re.IGNORECASE,
 )
 
@@ -573,8 +591,8 @@ def _detect_unsupported_foreign_embed(html: str) -> str | None:
     Invariant: any DOM embed carrier (blockquote embed class, data-*-permalink, iframe,
     oEmbed) that is not a handled platform must fail closed (PAUSE), never fall through
     to inline synthesis as ``no embedded media``. Plain outbound citation ``<a href>``
-    links must not trigger a pause. Substack-native, YouTube, and Rumble embeds are
-    exempt (handled by the existing extractors).
+    links must not trigger a pause. Substack-native, YouTube, Rumble, and Bunny Stream
+    embeds are exempt (handled by the existing extractors).
     """
     decoded = _html_unescape(html)
     if _DATA_INSTGRM_PERMALINK_RE.search(decoded) or _INSTAGRAM_MEDIA_CLASS_RE.search(
@@ -624,7 +642,9 @@ def _submit_embed_succeeded(result: dict) -> bool:
         return True
     if status in ("queued", "pending"):
         return True
-    return bool(status and status != "failed")
+    if status == "dispatched":
+        return True
+    return False
 
 
 def _bump_embed_success_or_warn(
@@ -673,7 +693,8 @@ def _message_with_enqueue_failures(message: str, stats: EmbeddedMediaEnqueueStat
 
 def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: list[str],
                             rumble_urls: list[str], native_video_ids: list[str],
-                            post_url: str, config: Config, tags) -> EmbeddedMediaEnqueueStats:
+                            bunny_urls: list[str], post_url: str, config: Config,
+                            tags) -> EmbeddedMediaEnqueueStats:
     """Enqueue embedded images + videos into the nightly batch, linked to the parent.
 
     Each media item carries ``parent_slug`` + ``media_kind`` so the nightly batch
@@ -684,7 +705,13 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
 
     Returns successful submit count and ingest_queue row count for ``parent_slug``.
     """
-    if not images and not youtube_ids and not rumble_urls and not native_video_ids:
+    if (
+        not images
+        and not youtube_ids
+        and not rumble_urls
+        and not native_video_ids
+        and not bunny_urls
+    ):
         return EmbeddedMediaEnqueueStats(0, 0)
     from agent.core.submit import submit_ingest
     from agent.db import AGENT_SCHEMA, init_db
@@ -765,6 +792,24 @@ def _enqueue_embedded_media(parent_slug: str, images: list[str], youtube_ids: li
             success_count = _bump_embed_success_or_warn(
                 parent_slug, "native_video", result, success_count, failure_lines,
             )
+        for bunny_url in bunny_urls:
+            try:
+                result = submit_ingest(
+                    bunny_url, config, conn, content_type="bunny_stream", tags=tags,
+                    parent_slug=parent_slug, media_kind="video",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "embedded media enqueue failed (bunny) parent=%s url=%s",
+                    parent_slug,
+                    _safe_url_for_log(bunny_url),
+                    exc_info=True,
+                )
+                failure_lines.append(_enqueue_exception_line("bunny", exc))
+                continue
+            success_count = _bump_embed_success_or_warn(
+                parent_slug, "bunny", result, success_count, failure_lines,
+            )
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM ingest_queue WHERE parent_slug = ?",
             (parent_slug,),
@@ -838,6 +883,17 @@ def _deferred_media_batch_finished(conn, config: Config, slug: str) -> bool:
     return has_synthesize_task_signal(conn, slug)
 
 
+def _pause_on_unsupported_foreign_embed(html: str) -> None:
+    """PAUSE after handled siblings are enqueued — never block their ingest_queue rows."""
+    unsupported = _detect_unsupported_foreign_embed(html)
+    if unsupported:
+        raise StepError(
+            f"unsupported embed: {unsupported}",
+            error_type=ErrorType.PAUSE,
+            step_name="substack_embedded_media",
+        )
+
+
 def step_substack_embedded_media(task: dict, config: Config) -> str:
     """Extract embedded media and DEFER synthesis to the nightly batch.
 
@@ -866,17 +922,16 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     youtube_ids = _extract_youtube_ids(html)
     rumble_urls = _extract_rumble_urls(html)
     native_video_ids = _extract_native_video_ids(html)
+    bunny_urls = _extract_bunny_embed_urls(html)
     extracted_total = (
-        len(images) + len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
+        len(images)
+        + len(youtube_ids)
+        + len(rumble_urls)
+        + len(native_video_ids)
+        + len(bunny_urls)
     )
-    unsupported = _detect_unsupported_foreign_embed(html)
-    if unsupported:
-        raise StepError(
-            f"unsupported embed: {unsupported}",
-            error_type=ErrorType.PAUSE,
-            step_name="substack_embedded_media",
-        )
     if extracted_total == 0:
+        _pause_on_unsupported_foreign_embed(html)
         if not _substack_cookie_configured(config) and _is_substack_unauth_paywall_shell(html):
             raise StepError(
                 "awaiting substack cookies — paywalled/login HTML without article body",
@@ -930,7 +985,15 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     had_manifest = manifest_path.exists()
 
     enqueue_stats = _enqueue_embedded_media(
-        slug, images, youtube_ids, rumble_urls, native_video_ids, url, config, task.get("tags"),
+        slug,
+        images,
+        youtube_ids,
+        rumble_urls,
+        native_video_ids,
+        bunny_urls,
+        url,
+        config,
+        task.get("tags"),
     )
     enqueued_success = enqueue_stats.success_count
 
@@ -998,7 +1061,9 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
             step_name="substack_embedded_media",
         )
 
-    n_videos = len(youtube_ids) + len(rumble_urls) + len(native_video_ids)
+    n_videos = (
+        len(youtube_ids) + len(rumble_urls) + len(native_video_ids) + len(bunny_urls)
+    )
 
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
     try:
@@ -1025,6 +1090,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
                     error_type=ErrorType.PAUSE,
                     step_name="substack_embedded_media",
                 )
+            _pause_on_unsupported_foreign_embed(html)
             return _message_with_enqueue_failures(
                 "media ready — deferred to batch", enqueue_stats,
             )
@@ -1033,6 +1099,7 @@ def step_substack_embedded_media(task: dict, config: Config) -> str:
     finally:
         conn.close()
 
+    _pause_on_unsupported_foreign_embed(html)
     raise StepError(
         _message_with_enqueue_failures(
             f"awaiting media: {len(images)} images + {n_videos} videos enqueued",

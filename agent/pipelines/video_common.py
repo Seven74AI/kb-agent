@@ -203,14 +203,55 @@ def write_threads_raw_sidecar(config: Config, task: dict, record: dict) -> Path:
     return raw_path
 
 
+def resolve_batch_ingest_video(
+    config: Config,
+    task: dict,
+    *,
+    hint: Path | str | None = None,
+) -> Path | None:
+    """Locate the staged video for a batch-ingest row (ingest-id keyed artifacts)."""
+    stem = _artifact_stem(task)
+    tmp = Path(config.temp_dir)
+
+    if hint is not None:
+        hint_path = Path(hint)
+        if hint_path.is_file() and hint_path.suffix.lower() in _VIDEO_SUFFIXES_BATCH:
+            return hint_path
+
+    candidates: list[Path] = []
+    for pattern in (f"{stem}*.mp4", f"{stem}.*"):
+        for path in tmp.glob(pattern):
+            if path.is_file() and path.suffix.lower() in _VIDEO_SUFFIXES_BATCH:
+                if path not in candidates:
+                    candidates.append(path)
+
+    if not candidates:
+        return None
+
+    def sort_key(p: Path) -> tuple:
+        h264_rank = 0 if "_h264" in p.stem else 1
+        try:
+            size = -p.stat().st_size
+        except OSError:
+            size = 0
+        return (h264_rank, size, p.name)
+
+    return sorted(candidates, key=sort_key)[0]
+
+
 def _find_video_file(config: Config, slug: str) -> Path:
     """Locate the downloaded video for a slug across the known naming schemes."""
+    tmp = Path(config.temp_dir)
     for name in (f"{slug}.webm", f"{slug}.mp4", f"{slug}_threads_video.mp4"):
-        path = Path(config.temp_dir) / name
+        path = tmp / name
         if path.exists():
             return path
+    # ensure_h264 may leave only {slug}_h264.mp4 on disk.
+    for path in sorted(tmp.glob(f"{slug}*.mp4")):
+        if path.is_file():
+            return path
     # Instagram reels — yt-dlp may append its own extension.
-    for path in sorted(Path(config.temp_dir).glob(f"{slug}_reel.*")):
+    for path in sorted(tmp.glob(f"{slug}_reel.*")):
         if path.is_file():
             return path
     raise FileNotFoundError(f"Video file not found for slug: {slug}")

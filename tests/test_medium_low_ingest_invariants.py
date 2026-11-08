@@ -25,6 +25,7 @@ from agent.pipelines.instagram import (
 from agent.pipelines.video_common import (
     _artifact_stem,
     check_density,
+    resolve_batch_ingest_video,
     resolve_instagram_reel_video,
     resolve_threads_video_path,
     resolve_threads_raw_path,
@@ -384,6 +385,22 @@ def test_resolve_threads_raw_path_finds_batch_sidecar_for_synthesize_slug(config
     resolved = resolve_threads_raw_path(config, synth_task)
     assert resolved.is_file()
     assert json.loads(resolved.read_text(encoding="utf-8"))["author"] == "threaduser"
+
+
+def test_resolve_batch_ingest_video_prefers_h264_glob(config):
+    batch_task = {"id": "tid-h264", "slug": "s", "_batch_ingest": True}
+    h264 = config.temp_dir / "tid-h264_h264.mp4"
+    h264.write_bytes(b"2" * 100)
+    assert resolve_batch_ingest_video(config, batch_task) == h264
+    assert not (config.temp_dir / "tid-h264.mp4").exists()
+
+
+def test_find_video_file_resolves_slug_h264_only(config):
+    from agent.pipelines.video_common import _find_video_file
+
+    slug = "consumer-slug-only-h264"
+    (config.temp_dir / f"{slug}_h264.mp4").write_bytes(b"vid")
+    assert _find_video_file(config, slug).name == f"{slug}_h264.mp4"
 
 
 def test_resolve_video_paths_match_download_stems(config):

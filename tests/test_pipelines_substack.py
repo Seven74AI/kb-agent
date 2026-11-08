@@ -28,6 +28,7 @@ from agent.pipelines.web import (
     step_substack_video_download,
     _extract_rumble_urls,
     _extract_youtube_ids,
+    _extract_bunny_embed_urls,
     _detect_unsupported_foreign_embed,
     _fetch_substack_html,
     _is_content_image,
@@ -296,6 +297,14 @@ class TestSubstackEmbeddedMedia:
     def test_extract_rumble_embed_urls_normalized(self):
         html = '<iframe src="https://rumble.com/embed/v2vk68c/"></iframe>'
         assert _extract_rumble_urls(html) == ["https://rumble.com/v2vk68c"]
+
+    def test_extract_bunny_embed_urls(self):
+        bunny = (
+            "https://player.mediadelivery.net/embed/384567/"
+            "12345678-abcd-ef01-2345-6789abcdef01"
+        )
+        html = f'<html><body><iframe src="{bunny}"></iframe></body></html>'
+        assert _extract_bunny_embed_urls(html) == [bunny]
 
     def test_fetch_substack_html_rejects_metadata_ip(self, monkeypatch):
         monkeypatch.setattr(
@@ -577,7 +586,7 @@ class TestSubstackVideoMetadata:
         mock_enqueue.assert_called_once_with(
             task_dict["slug"],
             ["https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"],
-            ["xyzXYZ12345"], [], [], task_dict["source_url"], config, None,
+            ["xyzXYZ12345"], [], [], [], task_dict["source_url"], config, None,
         )
 
     @patch("agent.pipelines.web.subprocess.run")
@@ -721,6 +730,70 @@ class TestSubstackVideoMetadata:
             "</p></body></html>"
         )
         assert _detect_unsupported_foreign_embed(html) is None
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_youtube_iframe_with_instagram_blockquote_enqueues_then_pauses(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        mock_fetch.return_value = (
+            "<html><body>"
+            '<iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"></iframe>'
+            '<blockquote class="instagram-media" '
+            'data-instgrm-permalink="https://www.instagram.com/p/abc/">'
+            "</blockquote></body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed: instagram" in str(exc.value)
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            row = conn.execute(
+                "SELECT url, content_type FROM ingest_queue WHERE parent_slug = ?",
+                (slug,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert "dQw4w9WgXcQ" in row[0]
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_bunny_iframe_enqueues_bunny_stream_sibling(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db
+
+        bunny = (
+            "https://player.mediadelivery.net/embed/384567/"
+            "12345678-abcd-ef01-2345-6789abcdef01"
+        )
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        mock_fetch.return_value = (
+            f"<html><body><iframe src=\"{bunny}\"></iframe></body></html>"
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "unsupported embed" not in str(exc.value).lower()
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        try:
+            row = conn.execute(
+                "SELECT url, content_type FROM ingest_queue WHERE parent_slug = ?",
+                (slug,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row[0] == bunny
+        assert row[1] == "bunny_stream"
 
     @patch("agent.pipelines.web._fetch_substack_html")
     @patch("agent.pipelines.web._enqueue_embedded_media")
