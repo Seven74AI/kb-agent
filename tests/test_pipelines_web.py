@@ -190,6 +190,7 @@ def test_enqueue_embedded_media_logs_submit_failures(config, caplog):
                 [],
                 [],
                 [],
+                [],
                 "https://example.com/post",
                 config,
                 None,
@@ -219,6 +220,7 @@ def test_enqueue_embedded_media_logs_redact_image_url_query(config, caplog):
             _enqueue_embedded_media(
                 "parent_slug",
                 [sensitive_img],
+                [],
                 [],
                 [],
                 [],
@@ -252,6 +254,7 @@ def test_enqueue_embedded_media_logs_redact_rumble_url_query(config, caplog):
                 [],
                 [sensitive_rumble],
                 [],
+                [],
                 "https://example.com/post",
                 config,
                 None,
@@ -279,6 +282,10 @@ def test_enqueue_embedded_media_logs_redact_rumble_url_query(config, caplog):
             True,
         ),
         ({"status": "dispatched", "ingest_id": "ingest-1", "created_new": False}, True),
+        ({"status": "downloading", "ingest_id": "ingest-1"}, False),
+        ({"status": "staged", "ingest_id": "ingest-1"}, False),
+        ({"status": "transcribing", "ingest_id": "ingest-1"}, False),
+        ({"status": "dispatching", "ingest_id": "ingest-1"}, False),
     ],
 )
 def test_submit_embed_succeeded_explicit_positive_only(result, expected):
@@ -315,6 +322,7 @@ def test_enqueue_embedded_media_rejects_non_explicit_submit_result(
                 [],
                 [],
                 [],
+                [],
                 "https://example.com/post",
                 config,
                 None,
@@ -325,6 +333,45 @@ def test_enqueue_embedded_media_rejects_non_explicit_submit_result(
     assert "embedded media enqueue not accepted (image)" in stats.failure_lines[0]
     rejects = [r for r in caplog.records if "embedded media enqueue not accepted" in r.message]
     assert len(rejects) == 1
+
+
+def test_enqueue_embedded_media_submits_bunny_stream(config):
+    from agent.pipelines.web import _enqueue_embedded_media
+
+    bunny = (
+        "https://player.mediadelivery.net/embed/1/"
+        "abcdef12-3456-7890-abcd-ef1234567890"
+    )
+    with patch("agent.core.submit.submit_ingest") as mock_submit:
+        mock_submit.return_value = {
+            "status": "queued",
+            "ingest_id": "bunny-1",
+            "created_new": True,
+        }
+        with patch("agent.db.init_db") as mock_init:
+            conn = MagicMock()
+            conn.execute.return_value.fetchone.return_value = {"n": 1}
+            mock_init.return_value = conn
+            _enqueue_embedded_media(
+                "parent_slug",
+                [],
+                [],
+                [],
+                [],
+                [bunny],
+                "https://example.com/post",
+                config,
+                None,
+            )
+    mock_submit.assert_called_once_with(
+        bunny,
+        config,
+        conn,
+        content_type="bunny_stream",
+        tags=None,
+        parent_slug="parent_slug",
+        media_kind="video",
+    )
 
 
 def test_enqueue_embedded_media_counts_queued_submit_result(config):
@@ -345,6 +392,7 @@ def test_enqueue_embedded_media_counts_queued_submit_result(config):
             stats = _enqueue_embedded_media(
                 "parent_slug",
                 ["https://example.com/img.png"],
+                [],
                 [],
                 [],
                 [],
@@ -390,7 +438,7 @@ def test_enqueue_embedded_media_dead_failed_duplicate_not_counted(tmp_path):
     assert _submit_embed_succeeded(dead) is False
 
     stats = _enqueue_embedded_media(
-        parent, [img], [], [], [],
+        parent, [img], [], [], [], [],
         "https://example.com/post", cfg, None,
     )
     assert stats.success_count == 0

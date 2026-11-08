@@ -1470,6 +1470,140 @@ class TestDownloadVideoUnsupportedContentType:
         assert err == "unsupported embedded content_type: not_a_video_pipeline"
 
 
+class TestDownloadVideoH264ArtifactIdentity:
+    """Staged resolver must find {ingest_id}_h264.mp4 when base {ingest_id}.mp4 is gone."""
+
+    def test_resolves_h264_mp4_when_base_missing(self, config, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = "ingest-h264-only-001"
+        h264_path = config.temp_dir / f"{ingest_id}_h264.mp4"
+        h264_path.write_bytes(b"\x00" * 5000)
+
+        class _Step:
+            def __init__(self, name):
+                self.name = name
+
+            def fn(self, _task, _cfg):
+                return str(h264_path)
+
+        monkeypatch.setattr(
+            "agent.pipelines.get_pipeline",
+            lambda ct: [_Step(n) for n in batch_ingest.VIDEO_DOWNLOAD_STEPS[ct]],
+        )
+
+        q = {
+            "id": ingest_id,
+            "slug": "shared-slug",
+            "url": "https://www.youtube.com/watch?v=abc",
+            "content_type": "youtube",
+        }
+        path, err = batch_ingest._download_video(q, config)
+        assert err is None
+        assert path == h264_path
+        assert not (config.temp_dir / f"{ingest_id}.mp4").exists()
+
+    def test_youtube_ensure_h264_return_without_base_mp4(self, config, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = "ingest-yt-h264-path"
+        shared_slug = "youtube.com_watch_v_testh264"
+        q = {
+            "id": ingest_id,
+            "slug": shared_slug,
+            "url": "https://www.youtube.com/watch?v=testh264",
+            "content_type": "youtube",
+        }
+
+        def fake_run(cmd, **_kw):
+            joined = " ".join(str(c) for c in cmd)
+            if "%(title)s" in joined:
+                return MagicMock(returncode=0, stdout="T||U||60||1||20240101")
+            if "%(chapters)s" in joined:
+                return MagicMock(returncode=0, stdout="[]")
+            if "%(description)s" in joined:
+                return MagicMock(returncode=0, stdout="desc")
+            if "-o" in cmd:
+                out = Path(cmd[cmd.index("-o") + 1])
+                out.write_bytes(b"\x00" * 2000)
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        def fake_h264(p):
+            h264 = p.with_name(p.stem + "_h264" + p.suffix)
+            h264.write_bytes(p.read_bytes() if p.is_file() else b"\x00" * 2000)
+            p.unlink(missing_ok=True)
+            return h264
+
+        monkeypatch.setattr("agent.pipelines.youtube._validate_cookies", lambda _cfg: None)
+        monkeypatch.setattr("agent.pipelines.youtube.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.pipelines.youtube.ensure_h264", fake_h264)
+
+        path, err = batch_ingest._download_video(q, config)
+        assert err is None
+        assert path == config.temp_dir / f"{ingest_id}_h264.mp4"
+        assert not (config.temp_dir / f"{ingest_id}.mp4").exists()
+
+
+class TestBatchBunnyStreamDownloadSteps:
+    """bunny_stream siblings enqueued by the parent must use batch download steps."""
+
+    def test_bunny_stream_in_video_download_steps(self):
+        import scripts.batch_ingest as batch_ingest
+
+        assert "bunny_stream" in batch_ingest.VIDEO_DOWNLOAD_STEPS
+        assert batch_ingest.VIDEO_DOWNLOAD_STEPS["bunny_stream"] == [
+            "extract_metadata",
+            "download_video",
+        ]
+
+    def test_embedded_bunny_stream_download_resolves_id_keyed_mp4(self, config, monkeypatch):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = "ingest-bunny-embedded-001"
+        shared_slug = "tdah-adulte-2026-j1-talk"
+        q = {
+            "id": ingest_id,
+            "slug": shared_slug,
+            "url": "https://www.terragrandir.com/tdah-adulte-j1-talk/",
+            "content_type": "bunny_stream",
+        }
+
+        monkeypatch.setattr(
+            "agent.pipelines.bunny_stream._curl_page",
+            lambda _url: "<html><h1>TDAH Talk</h1></html>",
+        )
+        monkeypatch.setattr(
+            "agent.pipelines.bunny_stream._resolve_embed_url",
+            lambda _url: (
+                "https://player.mediadelivery.net/embed/1/"
+                "12345678-abcd-ef01-2345-6789abcdef01",
+                "12345678-abcd-ef01-2345-6789abcdef01",
+            ),
+        )
+        monkeypatch.setattr(
+            "agent.pipelines.bunny_stream._resolve_cdn_base",
+            lambda *_a: "https://vz-test.b-cdn.net",
+        )
+
+        def fake_run(cmd, **_kw):
+            if cmd[0] == "curl" and "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 200_000)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr("agent.pipelines.bunny_stream.subprocess.run", fake_run)
+
+        path, err = batch_ingest._download_video(q, config)
+        assert err is None
+        assert path == config.temp_dir / f"{ingest_id}.mp4"
+        meta = config.temp_dir / f"{ingest_id}_metadata.json"
+        assert meta.is_file()
+        assert not (config.temp_dir / f"{shared_slug}.mp4").exists()
+
+
 class TestBatchPipelineIdKeyedDownloadArtifacts:
     """Embedded YouTube/Rumble downloads must write temp artifacts keyed by ingest id."""
 

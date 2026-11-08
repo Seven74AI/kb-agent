@@ -205,21 +205,25 @@ def _download_video(q: dict, config) -> tuple[Path | None, str | None]:
         "content_type": q["content_type"],
         "_batch_ingest": True,
     }
+    from agent.pipelines.video_common import resolve_batch_ingest_video
+
+    last_video_hint: Path | None = None
     for name in steps:
         fn = step_fns.get(name)
         if fn is None:
             return None, f"download step '{name}' not found"
         try:
-            fn(task, config)
+            step_result = fn(task, config)
         except Exception as exc:  # noqa: BLE001 — download is best-effort per link
             return None, f"{name} failed: {exc}"
+        if isinstance(step_result, str):
+            hinted = Path(step_result)
+            if hinted.is_file() and hinted.suffix.lower() in VIDEO_EXTS:
+                last_video_hint = hinted
 
-    tmp = Path(config.temp_dir)
-    stem = _ingest_download_stem(task)
-    for ext in VIDEO_EXTS:
-        candidate = tmp / f"{stem}{ext}"
-        if candidate.is_file():
-            return candidate, None
+    resolved = resolve_batch_ingest_video(config, task, hint=last_video_hint)
+    if resolved is not None:
+        return resolved, None
     return None, "no video file found after download"
 
 

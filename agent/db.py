@@ -975,6 +975,44 @@ def _reconcile_parent_media_deferral_on_new_sibling(
     )
 
 
+def _reconcile_parent_media_deferral_on_remove_sibling(
+    conn: sqlite3.Connection,
+    parent_slug: str,
+    *,
+    temp_dir: Path | None = None,
+) -> None:
+    """Lower expected_total after a sibling ingest row is deleted (monotonic down only).
+
+    Recomputes from the remaining sibling COUNT(*), capped by extracted/manifest
+    high-water so expected_total never exceeds what embedding already committed.
+    """
+    if not parent_slug:
+        return
+    deferral = get_parent_media_deferral(conn, parent_slug)
+    if deferral is None:
+        return
+    prior_expected = int(deferral["expected_total"])
+    sibling_n = _parent_sibling_media_count(conn, parent_slug)
+    high_water = _embedded_media_high_water_hint(conn, parent_slug, temp_dir)
+    reconciled = min(prior_expected, sibling_n)
+    if high_water > 0:
+        reconciled = min(reconciled, high_water)
+    if reconciled >= prior_expected:
+        return
+    with conn:
+        conn.execute(
+            """
+            UPDATE parent_media_deferral
+            SET expected_total = ?, updated_at = datetime('now')
+            WHERE parent_slug = ?
+            """,
+            (reconciled, parent_slug),
+        )
+    _mark_parent_media_enqueue_shortfall(
+        conn, parent_slug, sibling_n, reconciled,
+    )
+
+
 def _parent_sibling_media_count(conn: sqlite3.Connection, parent_slug: str) -> int:
     """Count ingest-queue sibling rows linked to *parent_slug* (any status)."""
     if not parent_slug:
@@ -1966,7 +2004,7 @@ def remove_ingest(
     """Delete an ingest-queue row (dashboard escape hatch).
 
     Returns the removed row's ``parent_slug`` when deleted (non-empty parents only),
-    else ``None``. Refreshes the deferral gate — does not shrink ``expected_total``.
+    else ``None``. Reconciles deferral ``expected_total`` down to remaining siblings.
     """
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -1984,6 +2022,9 @@ def remove_ingest(
     if parent_slug:
         if temp_dir is not None:
             bootstrap_parent_media_deferral_from_manifest(conn, parent_slug, temp_dir)
+        _reconcile_parent_media_deferral_on_remove_sibling(
+            conn, parent_slug, temp_dir=temp_dir,
+        )
         mark_parent_media_changed(conn, parent_slug)
     return parent_slug
 

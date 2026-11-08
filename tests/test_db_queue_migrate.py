@@ -3147,9 +3147,9 @@ def test_maybe_dispatch_unlocks_when_deferral_and_manifest_match(tmp_path, monke
     assert calls == [parent]
 
 
-def test_remove_ingest_does_not_unlock_parent_synthesize(tmp_path, monkeypatch):
+def test_remove_ingest_reconciles_expected_total_and_unlocks_dispatch(tmp_path, monkeypatch):
     import scripts.batch_ingest as batch_ingest
-    from agent.db import ensure_parent_media_deferral, remove_ingest
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral, remove_ingest
 
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -3183,17 +3183,66 @@ def test_remove_ingest_does_not_unlock_parent_synthesize(tmp_path, monkeypatch):
     _stamp_parent_raw_media(conn, config.temp_dir, parent)
 
     remove_ingest(conn, id_b, temp_dir=config.temp_dir)
+    deferral = get_parent_media_deferral(conn, parent)
+    assert deferral["expected_total"] == 1
+    assert deferral.get("media_changed") == 1
+
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE id=?", (id_a,))
+    conn.commit()
+    _stamp_parent_raw_media(conn, config.temp_dir, parent)
+
     batch_ingest.refresh_parent_media_manifest(conn, config, parent)
     manifest = json.loads((config.temp_dir / f"{parent}_media.json").read_text(encoding="utf-8"))
-    assert manifest["total"] == 2
+    assert manifest["total"] == 1
     assert manifest.get("media_changed") is True
 
-    dispatch = MagicMock()
-    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", dispatch)
+    calls: list[str] = []
+
+    def fake_dispatch(dispatch_url, cfg, agent_conn, **kwargs):
+        calls.append(kwargs.get("slug") or "")
+        return {"status": "pending", "task_id": "t-after-remove"}
+
+    monkeypatch.setattr(batch_ingest, "dispatch_synthesize", fake_dispatch)
     batch_ingest._deferred_synthesize_dispatched.clear()
 
-    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is False
-    dispatch.assert_not_called()
+    assert batch_ingest._maybe_dispatch_parent_synthesize(conn, config, parent) is True
+    assert calls == [parent]
+
+
+def test_remove_ingest_expected_total_monotonic_down_respects_high_water(tmp_path):
+    """Lowering stops at embedded/manifest high-water (never above committed media count)."""
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral, remove_ingest
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    conn.row_factory = sqlite3.Row
+    parent = "remove_hw_cap"
+    url = "https://blog.substack.com/p/hw-cap"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 3)
+    ids = []
+    for label in ("a", "b", "c"):
+        ingest_id, _ = queue_ingest(
+            conn,
+            f"https://example.com/{label}",
+            "substack_image",
+            label,
+            parent_slug=parent,
+            media_kind="image",
+        )
+        ids.append(ingest_id)
+    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (parent,))
+    conn.commit()
+
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    (temp_dir / f"{parent}_media.json").write_text(
+        json.dumps({"url": url, "content_type": "substack_text", "total": 2}),
+        encoding="utf-8",
+    )
+
+    remove_ingest(conn, ids[2], temp_dir=temp_dir)
+    deferral = get_parent_media_deferral(conn, parent)
+    assert deferral["expected_total"] == 2
 
 
 def test_maybe_dispatch_fails_closed_when_manifest_total_null(tmp_path, monkeypatch):
