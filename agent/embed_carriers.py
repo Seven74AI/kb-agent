@@ -204,7 +204,6 @@ def handled_embed_carrier_re() -> re.Pattern[str]:
 
 
 _HANDLED_EMBED_URL_RE = handled_embed_host_re()
-_HANDLED_EMBED_CARRIER_URL_RE = handled_embed_carrier_re()
 
 
 def _handler_for_url(url: str) -> EmbedHostHandler | None:

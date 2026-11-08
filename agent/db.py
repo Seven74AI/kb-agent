@@ -17,7 +17,7 @@ from agent.deferral_fsm import (
     is_superseded_parent_error,
     is_synthesize_content_type,
 )
-from agent.redact import redact_http_urls_in_text, url_for_display
+from agent.redact import url_for_display
 
 _ALLOWED_INGEST_SCHEMES = frozenset({"http", "https"})
 
