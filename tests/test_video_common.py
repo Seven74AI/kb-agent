@@ -74,7 +74,7 @@ def test_upload_video_artifacts_redacts_merged_segment_text(
     video_path = Path(config.temp_dir) / f"{slug}.mp4"
     video_path.write_bytes(b"")
 
-    upload_video_artifacts(slug, config, video_path)
+    upload_video_artifacts(slug, slug, config, video_path)
 
     on_disk = json.loads(merged_path.read_text(encoding="utf-8"))
     assert "token=secret" not in on_disk["segments"][0]["text"]
@@ -83,6 +83,66 @@ def test_upload_video_artifacts_redacts_merged_segment_text(
         c for c in mock_upload.call_args_list if "transcripts/" in str(c)
     ]
     assert transcript_uploads
+
+
+@patch("agent.pipelines.video_common.subprocess.run")
+@patch("agent.archival.upload_file_to_minio")
+def test_upload_video_artifacts_non_batch_keys_match_slug(mock_upload, mock_run, config):
+    """Non-batch mode: MinIO keys use the slug (same as legacy single-arg behavior)."""
+
+    def _fake_ffmpeg(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"mp3")
+        return MagicMock(returncode=0)
+
+    mock_run.side_effect = _fake_ffmpeg
+    slug = "channel_video"
+    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path.write_text(json.dumps({"segments": []}), encoding="utf-8")
+    video_path = Path(config.temp_dir) / f"{slug}.mp4"
+    video_path.write_bytes(b"mp4")
+
+    keys = upload_video_artifacts(slug, slug, config, video_path)
+
+    assert keys == [
+        "videos/channel_video.mp4",
+        "videos/channel_video.mp3",
+        "transcripts/channel_video.json",
+    ]
+    minio_paths = [str(c.args[1]) for c in mock_upload.call_args_list]
+    assert all(f"/videos/{slug}" in p or f"/transcripts/{slug}" in p for p in minio_paths)
+    assert (config.temp_dir / f"{slug}.mp3").exists()
+
+
+@patch("agent.pipelines.video_common.subprocess.run")
+@patch("agent.archival.upload_file_to_minio")
+def test_upload_video_artifacts_batch_stem_vs_storage_slug(mock_upload, mock_run, config):
+    """Batch ingest: temp files use task id; MinIO keys use human slug."""
+
+    def _fake_ffmpeg(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"mp3")
+        return MagicMock(returncode=0)
+
+    mock_run.side_effect = _fake_ffmpeg
+    task_id = "batch-ingest-uuid-9999"
+    slug = "human_display_slug"
+    merged_path = Path(config.temp_dir) / f"{task_id}_merged.json"
+    merged_path.write_text(json.dumps({"segments": []}), encoding="utf-8")
+    video_path = Path(config.temp_dir) / f"{task_id}.mp4"
+    video_path.write_bytes(b"mp4")
+
+    keys = upload_video_artifacts(task_id, slug, config, video_path)
+
+    assert keys == [
+        f"videos/{slug}.mp4",
+        f"videos/{slug}.mp3",
+        f"transcripts/{slug}.json",
+    ]
+    for call in mock_upload.call_args_list:
+        dest = str(call.args[1])
+        assert task_id not in dest
+        assert slug in dest
+    assert (config.temp_dir / f"{task_id}.mp3").exists()
+    assert not (config.temp_dir / f"{slug}.mp3").exists()
 
 
 @patch("agent.archival.upload_file_to_minio", return_value="articles/slug.md")

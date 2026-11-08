@@ -32,6 +32,7 @@ from agent.pipelines.video_common import (
     VIDEO_DENSITY_MIN,
     _artifact_stem,
     _find_video_file,
+    _resolve_slug,
     resolve_artifact_stem,
     check_density as _check_density,
     ensure_h264,
@@ -947,11 +948,12 @@ def step_minio_upload(task: dict, config: Config) -> str:
     Uploads .mp4, extracted .mp3, and transcript JSON. Delegates upload to
     archival.upload_file_to_minio and updates note frontmatter with MinIO URLs.
     """
-    stem = _artifact_stem(task)
+    stem = resolve_artifact_stem(task)
+    storage_slug = _resolve_slug(task)
     display_slug = task.get("slug", task["id"][:8])
     video_path = _find_video_file(config, stem)
 
-    uploaded = upload_video_artifacts(stem, config, video_path)
+    uploaded = upload_video_artifacts(stem, storage_slug, config, video_path)
 
     # Update note frontmatter with MinIO URLs
     _update_note_minio_urls(display_slug, config, uploaded)

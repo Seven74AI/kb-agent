@@ -651,8 +651,15 @@ def strip_code_fence(content: str) -> str:
 
 # ── MinIO Upload ─────────────────────────────────────────────────────────────
 
-def upload_video_artifacts(slug: str, config: Config, video_path: Path) -> list[str]:
+def upload_video_artifacts(
+    artifact_stem: str,
+    storage_slug: str,
+    config: Config,
+    video_path: Path,
+) -> list[str]:
     """Upload the video, an extracted MP3, and the merged transcript to MinIO.
+
+    ``artifact_stem`` names local temp artifacts; ``storage_slug`` keys MinIO objects.
 
     Returns the list of uploaded object keys (relative to the bucket).
     """
@@ -663,10 +670,12 @@ def upload_video_artifacts(slug: str, config: Config, video_path: Path) -> list[
 
     ext = video_path.suffix.lower()
     if video_path.exists():
-        upload_file_to_minio(video_path, f"{bucket}/videos/{slug}{ext}", timeout=120)
-        uploaded.append(f"videos/{slug}{ext}")
+        upload_file_to_minio(
+            video_path, f"{bucket}/videos/{storage_slug}{ext}", timeout=120,
+        )
+        uploaded.append(f"videos/{storage_slug}{ext}")
 
-    mp3_path = Path(config.temp_dir) / f"{slug}.mp3"
+    mp3_path = Path(config.temp_dir) / f"{artifact_stem}.mp3"
     if video_path.exists():
         result = subprocess.run(
             ["ffmpeg", "-y", "-i", str(video_path), "-vn",
@@ -674,14 +683,18 @@ def upload_video_artifacts(slug: str, config: Config, video_path: Path) -> list[
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0 and mp3_path.exists():
-            upload_file_to_minio(mp3_path, f"{bucket}/videos/{slug}.mp3", timeout=120)
-            uploaded.append(f"videos/{slug}.mp3")
+            upload_file_to_minio(
+                mp3_path, f"{bucket}/videos/{storage_slug}.mp3", timeout=120,
+            )
+            uploaded.append(f"videos/{storage_slug}.mp3")
 
-    merged_path = Path(config.temp_dir) / f"{slug}_merged.json"
+    merged_path = Path(config.temp_dir) / f"{artifact_stem}_merged.json"
     if merged_path.exists():
         ensure_merged_transcript_file_redacted(merged_path)
-        upload_file_to_minio(merged_path, f"{bucket}/transcripts/{slug}.json", timeout=120)
-        uploaded.append(f"transcripts/{slug}.json")
+        upload_file_to_minio(
+            merged_path, f"{bucket}/transcripts/{storage_slug}.json", timeout=120,
+        )
+        uploaded.append(f"transcripts/{storage_slug}.json")
 
     return uploaded
 
