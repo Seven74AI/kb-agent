@@ -32,93 +32,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent.config import Config, load_config
+from agent.consumer import Consumer, recover_orphan_tasks
 from agent.db import AGENT_SCHEMA, LOGS_SCHEMA, init_db
 from agent.webhook import app
 
 
 def _recover_orphans(config: Config):
-    """Detect and recover orphan tasks from a previous crash.
-
-    For each in_progress task, find the running step:
-    - If the stored subprocess PID is alive → leave it (consumer will pick it up).
-    - If dead or no PID → reset step to 'pending' for re-execution.
-    """
+    """Detect and recover orphan tasks from a previous crash (once per process)."""
     db_path = config.kb_agent_dir / "data" / "agent.db"
     if not db_path.exists():
         return
 
     import sqlite3
+
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-
-    orphans = conn.execute(
-        "SELECT id, content_type, slug FROM tasks WHERE status = 'in_progress'"
-    ).fetchall()
-
-    for task_id, content_type, slug in orphans:
-        step = conn.execute(
-            "SELECT id, step_order, name, output FROM task_steps "
-            "WHERE task_id = ? AND status = 'running' "
-            "ORDER BY step_order LIMIT 1",
-            (task_id,),
-        ).fetchone()
-
-        if not step:
-            print(
-                f"[run] Orphan task {task_id[:8]} — "
-                f"no running step, resetting to pending"
-            )
-            conn.execute(
-                "UPDATE tasks SET status = 'pending' WHERE id = ?",
-                (task_id,),
-            )
-            continue
-
-        step_id, step_order, step_name, step_output = step
-
-        # Check if a PID is stored in output
-        import re
-        pid = None
-        if step_output:
-            m = re.search(r"pid:(\d+)", step_output)
-            pid = int(m.group(1)) if m else None
-
-        if pid is not None and _is_process_alive(pid):
-            print(
-                f"[run] Orphan task {task_id[:8]} — "
-                f"step '{step_name}' PID {pid} still alive, leaving"
-            )
-            continue
-
-        # Dead process or no PID — reset step and task so claim_task can pick it up
-        conn.execute(
-            "UPDATE task_steps SET status = 'pending' WHERE id = ?",
-            (step_id,),
-        )
-        conn.execute(
-            "UPDATE tasks SET status = 'pending' WHERE id = ?",
-            (task_id,),
-        )
-        print(
-            f"[run] Recovered orphan task {task_id[:8]} — "
-            f"resetting step '{step_name}' and task to pending"
-        )
-
-    conn.commit()
+    recover_orphan_tasks(conn, log_prefix="[run]")
     conn.close()
-
-
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process is still running via /proc/{pid}/stat."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            stat = f.read()
-            # State char is right after the closing ')' of the comm field
-            state_start = stat.rfind(")") + 2
-            state = stat[state_start] if state_start < len(stat) else ""
-            return state != "Z"  # Z = zombie (dead)
-    except (FileNotFoundError, PermissionError):
-        return False
+    os.environ["KB_AGENT_ORPHAN_RECOVERY_DONE"] = "1"
 
 
 def _run_consumer(config: Config, loop: asyncio.AbstractEventLoop):
@@ -128,8 +59,6 @@ def _run_consumer(config: Config, loop: asyncio.AbstractEventLoop):
     initializes the consumer, and runs it until shutdown is requested.
     """
     asyncio.set_event_loop(loop)
-    from agent.consumer import Consumer
-
     consumer = Consumer(config)
 
     try:

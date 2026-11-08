@@ -18,6 +18,8 @@ Process management:
 import asyncio
 import inspect
 import logging
+import os
+import re
 import sqlite3
 import traceback
 from typing import Any
@@ -82,6 +84,53 @@ def register_step(name: str, fn, on_error: str = "retry"):
     STEP_REGISTRY[name] = (fn, on_error)
 
 
+def recover_orphan_tasks(conn: sqlite3.Connection, *, log_prefix: str = "[consumer]") -> None:
+    """Reset in_progress tasks whose running step has no live subprocess PID."""
+    orphans = conn.execute(
+        "SELECT id, content_type, slug FROM tasks WHERE status = 'in_progress'"
+    ).fetchall()
+
+    for task_id, content_type, slug in orphans:
+        step = conn.execute(
+            "SELECT id, step_order, name, output FROM task_steps "
+            "WHERE task_id = ? AND status = 'running' "
+            "ORDER BY step_order LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+        if not step:
+            print(
+                f"{log_prefix} Orphan task {task_id[:8]} — "
+                f"no running step, resetting to pending"
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'pending' WHERE id = ?",
+                (task_id,),
+            )
+            conn.commit()
+            continue
+
+        step_id, step_order, step_name, step_output = step
+        pid = Consumer._extract_pid_from_output(step_output)
+        if pid is not None and Consumer._is_process_alive(pid):
+            print(
+                f"{log_prefix} Orphan task {task_id[:8]} — "
+                f"step '{step_name}' PID {pid} still alive, leaving"
+            )
+            continue
+
+        update_step(conn, step_id, "pending")
+        conn.execute(
+            "UPDATE tasks SET status = 'pending' WHERE id = ?",
+            (task_id,),
+        )
+        conn.commit()
+        print(
+            f"{log_prefix} Recovered orphan task {task_id[:8]} — "
+            f"resetting step '{step_name}' and task to pending"
+        )
+
+
 class Consumer:
     """Background consumer that polls for tasks and executes pipeline steps.
 
@@ -121,8 +170,9 @@ class Consumer:
             for step in steps:
                 register_step(step.name, step.fn, step.on_error)
 
-        # ── Crash recovery: orphan detection ──
-        await self._recover_orphans()
+        # ── Crash recovery: orphan detection (run.py may have run this already) ──
+        if not os.environ.get("KB_AGENT_ORPHAN_RECOVERY_DONE"):
+            await self._recover_orphans()
 
         self._running = True
         self._watch_task: asyncio.Task | None = self._start_watch_scheduler()
@@ -156,64 +206,10 @@ class Consumer:
         )
 
     async def _recover_orphans(self):
-        """Find in_progress tasks from a previous crash and resume them.
-
-        For each in_progress task:
-        - Find the 'running' step (the one that was executing at crash time).
-        - If step had a subprocess PID, check /proc/{pid} — if alive, leave it.
-        - If dead or no PID, reset step to 'pending' for re-execution.
-        """
+        """Find in_progress tasks from a previous crash and resume them."""
         if not self.agent_conn:
             return
-
-        orphans = self.agent_conn.execute(
-            "SELECT id, content_type, slug FROM tasks WHERE status = 'in_progress'"
-        ).fetchall()
-
-        for task_id, content_type, slug in orphans:
-            step = self.agent_conn.execute(
-                "SELECT id, step_order, name, output FROM task_steps "
-                "WHERE task_id = ? AND status = 'running' "
-                "ORDER BY step_order LIMIT 1",
-                (task_id,),
-            ).fetchone()
-
-            if not step:
-                # Task was claimed but no step started — reset to pending for re-claim
-                print(
-                    f"[consumer] Orphan task {task_id[:8]} — "
-                    f"no running step, resetting to pending"
-                )
-                self.agent_conn.execute(
-                    "UPDATE tasks SET status = 'pending' WHERE id = ?",
-                    (task_id,)
-                )
-                self.agent_conn.commit()
-                continue
-
-            step_id, step_order, step_name, step_output = step
-
-            # Check if a subprocess PID is stored in output
-            pid = self._extract_pid_from_output(step_output)
-            if pid is not None and self._is_process_alive(pid):
-                print(
-                    f"[consumer] Orphan task {task_id[:8]} — "
-                    f"step '{step_name}' PID {pid} still alive, leaving"
-                )
-                # Leave it — consumer will pick up when step finishes
-                continue
-
-            # Dead process or no PID — reset step and task so claim_task can pick it up
-            update_step(self.agent_conn, step_id, "pending")
-            self.agent_conn.execute(
-                "UPDATE tasks SET status = 'pending' WHERE id = ?",
-                (task_id,),
-            )
-            self.agent_conn.commit()
-            print(
-                f"[consumer] Recovered orphan task {task_id[:8]} — "
-                f"resetting step '{step_name}' and task to pending"
-            )
+        recover_orphan_tasks(self.agent_conn, log_prefix="[consumer]")
 
     @staticmethod
     def _extract_pid_from_output(output: str | None) -> int | None:
@@ -224,7 +220,6 @@ class Consumer:
         """
         if not output:
             return None
-        import re
         m = re.search(r'pid:(\d+)', output)
         return int(m.group(1)) if m else None
 

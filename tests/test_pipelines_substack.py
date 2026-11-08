@@ -35,6 +35,30 @@ from agent.pipelines.web import (
 )
 
 
+def _stamp_parent_raw_media(conn, temp_dir: Path, parent_slug: str) -> None:
+    """Write append markers for every sibling row (parent_media_complete gate)."""
+    from agent.db import media_append_marker
+
+    rows = conn.execute(
+        "SELECT id FROM ingest_queue WHERE parent_slug = ?",
+        (parent_slug,),
+    ).fetchall()
+    parts = ["# Parent article\n\n"]
+    for row in rows:
+        ingest_id = row[0] if not hasattr(row, "keys") else row["id"]
+        parts.append(
+            f"\n\n## Media\n\nembedded\n\n{media_append_marker(ingest_id)}\n"
+        )
+    raw = temp_dir / f"{parent_slug}_raw.md"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("".join(parts), encoding="utf-8")
+    conn.execute(
+        "UPDATE ingest_queue SET media_appended = 1 WHERE parent_slug = ?",
+        (parent_slug,),
+    )
+    conn.commit()
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -832,6 +856,7 @@ class TestSubstackVideoMetadata:
             parent_slug=slug, media_kind="video",
         )
         update_ingest_status(conn, ingest_id, "dispatched")
+        _stamp_parent_raw_media(conn, config.temp_dir, slug)
         conn.close()
 
         mock_fetch.return_value = (
@@ -866,6 +891,7 @@ class TestSubstackVideoMetadata:
             ["synthesize_note"], status="pending",
         )
         conn.commit()
+        _stamp_parent_raw_media(conn, config.temp_dir, slug)
         conn.close()
 
         mock_fetch.return_value = (
@@ -901,6 +927,7 @@ class TestSubstackVideoMetadata:
         )
         update_ingest_status(conn, id_a, "dispatched")
         update_ingest_status(conn, id_b, "dispatched")
+        _stamp_parent_raw_media(conn, config.temp_dir, slug)
         conn.close()
 
         mock_fetch.return_value = (
@@ -941,6 +968,7 @@ class TestSubstackVideoMetadata:
         )
         update_ingest_status(conn, ingest_id, "dispatched")
         conn.commit()
+        _stamp_parent_raw_media(conn, config.temp_dir, slug)
         conn.close()
 
         mock_fetch.return_value = (
@@ -972,6 +1000,7 @@ class TestSubstackVideoMetadata:
             parent_slug=slug, media_kind="video",
         )
         update_ingest_status(conn, ingest_id, "dispatched")
+        _stamp_parent_raw_media(conn, config.temp_dir, slug)
         conn.close()
 
         mock_fetch.return_value = (
@@ -979,6 +1008,38 @@ class TestSubstackVideoMetadata:
         )
         result = step_substack_embedded_media(task_dict, config)
         assert result == "media ready — deferred to batch"
+
+    @patch("agent.pipelines.web._fetch_substack_html")
+    def test_media_ready_paused_when_dispatched_without_raw_markers(
+        self, mock_fetch, config, task_dict, tmp_path,
+    ):
+        from agent.db import AGENT_SCHEMA, init_db, queue_ingest, update_ingest_status
+
+        config.kb_agent_dir = tmp_path / "kb"
+        (config.kb_agent_dir / "data").mkdir(parents=True, exist_ok=True)
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = task_dict["slug"]
+        post = task_dict["source_url"]
+        vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+        manifest = config.temp_dir / f"{slug}_media.json"
+        manifest.write_text(json.dumps({"url": post, "total": 1}), encoding="utf-8")
+
+        conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
+        ingest_id, _ = queue_ingest(
+            conn, f"{post}#{vid}", "substack_video", slug,
+            parent_slug=slug, media_kind="video",
+        )
+        update_ingest_status(conn, ingest_id, "dispatched")
+        conn.close()
+
+        mock_fetch.return_value = (
+            f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+        )
+        with pytest.raises(StepError) as exc:
+            step_substack_embedded_media(task_dict, config)
+        assert exc.value.error_type == ErrorType.PAUSE
+        assert "media gate" in str(exc.value).lower()
+        assert "not complete" in str(exc.value).lower()
 
     @patch("agent.pipelines.web.get_llm_client")
     @patch("agent.pipelines.web._synthesize_single_pass", return_value="# Note\n")

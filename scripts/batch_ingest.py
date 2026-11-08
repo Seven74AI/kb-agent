@@ -353,7 +353,7 @@ def refresh_parent_media_manifest(conn, config, parent_slug: str) -> None:
         "url": deferral["source_url"],
         "content_type": deferral["content_type"],
         "total": deferral["expected_total"],
-        "media_changed": True,
+        "media_changed": bool(int(deferral.get("media_changed") or 0)),
     }
     manifest_path.write_text(
         json.dumps(payload, ensure_ascii=False),

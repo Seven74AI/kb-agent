@@ -526,7 +526,7 @@ class TestKbOcrSizeCap:
     def test_main_writes_error_ocr_json(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
         assert 'r.get("error")' in text
-        assert '"error": r["error"]' in text
+        assert "ocr_error_json" in text
 
     def test_batch_ingest_rejects_truncated_ocr_flag(self, config, conn, monkeypatch):
         import scripts.batch_ingest as batch_ingest

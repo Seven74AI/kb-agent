@@ -366,7 +366,7 @@ def test_get_next_step_blocks_on_media_gate_pause(tmp_path):
     assert nxt["status"] == "paused"
 
 
-def test_bootstrap_parent_media_deferral_refuses_sibling_under_high_water(tmp_path):
+def test_bootstrap_parent_media_deferral_high_water_enqueues_shortfall(tmp_path):
     from agent.db import (
         bootstrap_parent_media_deferral_from_siblings,
         get_parent_media_deferral,
@@ -392,23 +392,69 @@ def test_bootstrap_parent_media_deferral_refuses_sibling_under_high_water(tmp_pa
         """,
         ("awaiting media: 2 images + 0 videos enqueued", task_id),
     )
-    queue_ingest(
-        conn,
-        "https://example.com/one.png",
-        "substack_image",
-        "img1",
-        parent_slug=parent,
-        media_kind="image",
+    import uuid
+
+    conn.execute(
+        """
+        INSERT INTO ingest_queue (id, url, content_type, slug, status, parent_slug, media_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            "https://example.com/one.png",
+            "substack_image",
+            "img1",
+            "queued",
+            parent,
+            "image",
+        ),
     )
     conn.commit()
 
     bootstrap_parent_media_deferral_from_siblings(conn, parent, tmp_path)
-    assert get_parent_media_deferral(conn, parent) is None
+    deferral = get_parent_media_deferral(conn, parent)
+    assert deferral is not None
+    assert deferral["expected_total"] == 2
+    assert deferral["media_changed"] == 1
 
+    conn.execute(
+        "UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?",
+        (parent,),
+    )
+    conn.commit()
     raw = tmp_path / f"{parent}_raw.md"
     raw.write_text("# parent\n", encoding="utf-8")
     reason = parent_deferral_synthesize_execute_blocked(conn, parent, raw_path=raw)
-    assert reason == "deferred synthesis paused — sibling media still pending"
+    assert reason == "deferred synthesis paused — parent media not complete at execute time"
+
+
+def test_queue_ingest_bumps_parent_deferral_expected_without_manifest(tmp_path):
+    from agent.db import ensure_parent_media_deferral, get_parent_media_deferral
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    parent = "queue_growth_parent"
+    url = "https://blog.substack.com/p/queue-growth"
+    ensure_parent_media_deferral(conn, parent, url, "substack_text", 1)
+    queue_ingest(
+        conn,
+        "https://example.com/i1.png",
+        "substack_image",
+        "i1",
+        parent_slug=parent,
+        media_kind="image",
+    )
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 1
+
+    queue_ingest(
+        conn,
+        "https://example.com/i2.png",
+        "substack_image",
+        "i2",
+        parent_slug=parent,
+        media_kind="image",
+    )
+    assert get_parent_media_deferral(conn, parent)["expected_total"] == 2
 
 
 def test_parent_deferral_synthesize_blocked_without_deferral_row_pending_siblings(
@@ -490,15 +536,23 @@ def test_find_active_task_supersedes_terminal_synthesize_missing_deferral_with_s
     url = "https://blog.substack.com/p/orphan-dup"
     slug = "orphan_dup_parent"
     create_task(conn, url, "substack_text", slug, ["substack_cleanup"], status="paused")
-    queue_ingest(
-        conn,
-        "https://example.com/i.png",
-        "substack_image",
-        "i1",
-        parent_slug=slug,
-        media_kind="image",
+    import uuid
+
+    conn.execute(
+        """
+        INSERT INTO ingest_queue (id, url, content_type, slug, status, parent_slug, media_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            "https://example.com/i.png",
+            "substack_image",
+            "i1",
+            "dispatched",
+            slug,
+            "image",
+        ),
     )
-    conn.execute("UPDATE ingest_queue SET status='dispatched' WHERE parent_slug=?", (slug,))
     done_id = create_task(
         conn,
         url,
@@ -1721,6 +1775,52 @@ def test_has_completed_parent_synthesis_genuine_complete_idempotent(tmp_path):
     kwargs = {"vault_path": vault, "temp_dir": media_tmp}
     assert has_completed_parent_synthesis(conn, slug, **kwargs) is True
     assert has_completed_parent_synthesis(conn, slug, **kwargs) is True
+
+
+@patch("agent.pipelines.web._fetch_substack_html")
+def test_step_substack_embedded_media_requires_raw_markers_when_pending_zero(
+    mock_fetch, tmp_path,
+):
+    from agent.db import AGENT_SCHEMA, ensure_parent_media_deferral, init_db, queue_ingest, update_ingest_status
+    from agent.exceptions import ErrorType, StepError
+    from agent.pipelines.web import step_substack_embedded_media
+
+    kb = tmp_path / "kb"
+    (kb / "data").mkdir(parents=True)
+    media_tmp = tmp_path / "tmp"
+    media_tmp.mkdir(parents=True)
+    config = Config(
+        kb_agent_dir=kb,
+        vault_path=tmp_path / "vault",
+        temp_dir=media_tmp,
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    slug = "raw_gate_slug"
+    post = "https://author.substack.com/p/raw-gate"
+    vid = "a7315fa8-8027-4432-a7e3-652479bc5275"
+    task = {
+        "id": "task-raw-gate",
+        "slug": slug,
+        "source_url": post,
+        "content_type": "substack_text",
+        "tags": [],
+    }
+    conn = init_db(kb / "data" / "agent.db", AGENT_SCHEMA)
+    ensure_parent_media_deferral(conn, slug, post, "substack_text", 1)
+    ingest_id, _ = queue_ingest(
+        conn, f"{post}#{vid}", "substack_video", slug,
+        parent_slug=slug, media_kind="video",
+    )
+    update_ingest_status(conn, ingest_id, "dispatched")
+    conn.close()
+    mock_fetch.return_value = (
+        f'<html><body><script>"videoUpload":{{"id":"{vid}"}}</script></body></html>'
+    )
+    with pytest.raises(StepError) as exc:
+        step_substack_embedded_media(task, config)
+    assert exc.value.error_type == ErrorType.PAUSE
+    assert "media gate" in str(exc.value).lower()
 
 
 @patch("agent.pipelines.web._fetch_substack_html")

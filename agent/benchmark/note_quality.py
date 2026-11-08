@@ -18,7 +18,16 @@ from agent.quality import (
     quality_gate_youtube,
 )
 
-BOOK_CONTENT_TYPES = frozenset({"book", "book_epub", "book_pdf", "mega", "book_batch"})
+BOOK_CONTENT_TYPES = frozenset({
+    "book",
+    "book_epub",
+    "book_pdf",
+    "book_mobi",
+    "book_scanned",
+    "book_degraded",
+    "mega",
+    "book_batch",
+})
 VIDEO_CONTENT_TYPES = frozenset(
     {
         "youtube",

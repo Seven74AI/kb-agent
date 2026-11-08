@@ -34,3 +34,25 @@ def test_batch_ocr_scrubs_modal_child_tail(capsys, tmp_path, monkeypatch):
     assert "[path]" in logged
     assert "[credential redacted]" in logged
     assert "vlm ok prefix" in logged
+
+
+def test_ocr_error_json_scrubs_paths_and_credentials(tmp_path):
+    from agent.notify import ocr_error_json
+
+    raw = (
+        "boom path=/home/ubuntu/secret/img.png "
+        "api_key=deadbeefdeadbeefdeadbeefdeadbeef suffix"
+    )
+    doc = ocr_error_json(raw)
+    assert "error" in doc
+    assert "/home/ubuntu" not in doc["error"]
+    assert "deadbeef" not in doc["error"]
+    assert "[path]" in doc["error"]
+    assert "[credential redacted]" in doc["error"]
+
+    out = tmp_path / "fail.png.ocr.json"
+    import json
+
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert "/home/ubuntu" not in loaded["error"]

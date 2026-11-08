@@ -841,3 +841,64 @@ class TestIgCommentFetchSecurity:
             _fetch_ig_comment(url, config)
         assert exc.value.error_type == ErrorType.PAUSE
         assert "not found in comment pages" in str(exc.value)
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_non_json_step_error_scrubs_stdout(
+        self, mock_run, config,
+    ):
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", "sess",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                "not json path=/home/ubuntu/.ig/session api_key=deadbeefdeadbeefdeadbeefdeadbeef"
+            ),
+        )
+        url = "https://www.instagram.com/reel/ShortCode1/?comment_id=1"
+        with pytest.raises(StepError) as exc:
+            _fetch_ig_comment(url, config)
+        msg = str(exc.value)
+        assert exc.value.error_type == ErrorType.RETRY
+        assert "/home/ubuntu" not in msg
+        assert "deadbeef" not in msg
+        assert "[path]" in msg
+
+    @patch("agent.pipelines.instagram.subprocess.run")
+    def test_fetch_ig_comment_fail_status_step_error_scrubs_message(
+        self, mock_run, config,
+    ):
+        cookie_dir = config.cookie_dir
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        (cookie_dir / "ig_cookies.txt").write_text(
+            "\t".join([
+                ".instagram.com", "TRUE", "/", "TRUE", "0",
+                "sessionid", "sess",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "fail",
+                "message": (
+                    "blocked path=/var/secret "
+                    "api_key=deadbeefdeadbeefdeadbeefdeadbeef"
+                ),
+            }),
+        )
+        url = "https://www.instagram.com/reel/ShortCode1/?comment_id=1"
+        with pytest.raises(StepError) as exc:
+            _fetch_ig_comment(url, config)
+        msg = str(exc.value)
+        assert exc.value.error_type == ErrorType.RETRY
+        assert "/var/secret" not in msg
+        assert "deadbeef" not in msg
+        assert "[path]" in msg
+        assert "[credential redacted]" in msg

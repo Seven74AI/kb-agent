@@ -14,6 +14,7 @@ from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
+from agent.pipelines.video_common import _artifact_stem
 from agent.pipelines.youtube import (
     step_cleanup_temp,
     step_diarize,
@@ -32,9 +33,10 @@ MEGA_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".wmv", ".flv"
 def step_mega_extract_metadata(task: dict, config: Config) -> str:
     """Build minimal metadata from megadl filename listing."""
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
+    stem = _artifact_stem(task)
+    display_slug = task.get("slug", task["id"][:8])
 
-    title = slug
+    title = display_slug
     try:
         _assert_fetch_url_allowed(url)
     except ValueError as exc:
@@ -67,12 +69,12 @@ def step_mega_extract_metadata(task: dict, config: Config) -> str:
         "chapters": [],
     }
 
-    meta_path = Path(config.temp_dir) / f"{slug}_metadata.json"
+    meta_path = Path(config.temp_dir) / f"{stem}_metadata.json"
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
 
-    slug_path = Path(config.temp_dir) / f"{slug}_slug.txt"
-    slug_path.write_text(slug)
+    slug_path = Path(config.temp_dir) / f"{stem}_slug.txt"
+    slug_path.write_text(display_slug)
 
     return json.dumps(metadata)
 
@@ -112,10 +114,10 @@ def _update_metadata_duration(config: Config, slug: str, duration: float) -> Non
 def step_mega_download_video(task: dict, config: Config) -> str:
     """Download a Mega.nz video and normalize to {slug}.webm for downstream steps."""
     url = task["source_url"]
-    slug = task.get("slug", task["id"][:8])
-    output_path = Path(config.temp_dir) / f"{slug}.webm"
+    stem = _artifact_stem(task)
+    output_path = Path(config.temp_dir) / f"{stem}.webm"
 
-    dl_dir = Path(config.temp_dir) / f"mega_{slug}"
+    dl_dir = Path(config.temp_dir) / f"mega_{stem}"
     if dl_dir.exists():
         shutil.rmtree(dl_dir)
     dl_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +191,7 @@ def step_mega_download_video(task: dict, config: Config) -> str:
 
     duration = _ffprobe_duration(output_path)
     if duration > 0:
-        _update_metadata_duration(config, slug, duration)
+        _update_metadata_duration(config, stem, duration)
 
     return str(output_path)
 

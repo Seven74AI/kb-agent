@@ -65,6 +65,11 @@ def _finalize_visible_message(text: str) -> str:
     return text[:_VISIBLE_ERROR_MAX_LEN]
 
 
+def ocr_error_json(error: str) -> dict:
+    """Artifact-safe OCR failure payload for ``*.ocr.json`` writers."""
+    return {"error": sanitize_visible_message(error)}
+
+
 def sanitize_visible_message(message: str) -> str:
     """Strip stack frames, paths, and bulky stderr from user-visible error text."""
     marker = "Traceback (most recent call last):"

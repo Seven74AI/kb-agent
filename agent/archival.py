@@ -120,7 +120,20 @@ def _build_content_type_folder_maps() -> tuple[dict[str, str], dict[str, str]]:
         "articles",
         "articles",
     )
-    _add(["book", "book_epub", "book_pdf", "mega", "book_batch"], "books", "books")
+    _add(
+        [
+            "book",
+            "book_epub",
+            "book_pdf",
+            "book_mobi",
+            "book_scanned",
+            "book_degraded",
+            "mega",
+            "book_batch",
+        ],
+        "books",
+        "books",
+    )
     _add(
         [
             "youtube",
