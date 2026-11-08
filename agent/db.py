@@ -1222,7 +1222,7 @@ def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        f"AND status IN ('done', 'completed') {_TERMINAL_SUPERSEDE_FILTER} "
+        f"AND status IN ('done', 'completed') {REQUEUE_SUPERSEDE_GUARD} "
         f"{_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug,),
@@ -1230,9 +1230,6 @@ def has_completed_synthesize_task(conn: sqlite3.Connection, slug: str) -> bool:
     return row is not None
 
 
-_TERMINAL_SUPERSEDE_FILTER = (
-    "AND (error IS NULL OR instr(LOWER(COALESCE(error, '')), 'superseded') = 0)"
-)
 _TERMINAL_PROBE_ORDER = "ORDER BY created_at ASC, id ASC"
 
 
@@ -1244,7 +1241,7 @@ def _deferral_terminal_parent_fresh(conn: sqlite3.Connection, slug: str, deferra
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
-        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
+        f"{REQUEUE_SUPERSEDE_GUARD} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
@@ -1259,7 +1256,7 @@ def _deferral_synthesize_terminal_fresh(conn: sqlite3.Connection, slug: str, def
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
-        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
+        f"{REQUEUE_SUPERSEDE_GUARD} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
@@ -1314,7 +1311,7 @@ def _parent_terminal_after_anchor(conn: sqlite3.Connection, slug: str, anchor: s
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
-        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
+        f"{REQUEUE_SUPERSEDE_GUARD} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
@@ -1327,7 +1324,7 @@ def _synthesize_terminal_after_anchor(conn: sqlite3.Connection, slug: str, ancho
     row = conn.execute(
         f"SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         f"AND status IN ('done', 'completed') AND datetime(updated_at) {op} datetime(?) "
-        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
+        f"{REQUEUE_SUPERSEDE_GUARD} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
@@ -1342,7 +1339,7 @@ def _has_stale_deferral_synthesize_terminal(
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
         "AND status IN ('done', 'completed') AND datetime(updated_at) <= datetime(?) "
-        f"{_TERMINAL_SUPERSEDE_FILTER} {_TERMINAL_PROBE_ORDER} "
+        f"{REQUEUE_SUPERSEDE_GUARD} {_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug, anchor),
     ).fetchone()
@@ -1413,7 +1410,7 @@ def _non_superseded_parent_terminal(conn: sqlite3.Connection, slug: str) -> bool
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type NOT GLOB '*_synthesize' "
-        f"AND status IN ('done', 'completed') {_TERMINAL_SUPERSEDE_FILTER} "
+        f"AND status IN ('done', 'completed') {REQUEUE_SUPERSEDE_GUARD} "
         f"{_TERMINAL_PROBE_ORDER} "
         "LIMIT 1",
         (slug,),
@@ -2290,12 +2287,12 @@ def supersede_deferred_parent_task(
         return 0
     with conn:
         cur = conn.execute(
-            """
+            f"""
             UPDATE tasks SET status = 'completed', error = ?, updated_at = datetime('now')
             WHERE slug = ?
               AND content_type NOT GLOB '*_synthesize'
               AND status IN ('paused', 'pending', 'in_progress')
-              AND (error IS NULL OR LOWER(error) NOT LIKE '%superseded%')
+              {REQUEUE_SUPERSEDE_GUARD}
             """,
             (SUPERSEDE_DEFERRED_PARENT_REASON, parent_slug),
         )
@@ -2317,11 +2314,11 @@ def complete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     with conn:
         cur = conn.execute(
-            """
+            f"""
             UPDATE tasks SET status = 'done', updated_at = datetime('now')
             WHERE id = ?
               AND status IN ('pending', 'in_progress')
-              AND (error IS NULL OR LOWER(error) NOT LIKE '%superseded%')
+              {REQUEUE_SUPERSEDE_GUARD}
             """,
             (task_id,),
         )

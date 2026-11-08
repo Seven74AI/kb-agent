@@ -29,6 +29,7 @@ if "HF_TOKEN" not in os.environ:
     )
     sys.exit(1)
 
+from agent.notify import sanitize_visible_message
 from pyannote.audio import Pipeline
 
 audio_path = sys.argv[1]
@@ -40,7 +41,10 @@ pipeline = Pipeline.from_pretrained(
     token=os.environ["HF_TOKEN"],
 )
 
-print(f"[{time.strftime('%H:%M:%S')}] Diarizing {audio_path}...", flush=True)
+print(
+    f"[{time.strftime('%H:%M:%S')}] Diarizing {sanitize_visible_message(audio_path)}...",
+    flush=True,
+)
 start = time.time()
 
 # pyannote >=4.0: returns DiarizeOutput, use .speaker_diarization.itertracks()

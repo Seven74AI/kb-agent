@@ -10,6 +10,15 @@ from agent.persist import persist_durable_json, persist_durable_text
 
 _REPO = Path(__file__).resolve().parents[1]
 
+# Dev/benchmark scripts that may write non-vault artifacts (reports, fixtures) without persist choke.
+_SCRIPTS_RAW_WRITE_ALLOWLIST = frozenset(
+    {
+        "scripts/note_quality_ab_benchmark.py",
+        "scripts/regenerate_detect_type_benchmark_fixture.py",
+    }
+)
+
+
 def _py_files_under(*roots: tuple[str, ...]) -> list[Path]:
     out: list[Path] = []
     for root in roots:
@@ -17,13 +26,11 @@ def _py_files_under(*roots: tuple[str, ...]) -> list[Path]:
         if not base.is_dir():
             continue
         out.extend(sorted(base.rglob("*.py")))
-    for pattern in ("scripts/batch_*.py",):
-        out.extend(sorted(_REPO.glob(pattern)))
-    for rel in ("scripts/diarize.py", "scripts/transcribe.py"):
-        path = _REPO / rel
-        if path.is_file():
-            out.append(path)
     return out
+
+
+def _inventory_script_paths() -> list[Path]:
+    return sorted(_REPO.glob("scripts/*.py"))
 
 
 def _is_write_text_call(node: ast.Call) -> bool:
@@ -82,22 +89,36 @@ def _collect_raw_disk_writers(tree: ast.AST, rel: str) -> list[str]:
 def test_inventory_no_raw_disk_writers_outside_persist_and_allowlist():
     errors: list[str] = []
     for path in _py_files_under("agent", "modal"):
-        rel = str(path.relative_to(_REPO))
-        if rel.replace("\\", "/") == "agent/persist.py":
+        rel = str(path.relative_to(_REPO)).replace("\\", "/")
+        if rel == "agent/persist.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         errors.extend(_collect_raw_disk_writers(tree, rel))
-    for path in sorted(_REPO.glob("scripts/batch_*.py")):
-        rel = str(path.relative_to(_REPO))
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        errors.extend(_collect_raw_disk_writers(tree, rel))
-    for rel in ("scripts/diarize.py", "scripts/transcribe.py"):
-        path = _REPO / rel
-        if not path.is_file():
+    for path in _inventory_script_paths():
+        rel = str(path.relative_to(_REPO)).replace("\\", "/")
+        if rel in _SCRIPTS_RAW_WRITE_ALLOWLIST:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
         errors.extend(_collect_raw_disk_writers(tree, rel))
     assert not errors, "raw durable writers outside persist:\n" + "\n".join(errors)
+
+
+def test_collect_raw_disk_writers_flags_path_write_text():
+    tree = ast.parse("def main():\n    note.write_text(body, encoding='utf-8')\n")
+    hits = _collect_raw_disk_writers(tree, "example.py")
+    assert hits == ["example.py:main -> write_text"]
+
+
+def test_collect_raw_disk_writers_flags_json_dump_to_open_handle():
+    src = (
+        "import json\n"
+        "def main():\n"
+        "    with open(path, 'w') as f:\n"
+        "        json.dump(payload, f)\n"
+    )
+    tree = ast.parse(src)
+    hits = _collect_raw_disk_writers(tree, "example.py")
+    assert hits == ["example.py:main -> json.dump"]
 
 
 def _calls_name(node: ast.AST, name: str) -> bool:

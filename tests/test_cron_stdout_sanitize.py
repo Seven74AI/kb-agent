@@ -245,6 +245,103 @@ def test_rotate_logs_upload_failure_scrubs_stderr(monkeypatch, capsys, tmp_path)
     assert "MinIO upload FAILED" in err
 
 
+def test_kb_transcribe_visible_stdout_routes_through_sanitize_emit():
+    from agent.notify import sanitize_visible_message
+
+    text = (_REPO_ROOT / "modal" / "kb_transcribe.py").read_text(encoding="utf-8")
+    assert "def _sanitize_emit" in text
+    assert "sanitize_visible_message" in text
+    assert "_sanitize_emit(p)" in text
+    assert 'print(f"wrote {_sanitize_emit(p)}")' in text
+
+    raw = "wrote /root/kb-agent/tmp/out.json?token=txsecret"
+    clean = sanitize_visible_message(raw)
+    assert "/root/kb-agent" not in clean
+    assert "txsecret" not in clean
+    assert "token=" not in clean
+    assert "[path]" in clean
+
+
+def test_transcribe_script_sanitizes_audio_path_stdout(capsys, tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    import runpy
+
+    out_json = tmp_path / "out.json"
+    leaking = "/root/kb-agent/tmp/clip.wav?token=TRANSCRIBE_LEAK"
+    repo = _REPO_ROOT
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+
+    fake_info = MagicMock(language="en", duration=1.0)
+
+    class FakeModel:
+        def transcribe(self, *_a, **_k):
+            return iter([]), fake_info
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        MagicMock(WhisperModel=lambda *a, **k: FakeModel()),
+    )
+    monkeypatch.setattr(sys, "argv", ["transcribe.py", leaking, str(out_json), "60"])
+    with monkeypatch.context() as m:
+        m.chdir(repo)
+        runpy.run_path(str(repo / "scripts" / "transcribe.py"), run_name="__main__")
+
+    out = capsys.readouterr().out
+    assert "TRANSCRIBE_LEAK" not in out
+    assert "token=" not in out
+    assert "/root/kb-agent" not in out
+    assert "[path]" in out
+    assert "Transcribing" in out
+
+
+def test_diarize_script_sanitizes_audio_path_stdout(capsys, tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    import runpy
+
+    out_json = tmp_path / "out.json"
+    leaking = "/root/kb-agent/tmp/clip_8k.wav?token=DIARIZE_LEAK"
+    repo = _REPO_ROOT
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+
+    class FakeDiarization:
+        def itertracks(self, yield_label=True):
+            return iter([])
+
+    class FakePipeline:
+        def __call__(self, *_a, **_k):
+            return MagicMock(speaker_diarization=FakeDiarization())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pyannote.audio",
+        MagicMock(Pipeline=MagicMock(from_pretrained=lambda *a, **k: FakePipeline())),
+    )
+    monkeypatch.setenv("HF_TOKEN", "test-token-not-printed")
+    monkeypatch.setattr(sys, "argv", ["diarize.py", leaking, str(out_json)])
+    with monkeypatch.context() as m:
+        m.chdir(repo)
+        runpy.run_path(str(repo / "scripts" / "diarize.py"), run_name="__main__")
+
+    out = capsys.readouterr().out
+    assert "DIARIZE_LEAK" not in out
+    assert "token=" not in out
+    assert "/root/kb-agent" not in out
+    assert "[path]" in out
+    assert "Diarizing" in out
+
+
+def test_transcribe_and_diarize_progress_prints_route_sanitize():
+    for rel in ("scripts/transcribe.py", "scripts/diarize.py"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "sanitize_visible_message" in text
+        assert "from agent.notify import sanitize_visible_message" in text
+
+
 def test_kb_ocr_visible_stdout_routes_through_sanitize_emit():
     from agent.notify import sanitize_visible_message
 
