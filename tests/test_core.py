@@ -191,11 +191,15 @@ def test_plan_submission_and_submit_ingest_agree_on_slug(core_config, agent_conn
 
 
 def test_plan_submission_normalizes_url_before_dedup(core_config, monkeypatch):
-    """Tracking params stripped so dedup matches normalized vault URLs."""
-    canonical = "https://www.instagram.com/reel/AbCd/?comment_id=42"
-    tracked = "https://www.instagram.com/reel/AbCd/?igsh=noise&comment_id=42"
+    """Dedup greps the display-safe source_url persisted in vault frontmatter."""
+    from agent.redact import url_for_display
+
+    tracked = "https://www.instagram.com/reel/AbCd/?igsh=noise&utm_campaign=x"
     note = core_config.vault_path / "Knowledge base" / "articles" / "existing.md"
-    note.write_text(f"---\nsource_url: {canonical}\n---\n", encoding="utf-8")
+    note.write_text(
+        f"---\nsource_url: {url_for_display(tracked)}\n---\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr("agent.core.submit.preflight_health", lambda p: (True, ""))
     result = plan_submission(tracked, core_config)
     assert result["status"] == "skipped"

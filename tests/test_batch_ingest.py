@@ -1471,6 +1471,29 @@ class TestBatchPipelineIdKeyedDownloadArtifacts:
         assert (config.temp_dir / f"{id_a}.mp4").exists()
         assert (config.temp_dir / f"{id_b}.mp4").exists()
 
+    def test_copy_threads_raw_for_synthesize_slug_keyed_sidecar(self, config):
+        import scripts.batch_ingest as batch_ingest
+
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        ingest_id = "ingest-threads-copy-raw"
+        storage_slug = "threads.net_user_post_COPY"
+        q = {"id": ingest_id, "slug": storage_slug}
+        batch_payload = {
+            "author": "copyauthor",
+            "captions": ["batch detect caption"],
+            "parent_context": "parent ctx",
+        }
+        (config.temp_dir / f"{ingest_id}_threads_raw.json").write_text(
+            json.dumps(batch_payload),
+            encoding="utf-8",
+        )
+        batch_ingest.copy_threads_raw_for_synthesize(config, q, storage_slug)
+        slug_sidecar = config.temp_dir / f"{storage_slug}_threads_raw.json"
+        assert slug_sidecar.is_file()
+        loaded = json.loads(slug_sidecar.read_text(encoding="utf-8"))
+        assert loaded["author"] == "copyauthor"
+        assert loaded["parent_context"] == "parent ctx"
+
 
 class TestChildProcessLogScrubbing:
     """Child stdout/stderr tails in batch logs must be scrubbed at write time."""

@@ -429,5 +429,8 @@ async def run_watch_scheduler(
         try:
             await asyncio.to_thread(_poll_due_sources_in_thread, config, fetch, submit_fn)
         except Exception as exc:
-            print(f"[watch_source] poll error: {exc}", flush=True)
+            print(
+                f"[watch_source] poll error: {sanitize_visible_message(f'{type(exc).__name__}: {exc}')}",
+                flush=True,
+            )
         await asyncio.sleep(poll_interval_seconds)

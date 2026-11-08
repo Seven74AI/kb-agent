@@ -12,6 +12,7 @@ sys.path.insert(0, "/root/kb-agent")
 from agent.config import load_config  # noqa: E402
 from agent.db import AGENT_SCHEMA, init_db  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
+from agent.notify import sanitize_visible_message  # noqa: E402
 from agent.fetch_guard import _assert_fetch_url_allowed  # noqa: E402
 
 MAIN = "https://www.terragrandir.com/conferences-tdah-adulte-2026/"
@@ -80,7 +81,7 @@ def _finalize_video_dispatch(page_url, config, conn, slug):
     )
     if rr.get("status") == "error":
         err = rr.get("error") or "dispatch_synthesize failed"
-        print(f"  [warn] {slug}: dispatch failed ({err})")
+        print(f"  [warn] {slug}: dispatch failed ({sanitize_visible_message(err)})")
         return None
     print(f"  {slug}: uploaded + task {rr.get('task_id', '?')}")
     return rr.get("task_id", "?")

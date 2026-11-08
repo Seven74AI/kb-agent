@@ -493,7 +493,7 @@ class TestSubstackVideoMetadata:
             (config.temp_dir / f"{task_dict['slug']}_media.json").read_text(encoding="utf-8")
         )
         assert manifest["total"] == 2
-        assert manifest["url"] == task_dict["source_url"]
+        assert "url" not in manifest
         mock_enqueue.assert_called_once_with(
             task_dict["slug"],
             ["https://substack-post-media.s3.amazonaws.com/public/images/img1_1200x800.webp"],

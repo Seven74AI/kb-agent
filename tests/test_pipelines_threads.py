@@ -573,6 +573,49 @@ Video content.""")
         user_prompt = mock_llm.call.call_args.kwargs.get("user_prompt", "")
         assert "the caption carries the real claim" in user_prompt
 
+    @patch("agent.pipelines.threads.get_llm_client")
+    def test_video_synthesize_reads_batch_id_keyed_raw_sidecar(
+        self, mock_get_llm, config, task_dict,
+    ):
+        """Synthesize must load detect output when raw JSON is only id-keyed (batch path)."""
+        ingest_id = task_dict["id"]
+        slug = task_dict["slug"]
+        merged = {"segments": [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "text": "spoken"},
+        ]}
+        Path(config.temp_dir / f"{slug}_merged.json").write_text(json.dumps(merged))
+        batch_raw = {
+            "author": "batchdetect",
+            "captions": ["Caption only on batch sidecar"],
+            "parent_context": "Parent from detect",
+        }
+        Path(config.temp_dir / f"{ingest_id}_threads_raw.json").write_text(
+            json.dumps(batch_raw),
+        )
+        assert not (config.temp_dir / f"{slug}_threads_raw.json").exists()
+
+        mock_llm = MagicMock()
+        mock_llm.call.return_value = LLMResponse(content="""---
+date: 2026-01-01
+source: threads.net (@batchdetect)
+source_url: https://test
+confidence: plausible
+tags: [threads, video]
+---
+
+# Batch-aligned Note
+## Summary
+ok.""")
+        mock_get_llm.return_value = mock_llm
+
+        step_threads_video_synthesize(task_dict, config)
+
+        user_prompt = mock_llm.call.call_args.kwargs.get("user_prompt", "")
+        assert "Caption only on batch sidecar" in user_prompt
+        system_prompt = mock_llm.call.call_args.kwargs.get("system_prompt", "")
+        assert "batchdetect" in system_prompt
+        assert "Parent from detect" in system_prompt or "REPLY CONTEXT" in system_prompt
+
 
 # ── Step Tests: Quality Gate ─────────────────────────────────────────────────
 

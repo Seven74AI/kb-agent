@@ -11,6 +11,7 @@ from typing import Any
 
 from agent.config import Config
 from agent.core.slugify import slugify
+from agent.redact import url_for_display
 from agent.quality import (
     count_fact_checks,
     quality_gate_book,
@@ -73,9 +74,13 @@ def resolve_note_in_dir(
         if candidate.is_file():
             return candidate
     # Fall back: grep frontmatter in directory
+    vault_source_url = url_for_display(url)
     for path in sorted(notes_dir.glob("*.md")):
         text = path.read_text(encoding="utf-8", errors="replace")
-        if f"source_url: {url}" in text or f'source_url: "{url}"' in text:
+        if (
+            f"source_url: {vault_source_url}" in text
+            or f'source_url: "{vault_source_url}"' in text
+        ):
             return path
     return None
 
@@ -90,9 +95,10 @@ def find_notes_in_vault(url: str, vault_path: Path) -> list[Path]:
     knowledge = vault_path / "Knowledge base"
     if not knowledge.is_dir():
         return []
+    vault_source_url = url_for_display(url)
     try:
         result = subprocess.run(
-            ["grep", "-rlF", f"source_url: {url}", str(knowledge)],
+            ["grep", "-rlF", f"source_url: {vault_source_url}", str(knowledge)],
             capture_output=True,
             text=True,
             timeout=30,

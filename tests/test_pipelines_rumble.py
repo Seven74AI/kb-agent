@@ -164,17 +164,21 @@ class TestRumbleDownloadUsesCachedMetadata:
     def test_download_reads_metadata_json_instead_of_resolve(
         self, mock_resolve, mock_run, _mock_h264, rumble_config,
     ):
-        """download_video must not re-hit Flaresolverr when extract_metadata cache exists."""
+        """download_video merges CDN URLs from resolve when the sidecar stores height only."""
         slug = "rumble_test_slug"
         cdn_url = "https://hugh.cdn.rumble.cloud/video/test-baa.mp4"
         meta_path = rumble_config.temp_dir / f"{slug}_metadata.json"
         meta_path.write_text(
             json.dumps({
                 "title": "Cached Title",
-                "formats": [{"url": cdn_url, "height": 720}],
+                "formats": [{"height": 720}],
                 "source_url": "https://rumble.com/v2vk68c-test",
             }),
             encoding="utf-8",
+        )
+        mock_resolve.return_value = (
+            "Cached Title",
+            [{"url": cdn_url, "height": 720}],
         )
         video_path = rumble_config.temp_dir / f"{slug}.mp4"
         video_path.write_bytes(b"\x00" * 2000)
@@ -188,7 +192,7 @@ class TestRumbleDownloadUsesCachedMetadata:
         }
         result = step_rumble_download_video(task, rumble_config)
 
-        mock_resolve.assert_not_called()
+        mock_resolve.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cdn_url in cmd
         assert "--max-redirs" in cmd

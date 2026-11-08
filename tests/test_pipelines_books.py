@@ -1104,6 +1104,94 @@ def test_resolve_local_book_path_prefers_slug_match_in_mega_dir(config):
     assert resolved == slug_match
 
 
+def test_resolve_local_book_path_exact_stem_not_lexicographic_substring(config):
+    shared_token = "mega_batch_shared"
+    child_slug = f"{shared_token}_vol_one"
+    dl_dir = Path(config.temp_dir) / f"mega_{child_slug}"
+    dl_dir.mkdir(parents=True)
+    (dl_dir / f"{shared_token}_vol_two.epub").write_text("two", encoding="utf-8")
+    expected = dl_dir / f"{child_slug}.epub"
+    expected.write_text("one", encoding="utf-8")
+    task = {"id": "child", "slug": child_slug, "source_url": ""}
+    resolved = _resolve_local_book_path(task, config, {".epub"}, "extract_epub")
+    assert resolved == expected
+
+
+def test_resolve_local_book_path_hash_suffix_requires_exact_stem(config):
+    from agent.exceptions import StepError
+
+    parent = "mega_parent"
+    stem = "a" * 200
+    child_slug = _book_child_slug(parent, f"/pack/{stem}.epub")
+    dl_dir = Path(config.temp_dir) / f"mega_{child_slug}"
+    dl_dir.mkdir(parents=True)
+    (dl_dir / f"{parent}_{stem[:20]}.epub").write_text("partial", encoding="utf-8")
+    task = {"id": "child", "slug": child_slug, "source_url": ""}
+    with pytest.raises(StepError, match="exact stem matching hash-suffixed slug"):
+        _resolve_local_book_path(task, config, {".epub"}, "extract_epub")
+
+
+TOKENIZED_BOOK_URL = "https://cdn.example.com/book.mp3?token=secret&expires=999"
+
+
+class TestBookVaultWriteSanitization:
+    """Book vault writes must scrub URLs at rest (synthesis + MinIO frontmatter patch)."""
+
+    @patch("agent.pipelines.books.get_llm_client")
+    def test_synthesize_book_scrubs_urls_in_vault_note(
+        self, mock_llm_factory, config, book_task,
+    ):
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        slug = book_task["slug"]
+        full_txt = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        full_txt.write_text("short book text " * 30, encoding="utf-8")
+        book_task["source_url"] = TOKENIZED_BOOK_URL
+        book_task["_book_title"] = "Test Title"
+        book_task["_book_author"] = "Test Author"
+
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = (
+            f"See also {TOKENIZED_BOOK_URL} for the audio edition.\n"
+            "## Summary\n\nContent here.\n"
+        )
+        mock_llm.call.return_value = mock_response
+        mock_llm_factory.return_value = mock_llm
+
+        step_synthesize_book(book_task, config)
+        note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
+        written = note_path.read_text(encoding="utf-8")
+        assert "token=secret" not in written
+        assert "https://cdn.example.com/book.mp3" in written
+
+    @patch("agent.archival.upload_file_to_minio")
+    def test_minio_upload_scrubs_note_after_frontmatter_patch(
+        self, mock_upload, config, book_task,
+    ):
+        slug = book_task["slug"]
+        full_txt = Path(config.temp_dir) / f"book_{slug}_full.txt"
+        full_txt.parent.mkdir(parents=True, exist_ok=True)
+        full_txt.write_text("extracted book text " * 20)
+        note_path = config.vault_path / "Knowledge base" / "books" / f"{slug}.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            f"""---
+source_url: {TOKENIZED_BOOK_URL}
+source_files:
+  text: <filled by archival step>
+---
+
+Body without query parameters in the note text.
+""",
+            encoding="utf-8",
+        )
+        book_task["source_url"] = str(full_txt)
+        step_book_minio_upload(book_task, config)
+        written = note_path.read_text(encoding="utf-8")
+        assert "token=secret" not in written
+        assert "source_files:" in written
+
+
 # ── MinIO upload source resolution ─────────────────────────────────────────────
 
 class TestBookMinioUpload:
