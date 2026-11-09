@@ -47,8 +47,8 @@ def _sanitize_emit(message: object) -> str:
     import sys
     from pathlib import Path
 
-    for root in (Path(__file__).resolve().parent.parent, Path("/root/kb-agent")):
-        if root.is_dir():
+    for root in (Path("/root/kb-agent"), Path(__file__).resolve().parent.parent):
+        if (root / "agent").is_dir():
             root_s = str(root)
             if root_s not in sys.path:
                 sys.path.insert(0, root_s)
