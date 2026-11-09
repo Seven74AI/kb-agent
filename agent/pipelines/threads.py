@@ -127,7 +127,7 @@ def _assert_threads_video_cdn_url_allowed(url: str) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> str:
+def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> tuple[str, str]:
     """Fetch a Threads URL with cookies + Googlebot UA.
 
     Args:
@@ -137,7 +137,9 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
             /root/kb-agent/cookies (matching config.cookie_dir default).
 
     Returns:
-        Raw HTTP response body.
+        ``(raw HTTP response body, resolved fetch URL)`` — the resolved URL is the
+        canonical ``@handle/post/<id>`` after following a ``/share/`` hop, and is
+        the URL the body was actually fetched from (use it for post-code scoping).
 
     Raises:
         StepError: If curl fails.
@@ -196,7 +198,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
                 step_name="curl_threads",
             )
 
-        return result.stdout
+        return result.stdout, fetch_url
     finally:
         _unlink_curl_netscape_sidecar(conf_path)
 
@@ -328,7 +330,7 @@ def _fetch_parent_post(
         StepError: If parent fetch fails or caption cannot be extracted.
     """
     try:
-        html = _curl_threads(parent_url, timeout=20, cookie_dir=cookie_dir)
+        html, _ = _curl_threads(parent_url, timeout=20, cookie_dir=cookie_dir)
     except StepError as exc:
         detail = sanitize_visible_message(str(exc))
         logger.warning(
@@ -438,13 +440,10 @@ def step_threads_detect(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    # Resolve a /share/ short link to its canonical URL before scoping — the
-    # share code is absent from the canonical document, so anchoring on it falls
-    # back to the first permalink and can disagree with submit-time routing
-    # (which scopes on the canonical post code). Passing the resolved URL into
-    # _curl_threads also avoids a double probe (it no-ops on a canonical URL).
-    fetch_url = _resolve_threads_share_redirect(url, [], timeout=30)
-    html = _curl_threads(fetch_url, cookie_dir=config.cookie_dir)
+    # _curl_threads returns the URL the body was actually fetched from (the
+    # canonical post after a /share/ hop); scope subtype detection on THAT, not
+    # the share short code (absent from the canonical document).
+    html, fetch_url = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     # Check for login wall before doing deeper analysis
     if _is_login_wall(html):
@@ -532,7 +531,7 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url, cookie_dir=config.cookie_dir)
+    html, _ = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     # Check for login wall
     if _is_login_wall(html):
@@ -622,10 +621,9 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    # Resolve a /share/ short link before extracting — scoping on the share code
-    # would fall back to the first permalink and can grab a related post's clip.
-    fetch_url = _resolve_threads_share_redirect(url, [], timeout=30)
-    html = _curl_threads(fetch_url, cookie_dir=config.cookie_dir)
+    # _curl_threads returns the URL the body was actually fetched from — scope
+    # video extraction on that, not the share code (absent from the document).
+    html, fetch_url = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     if _is_login_wall(html):
         raise StepError(

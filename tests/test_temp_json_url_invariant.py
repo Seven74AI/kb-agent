@@ -327,7 +327,7 @@ def test_threads_detect_raw_sidecar_sanitizes_urls(mock_curl, mock_parent, sidec
         '"username":"u","is_reply":true,"parent_post":{"code":"PARENT1"}}'
         '<div class="_ab6c">x</div>'
     )
-    mock_curl.return_value = html
+    mock_curl.return_value = (html, "https://www.threads.net/@u/post/XYZ")
     mock_parent.return_value = (
         "Parent body with https://parent.example.com/p?jwt=SECRET embedded"
     )
@@ -355,7 +355,7 @@ def test_threads_extract_text_raw_sidecar_sanitizes_urls(
         '{"caption":{"text":"Link https://track.example/a?key=1"},'
         '"username":"u","is_reply":true,"parent_post":{"code":"PAR99"}}'
     )
-    mock_curl.return_value = html
+    mock_curl.return_value = (html, "https://www.threads.net/@u/post/XYZ")
     mock_parent.return_value = "Replying to https://threads.net/t/PAR99?ref=old"
     raw_path = step_threads_extract_text(task, sidecar_config)
     data = json.loads(Path(raw_path).read_text(encoding="utf-8"))

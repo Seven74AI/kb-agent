@@ -51,7 +51,7 @@ def test_threads_video_download_referer_is_display_safe(
         '"height":1080}],"caption":{"text":"x"},"username":"x"}'
         '<div class="_ab6c">x</div>'
     )
-    mock_curl.return_value = html
+    mock_curl.return_value = (html, "https://www.threads.net/@u/post/XYZ")
 
     def fake_run(cmd, **kwargs):
         result = MagicMock(returncode=0, stdout="", stderr="")

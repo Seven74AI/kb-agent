@@ -332,11 +332,13 @@ def _safe_url_for_log(url: str) -> str:
     return url_for_display(url)
 
 
-def _fetch_content(url: str, platform: str) -> str | None:
+def _fetch_content(url: str, platform: str) -> tuple[str | None, str]:
     """Fetch the raw content signal Jev needs for subtype resolution.
 
-    Returns raw HTML (threads/substack) or a filename list (mega), or None on
-    failure. Reuses the same fetches the legacy scrapers use.
+    Returns ``(content, resolved_url)`` — raw HTML (threads/substack) or a
+    filename list (mega), or None on failure, plus the URL the content was
+    actually fetched from (the canonical post URL after a ``/share/`` hop; equals
+    ``url`` for non-threads). Reuses the same fetches the legacy scrapers use.
     """
     _assert_fetch_url_allowed(url)
     if platform == "threads":
@@ -353,7 +355,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 fetch_url,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-            return result.stdout or None
+            return result.stdout or None, fetch_url
         except (subprocess.TimeoutExpired, Exception) as exc:
             logger.warning(
                 "Threads content fetch failed for %s: %s",
@@ -361,7 +363,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 exc,
                 exc_info=True,
             )
-            return None
+            return None, url
         finally:
             _unlink_curl_netscape_sidecar(conf_path)
     elif platform == "substack":
@@ -373,7 +375,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 ],
                 capture_output=True, text=True, timeout=20,
             )
-            return result.stdout or None
+            return result.stdout or None, url
         except (subprocess.TimeoutExpired, Exception) as exc:
             logger.warning(
                 "Substack content fetch failed for %s: %s",
@@ -381,7 +383,7 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 exc,
                 exc_info=True,
             )
-            return None
+            return None, url
     elif platform == "mega":
         try:
             result = subprocess.run(
@@ -389,8 +391,8 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
-                return None
-            return result.stdout or None
+                return None, url
+            return result.stdout or None, url
         except (subprocess.TimeoutExpired, Exception) as exc:
             logger.warning(
                 "Mega content fetch failed for %s: %s",
@@ -398,8 +400,8 @@ def _fetch_content(url: str, platform: str) -> str | None:
                 exc,
                 exc_info=True,
             )
-            return None
-    return None
+            return None, url
+    return None, url
 
 
 def detect_content_subtype(url: str, platform: str) -> str:
@@ -442,20 +444,17 @@ def detect_content_subtype_with_signals(
         return ContentSubtypeDetection(platform)
 
     # Ambiguous tail (threads/substack/mega/web) → Jev with fetched content.
-    content = _fetch_content(url, platform)
+    content, resolved_url = _fetch_content(url, platform)
 
     # Threads is fully deterministic: video_versions present/absent is the whole
     # answer (video vs text). No Jev — an LLM misread this exact signal once,
     # and a 900KB payload would waste a full-content call for nothing.
     if platform == "threads":
         if content is not None:
-            # Scope on the canonical post code, not the share short code: a
-            # share code is absent from the canonical document, so anchoring on
-            # it falls back to the first permalink and can mis-scope a payload
-            # carrying related posts' media. _detect_threads_subtype already
-            # scopes on the resolved URL — keep both paths consistent.
-            scope_url = _resolve_threads_share_redirect(url, [], timeout=15)
-            subtype = threads_content_subtype_from_html(content, scope_url)
+            # Scope on the resolved URL _fetch_content actually fetched (the
+            # canonical post code) — the share short code is absent from the
+            # document, so anchoring on it falls back to the first permalink.
+            subtype = threads_content_subtype_from_html(content, resolved_url)
             return ContentSubtypeDetection(subtype)
         subtype, threads_subtype_fetch_failed = _detect_threads_subtype(url)
         return ContentSubtypeDetection(
