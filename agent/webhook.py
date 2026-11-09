@@ -45,7 +45,6 @@ _PROTECTED_ENDPOINTS = frozenset({
     "resume",
     "upload_cookies",
     "remove_ingest_item",
-    "dashboard",
 })
 
 

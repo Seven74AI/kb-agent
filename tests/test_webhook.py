@@ -694,9 +694,11 @@ def test_post_submit_ok_with_x_api_key_header(monkeypatch, tmp_path):
     assert resp.status_code == 201
 
 
-def test_dashboard_requires_auth(client, monkeypatch, tmp_path):
+def test_dashboard_accessible_without_token(monkeypatch, tmp_path):
+    # GET /dashboard is gated by Cloudflare Access (email), not the API token —
+    # a browser cannot send a bearer header, so the token must not apply here.
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
     monkeypatch.delenv("KB_API_TOKEN", raising=False)
     bare = app.test_client()
     resp = bare.get("/dashboard")
-    assert resp.status_code == 503
+    assert resp.status_code == 200
