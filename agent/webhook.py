@@ -1,10 +1,11 @@
 """Flask webhook — POST /submit and GET /dashboard.
 
 Machine clients (MCP, curl) authenticate mutating routes with a bearer token
-(`KB_API_TOKEN` / config `api_token`). Browser dashboard forms authenticate with
-a CSRF token issued by `GET /dashboard`, which itself sits behind Cloudflare
-Access. Flask runs sync in main thread; the asyncio consumer runs in a
-background thread.
+(`KB_API_TOKEN` / config `api_token`). The browser dashboard and its forms
+authenticate with a verified Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`,
+RS256 signature + `iss`/`aud` checked against the team's JWKS); the mutating
+forms additionally require a signed CSRF token as anti-forgery. Flask runs sync
+in the main thread; the asyncio consumer runs in a background thread.
 """
 
 import hashlib
