@@ -288,6 +288,21 @@ class TestThreadsSsrf:
             _curl_threads(METADATA_URL, cookie_dir=cookie_dir)
         mock_run.assert_not_called()
 
+    @patch("agent.pipelines.threads.subprocess.run")
+    def test_curl_threads_rejects_off_origin_redirect_target(self, mock_run, config, tmp_path):
+        # A /share/ redirect whose Location lands off-origin must fail the step
+        # (StepError, FAIL) — not escape as an unhandled ValueError and pause.
+        cookie_dir = tmp_path / "cookies"
+        cookie_dir.mkdir()
+        (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="HTTP/2 302\nlocation: https://evil.example.com/steal\n",
+            stderr="",
+        )
+        with pytest.raises(StepError, match="not allowlisted"):
+            _curl_threads("https://www.threads.com/share/BAYD9ij7_f", cookie_dir=cookie_dir)
+
     @patch("agent.pipelines.threads._curl_threads")
     @patch("subprocess.run")
     def test_extract_video_rejects_metadata_cdn_url(self, mock_run, mock_curl, config, task_dict):

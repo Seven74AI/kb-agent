@@ -52,6 +52,7 @@ def test_share_link_is_threads_not_web():
 @pytest.mark.parametrize("url", THREADS_VIDEO)
 def test_threads_video_detected(monkeypatch, url):
     monkeypatch.setattr(detection, "_fetch_content", lambda u, p: REAL_VIDEO_JSON)
+    monkeypatch.setattr(detection, "_resolve_threads_share_redirect", lambda u, ca, timeout=0: u)
     assert detection.detect_content_subtype(url, "threads") == "threads_video"
 
 
@@ -59,12 +60,14 @@ def test_threads_video_detected(monkeypatch, url):
 def test_threads_text_not_misdetected_as_video(monkeypatch, url):
     # a bare video_versions substring (null) must NOT classify as video
     monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_VIDEO_JSON)
+    monkeypatch.setattr(detection, "_resolve_threads_share_redirect", lambda u, ca, timeout=0: u)
     assert detection.detect_content_subtype(url, "threads") == "threads_text"
 
 
 def test_null_then_real_still_video(monkeypatch):
     # the original extraction bug: first occurrence null, real array later
     monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_THEN_REAL)
+    monkeypatch.setattr(detection, "_resolve_threads_share_redirect", lambda u, ca, timeout=0: u)
     assert detection.detect_content_subtype(THREADS_VIDEO[1], "threads") == "threads_video"
 
 
@@ -119,6 +122,24 @@ def test_canonical_threads_url_not_probed(monkeypatch):
     resolved = detection._resolve_threads_share_redirect(SHARE_CANONICAL, [], timeout=15)
     assert resolved == SHARE_CANONICAL
     assert calls == []
+
+
+def test_share_link_subtype_scopes_on_resolved_url(monkeypatch):
+    # The submit-time path must scope video detection on the RESOLVED canonical
+    # URL (post code), not the share short code — a share code is absent from the
+    # canonical document, so anchoring on it falls back to the first permalink.
+    captured = {}
+    monkeypatch.setattr(detection, "_fetch_content", lambda u, p: "html")
+    monkeypatch.setattr(
+        detection, "_resolve_threads_share_redirect",
+        lambda u, ca, timeout=0: SHARE_CANONICAL,
+    )
+    def fake_subtype(html, source_url):
+        captured["source_url"] = source_url
+        return "threads_text"
+    monkeypatch.setattr(detection, "threads_content_subtype_from_html", fake_subtype)
+    detection.detect_content_subtype(SHARE_URL, "threads")
+    assert captured["source_url"] == SHARE_CANONICAL
 
 
 def test_comment_id_routes_to_comment():

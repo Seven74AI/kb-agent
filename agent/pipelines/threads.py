@@ -165,7 +165,17 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
     conf_path: Path | None = None
     try:
         cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
-        fetch_url = _resolve_threads_share_redirect(url, cookie_args, timeout=timeout)
+        try:
+            fetch_url = _resolve_threads_share_redirect(url, cookie_args, timeout=timeout)
+        except ValueError as exc:
+            # An off-origin /share/ redirect target is a hard fail, not a retryable
+            # pause — surface it as StepError so threads_detect fails cleanly
+            # instead of pausing on an unhandled ValueError.
+            raise StepError(
+                str(exc),
+                error_type=ErrorType.FAIL,
+                step_name="curl_threads",
+            ) from exc
         result = subprocess.run(
             [
                 "curl", "-s", "--max-time", str(timeout),

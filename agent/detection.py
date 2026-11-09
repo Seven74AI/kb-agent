@@ -449,7 +449,13 @@ def detect_content_subtype_with_signals(
     # and a 900KB payload would waste a full-content call for nothing.
     if platform == "threads":
         if content is not None:
-            subtype = threads_content_subtype_from_html(content, url)
+            # Scope on the canonical post code, not the share short code: a
+            # share code is absent from the canonical document, so anchoring on
+            # it falls back to the first permalink and can mis-scope a payload
+            # carrying related posts' media. _detect_threads_subtype already
+            # scopes on the resolved URL — keep both paths consistent.
+            scope_url = _resolve_threads_share_redirect(url, [], timeout=15)
+            subtype = threads_content_subtype_from_html(content, scope_url)
             return ContentSubtypeDetection(subtype)
         subtype, threads_subtype_fetch_failed = _detect_threads_subtype(url)
         return ContentSubtypeDetection(
