@@ -1,10 +1,14 @@
 """Flask webhook — POST /submit and GET /dashboard.
 
-Bearer token (`KB_API_TOKEN` / config `api_token`) required on mutating routes
-and GET /dashboard. Flask runs sync in main thread; the asyncio consumer runs
-in a background thread.
+Machine clients (MCP, curl) authenticate mutating routes with a bearer token
+(`KB_API_TOKEN` / config `api_token`). Browser dashboard forms authenticate with
+a CSRF token issued by `GET /dashboard`, which itself sits behind Cloudflare
+Access. Flask runs sync in main thread; the asyncio consumer runs in a
+background thread.
 """
 
+import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -92,18 +96,51 @@ def extract_request_token(req) -> str | None:
     return None
 
 
+# Browser dashboard forms authenticate via a CSRF token instead of the bearer
+# header (a browser cannot attach one). These are the dashboard's mutating forms.
+_FORM_ENDPOINTS = frozenset({
+    "resume",
+    "upload_cookies",
+    "remove_ingest_item",
+})
+
+# Signed CSRF token secret: stable for the life of the process. A token is
+# `value.signature` where signature = HMAC-SHA256(value, _CSRF_SECRET); it is
+# only ever rendered into the dashboard page (behind Cloudflare Access), so a
+# cross-origin page cannot read it, and we validate the signature on POST.
+_CSRF_SECRET = secrets.token_bytes(32)
+
+
+def _csrf_token() -> str:
+    value = secrets.token_hex(32)
+    sig = hmac.new(_CSRF_SECRET, value.encode(), hashlib.sha256).hexdigest()
+    return f"{value}.{sig}"
+
+
+def _csrf_valid(token: str | None) -> bool:
+    if not token or "." not in token:
+        return False
+    value, sig = token.rsplit(".", 1)
+    expected = hmac.new(_CSRF_SECRET, value.encode(), hashlib.sha256).hexdigest()
+    return secrets.compare_digest(sig, expected)
+
+
 @app.before_request
 def _require_api_token():
     endpoint = request.endpoint
     if endpoint not in _PROTECTED_ENDPOINTS:
         return None
     configured = resolve_api_token()
+    # Machine client: a valid bearer token passes.
+    provided = extract_request_token(request)
+    if provided and configured and secrets.compare_digest(provided, configured):
+        return None
+    # Browser form: a valid CSRF token (issued by the dashboard behind Access).
+    if endpoint in _FORM_ENDPOINTS and _csrf_valid(request.form.get("csrf_token")):
+        return None
     if not configured:
         return jsonify({"error": _TOKEN_NOT_CONFIGURED_MSG}), 503
-    provided = extract_request_token(request)
-    if not provided or not secrets.compare_digest(provided, configured):
-        return jsonify({"error": "Unauthorized"}), 401
-    return None
+    return jsonify({"error": "Unauthorized"}), 401
 
 
 # ── DB Helpers ────────────────────────────────────────────────────────────────
@@ -408,6 +445,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span style="font-weight:600;">Quick Actions:</span>
         {% for reason, label in pause_reasons %}
         <form method="POST" action="/resume?reason={{ reason }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="btn btn-resume">Resume: {{ label }}</button>
         </form>
         {% endfor %}
@@ -417,6 +455,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="upload-section">
         <h3>Upload Cookies</h3>
         <form method="POST" action="/upload-cookies" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="cookie_type" style="padding:0.3rem;margin-right:0.5rem;">
                 {% for fname, desc in cookie_types.items() %}
                 <option value="{{ fname }}">{{ fname }} — {{ desc }}</option>
@@ -449,7 +488,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <td><span class="status-badge {{ q.status }}" title="{{ status_help.get(q.status, '') }}">{{ q.status }}</span></td>
                 <td style="font-size:0.75rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;" title="{{ q.error or '' }}">{{ q.error or '—' }}</td>
                 <td style="font-size:0.8rem;">{{ q.created_at }}</td>
-                <td><form method="POST" action="/remove-ingest" onsubmit="return confirm('Remove this ingest item?');"><input type="hidden" name="ingest_id" value="{{ q.id }}"><button type="submit" class="btn" style="font-size:0.75rem;padding:0.15rem 0.4rem;">Remove</button></form></td>
+                <td><form method="POST" action="/remove-ingest" onsubmit="return confirm('Remove this ingest item?');"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="ingest_id" value="{{ q.id }}"><button type="submit" class="btn" style="font-size:0.75rem;padding:0.15rem 0.4rem;">Remove</button></form></td>
             </tr>
             {% endfor %}
         </tbody>
@@ -640,6 +679,7 @@ def dashboard():
         pause_reasons=PAUSE_REASON_LABELS,
         cookie_types=ALLOWED_COOKIE_FILES,
         status_help=STATUS_HELP,
+        csrf_token=_csrf_token(),
     )
 
 

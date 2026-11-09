@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -13,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.core import slugify
-from agent.webhook import app, _format_elapsed, _compute_staleness
+from agent.webhook import app, _format_elapsed, _compute_staleness, _csrf_token, _csrf_valid
 from agent.db import (
     AGENT_SCHEMA, LOGS_SCHEMA,
     create_task, init_db, resume_tasks_by_reason,
@@ -695,10 +696,69 @@ def test_post_submit_ok_with_x_api_key_header(monkeypatch, tmp_path):
 
 
 def test_dashboard_accessible_without_token(monkeypatch, tmp_path):
-    # GET /dashboard is gated by Cloudflare Access (email), not the API token —
-    # a browser cannot send a bearer header, so the token must not apply here.
+    # GET /dashboard is gated by Cloudflare Access (email), not the API token — a
+    # browser cannot send a bearer header, so a configured token must not 401 it.
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
-    monkeypatch.delenv("KB_API_TOKEN", raising=False)
+    # KB_API_TOKEN stays set (autouse fixture) — the live 401 scenario: token
+    # configured + no header must still render the page.
     bare = app.test_client()
     resp = bare.get("/dashboard")
     assert resp.status_code == 200
+
+
+def test_dashboard_embeds_valid_csrf_token(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    bare = app.test_client()
+    resp = bare.get("/dashboard")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'name="csrf_token"' in html
+    m = re.search(r'name="csrf_token" value="([^"]+)"', html)
+    assert m, "dashboard did not render a csrf_token hidden field"
+    assert _csrf_valid(m.group(1))
+
+
+def test_form_post_without_csrf_or_bearer_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    bare = app.test_client()  # no Authorization header
+    assert bare.post("/resume?reason=cookies").status_code == 401
+    assert bare.post("/upload-cookies").status_code == 401
+    assert bare.post("/remove-ingest", data={"ingest_id": "x"}).status_code == 401
+
+
+def test_resume_form_accepts_csrf_token(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    # Create a paused task to resume.
+    agent_db = tmp_path / "data" / "agent.db"
+    agent_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = init_db(agent_db, AGENT_SCHEMA)
+    task_id = create_task(conn, "https://youtube.com/watch?v=xyz", "youtube",
+                          "test_slug", ["step1"], status="paused")
+    conn.execute("UPDATE tasks SET error = ? WHERE id = ?",
+                 ("cookies invalid", task_id))
+    conn.commit()
+    conn.close()
+
+    bare = app.test_client()
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": _csrf_token()})
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["resumed"] == 1
+
+
+def test_csrf_token_with_bad_signature_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    bare = app.test_client()
+    forged = "0" * 64 + "." + "f" * 64
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": forged})
+    assert resp.status_code == 401
+
+
+def test_submit_rejects_csrf_only(monkeypatch, tmp_path):
+    # /submit is machine-only: a valid CSRF token must NOT authorize it.
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    bare = app.test_client()
+    resp = bare.post(
+        "/submit",
+        data={"url": "https://example.com", "csrf_token": _csrf_token()},
+    )
+    assert resp.status_code == 401

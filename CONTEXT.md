@@ -68,9 +68,12 @@ Python consumer loop (async)
 - **Config:** YAML for structured config (paths, concurrency, thresholds, retry),
   `.env` for secrets (API keys). Same pattern as Hermes.
 - **Auth:** Bearer `KB_API_TOKEN` (env or `config.yaml` `api_token`) on the webhook
-  mutating routes (`submit`, `resume`, `upload-cookies`, `remove-ingest`) and MCP.
-  `GET /dashboard` is NOT token-gated — it is protected by Cloudflare Access (email)
-  at the `kba.sevend.io` hostname. Webhook and MCP bind loopback by default (see
+  machine routes (`submit`) and MCP. `GET /dashboard` is NOT token-gated — it is
+  protected by Cloudflare Access (email) at the `kba.sevend.io` hostname. The
+  dashboard's own mutating forms (`resume`, `upload-cookies`, `remove-ingest`)
+  accept EITHER the bearer token (curl/MCP) OR a signed CSRF token that the
+  dashboard page embeds (a browser cannot send a bearer header, and the CSRF
+  token blocks cross-site forgery). Webhook and MCP bind loopback by default (see
   `config.yaml`).
 
 ### Ingestion — Full Detection & Pre-Flight Model
