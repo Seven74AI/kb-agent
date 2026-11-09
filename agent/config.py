@@ -77,7 +77,11 @@ class Config:
     webhook_port: int = 5000
 
     # ── Cloudflare Access (browser auth for the dashboard + its forms) ──
-    cloudflare_access_team: str = "floral-surf-abe5"
+    # Both empty by default → the browser path fails closed until the operator
+    # sets CF_ACCESS_TEAM + CF_ACCESS_AUD (the Zero Trust team subdomain and the
+    # application's AUD tag). The live team subdomain is visible in the Access
+    # login redirect (e.g. https://<team>.cloudflareaccess.com).
+    cloudflare_access_team: str = ""
     cloudflare_access_aud: str = ""
 
     # ── MCP (stateless streamable HTTP) ──
@@ -225,7 +229,7 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         webhook_host=str(raw.get("webhook_host", "127.0.0.1")),
         webhook_port=int(_env_or_default(raw.get("webhook_port"), "KB_WEBHOOK_PORT", 5000)),
         cloudflare_access_team=str(
-            _env_or_default(raw.get("cloudflare_access_team"), "CF_ACCESS_TEAM", "floral-surf-abe5")
+            _env_or_default(raw.get("cloudflare_access_team"), "CF_ACCESS_TEAM", "")
         ),
         cloudflare_access_aud=str(
             _env_or_default(raw.get("cloudflare_access_aud"), "CF_ACCESS_AUD", "")

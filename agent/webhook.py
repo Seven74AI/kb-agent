@@ -51,6 +51,7 @@ _PROTECTED_ENDPOINTS = frozenset({
     "resume",
     "upload_cookies",
     "remove_ingest_item",
+    "dashboard",
 })
 
 
@@ -155,6 +156,8 @@ def _verify_access_jwt(assertion: str | None) -> bool:
     if not aud:
         return False
     team = config.cloudflare_access_team
+    if not team:
+        return False
     issuer = f"https://{team}.cloudflareaccess.com"
     try:
         signing_key = _access_jwks_client(team).get_signing_key_from_jwt(assertion)
@@ -180,11 +183,14 @@ def _require_api_token():
     provided = extract_request_token(request)
     if provided and configured and secrets.compare_digest(provided, configured):
         return None
-    # Browser form: a valid Access JWT (identity) AND CSRF token (anti-forgery).
-    if endpoint in _FORM_ENDPOINTS:
-        assertion = request.headers.get("Cf-Access-Jwt-Assertion")
-        if _verify_access_jwt(assertion) and _csrf_valid(request.form.get("csrf_token")):
-            return None
+    # Browser client: a valid Access JWT identifies the caller (proves the
+    # request passed Cloudflare Access).
+    assertion = request.headers.get("Cf-Access-Jwt-Assertion")
+    if _verify_access_jwt(assertion):
+        if endpoint == "dashboard":
+            return None  # read-only page: JWT alone is enough
+        if endpoint in _FORM_ENDPOINTS and _csrf_valid(request.form.get("csrf_token")):
+            return None  # mutating forms also need the CSRF token (anti-forgery)
     if not configured:
         return jsonify({"error": _TOKEN_NOT_CONFIGURED_MSG}), 503
     return jsonify({"error": "Unauthorized"}), 401

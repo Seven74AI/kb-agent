@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.core import slugify
-from agent.webhook import app, _format_elapsed, _compute_staleness, _csrf_token, _csrf_valid
+from agent.webhook import app, _format_elapsed, _compute_staleness, _csrf_token, _csrf_valid, _verify_access_jwt
 from agent.db import (
     AGENT_SCHEMA, LOGS_SCHEMA,
     create_task, init_db, resume_tasks_by_reason,
@@ -695,19 +695,24 @@ def test_post_submit_ok_with_x_api_key_header(monkeypatch, tmp_path):
     assert resp.status_code == 201
 
 
-def test_dashboard_accessible_without_token(monkeypatch, tmp_path):
-    # GET /dashboard is gated by Cloudflare Access (email), not the API token — a
-    # browser cannot send a bearer header, so a configured token must not 401 it.
+def test_dashboard_requires_access_jwt(monkeypatch, tmp_path):
+    # GET /dashboard sits behind Cloudflare Access: without a valid Access JWT
+    # (or bearer token) a bare client reaching Flask directly is rejected.
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
-    # KB_API_TOKEN stays set (autouse fixture) — the live 401 scenario: token
-    # configured + no header must still render the page.
     bare = app.test_client()
-    resp = bare.get("/dashboard")
-    assert resp.status_code == 200
+    assert bare.get("/dashboard").status_code == 401
+
+
+def test_dashboard_accessible_with_access_jwt(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    bare = app.test_client()
+    assert bare.get("/dashboard").status_code == 200
 
 
 def test_dashboard_embeds_valid_csrf_token(monkeypatch, tmp_path):
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
     bare = app.test_client()
     resp = bare.get("/dashboard")
     assert resp.status_code == 200
@@ -788,3 +793,76 @@ def test_submit_rejects_csrf_only(monkeypatch, tmp_path):
         data={"url": "https://example.com", "csrf_token": _csrf_token()},
     )
     assert resp.status_code == 401
+
+
+# ── Access JWT verification (real RS256 signature) ──────────────────────────
+
+def _access_jwt(monkeypatch, *, aud="test-aud-tag", team="floral-surf-abe5",
+                exp=None, wrong_key=False):
+    """Sign a real RS256 JWT, wire config + a fake JWKS client, return (token, key)."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import jwt as pyjwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    claims = {
+        "email": "user@example.com",
+        "aud": [aud],
+        "iss": f"https://{team}.cloudflareaccess.com",
+    }
+    if exp is not None:
+        claims["exp"] = exp
+    token = pyjwt.encode(claims, key, algorithm="RS256")
+
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_team", team)
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_aud", aud)
+
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pub = (other if wrong_key else key).public_key()
+
+    class _SigningKey:
+        key = pub
+
+    class _Client:
+        def get_signing_key_from_jwt(self, tok):
+            return _SigningKey()
+
+    monkeypatch.setattr("agent.webhook._access_jwks_client", lambda t: _Client())
+    return token
+
+
+def test_verify_access_jwt_accepts_valid_signed_token(monkeypatch):
+    token = _access_jwt(monkeypatch)
+    assert _verify_access_jwt(token) is True
+
+
+def test_verify_access_jwt_rejects_wrong_signature(monkeypatch):
+    token = _access_jwt(monkeypatch, wrong_key=True)
+    assert _verify_access_jwt(token) is False
+
+
+def test_verify_access_jwt_rejects_wrong_audience(monkeypatch):
+    token = _access_jwt(monkeypatch, aud="some-other-app")
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_aud", "test-aud-tag")
+    assert _verify_access_jwt(token) is False
+
+
+def test_verify_access_jwt_rejects_expired_token(monkeypatch):
+    import time
+    token = _access_jwt(monkeypatch, exp=time.time() - 3600)
+    assert _verify_access_jwt(token) is False
+
+
+def test_verify_access_jwt_fails_closed_when_unconfigured(monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import jwt as pyjwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = pyjwt.encode(
+        {"email": "x@example.com", "aud": ["test-aud-tag"],
+         "iss": "https://floral-surf-abe5.cloudflareaccess.com"},
+        key, algorithm="RS256",
+    )
+    # team + aud left at their empty defaults
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_team", "")
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_aud", "")
+    assert _verify_access_jwt(token) is False
