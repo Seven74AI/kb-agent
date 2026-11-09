@@ -29,7 +29,7 @@ def legacy_detection(monkeypatch):
         raise RuntimeError("jev disabled in benchmark")
 
     monkeypatch.setattr("agent.detection.route_jev", _no_jev)
-    monkeypatch.setattr("agent.detection._fetch_content", lambda url, p: None)
+    monkeypatch.setattr("agent.detection._fetch_content", lambda url, p: (None, url))
     monkeypatch.setattr(
         "agent.detection._detect_threads_subtype",
         lambda url: ("threads_text", False),

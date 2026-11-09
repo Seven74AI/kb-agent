@@ -80,7 +80,7 @@ def test_threads_subtype_fetch_failed_isolated_per_detection_call(monkeypatch, t
     (cookie_dir / "threads_cookies.txt").write_text("x", encoding="utf-8")
     cfg = Config(kb_agent_dir=tmp_path, vault_path=tmp_path / "vault", cookie_dir=cookie_dir)
     monkeypatch.setattr("agent.detection.load_config", lambda: cfg)
-    monkeypatch.setattr("agent.detection._fetch_content", lambda url, p: None)
+    monkeypatch.setattr("agent.detection._fetch_content", lambda url, p: (None, url))
 
     call_n = {"n": 0}
 

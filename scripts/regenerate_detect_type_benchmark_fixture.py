@@ -22,7 +22,7 @@ FIXTURE = REPO / "tests" / "fixtures" / "detect_type_benchmark.jsonl"
 
 def main() -> None:
     det.route_jev = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("jev off"))
-    det._fetch_content = lambda url, p: None
+    det._fetch_content = lambda url, p: (None, url)
 
     rows = []
     for line in FIXTURE.read_text(encoding="utf-8").splitlines():

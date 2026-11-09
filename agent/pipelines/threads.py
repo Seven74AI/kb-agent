@@ -27,6 +27,7 @@ from agent.detection import (
     _curl_netscape_cookie_config,
     _extract_json_array_after_key,
     _main_post_anchor_pos,
+    _resolve_threads_share_redirect,
     _safe_url_for_log,
     _threads_post_code_from_url,
     _unlink_curl_netscape_sidecar,
@@ -126,7 +127,7 @@ def _assert_threads_video_cdn_url_allowed(url: str) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> str:
+def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -> tuple[str, str]:
     """Fetch a Threads URL with cookies + Googlebot UA.
 
     Args:
@@ -136,7 +137,9 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
             /root/kb-agent/cookies (matching config.cookie_dir default).
 
     Returns:
-        Raw HTTP response body.
+        ``(raw HTTP response body, resolved fetch URL)`` — the resolved URL is the
+        canonical ``@handle/post/<id>`` after following a ``/share/`` hop, and is
+        the URL the body was actually fetched from (use it for post-code scoping).
 
     Raises:
         StepError: If curl fails.
@@ -164,6 +167,17 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
     conf_path: Path | None = None
     try:
         cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
+        try:
+            fetch_url = _resolve_threads_share_redirect(url, cookie_args, timeout=timeout)
+        except ValueError as exc:
+            # An off-origin /share/ redirect target is a hard fail, not a retryable
+            # pause — surface it as StepError so threads_detect fails cleanly
+            # instead of pausing on an unhandled ValueError.
+            raise StepError(
+                str(exc),
+                error_type=ErrorType.FAIL,
+                step_name="curl_threads",
+            ) from exc
         result = subprocess.run(
             [
                 "curl", "-s", "--max-time", str(timeout),
@@ -172,7 +186,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
                 "-H", "Accept: text/html,application/xhtml+xml",
                 "-H", "Accept-Language: en-US,en;q=0.9",
                 "-L", "--max-redirs", "0",
-                url,
+                fetch_url,
             ],
             capture_output=True, text=True, timeout=timeout + 10,
         )
@@ -184,7 +198,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
                 step_name="curl_threads",
             )
 
-        return result.stdout
+        return result.stdout, fetch_url
     finally:
         _unlink_curl_netscape_sidecar(conf_path)
 
@@ -316,7 +330,7 @@ def _fetch_parent_post(
         StepError: If parent fetch fails or caption cannot be extracted.
     """
     try:
-        html = _curl_threads(parent_url, timeout=20, cookie_dir=cookie_dir)
+        html, _ = _curl_threads(parent_url, timeout=20, cookie_dir=cookie_dir)
     except StepError as exc:
         detail = sanitize_visible_message(str(exc))
         logger.warning(
@@ -426,7 +440,10 @@ def step_threads_detect(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url, cookie_dir=config.cookie_dir)
+    # _curl_threads returns the URL the body was actually fetched from (the
+    # canonical post after a /share/ hop); scope subtype detection on THAT, not
+    # the share short code (absent from the canonical document).
+    html, fetch_url = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     # Check for login wall before doing deeper analysis
     if _is_login_wall(html):
@@ -437,7 +454,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
             details="Re-export cookies from Chrome to threads_cookies.txt",
         )
 
-    content_type = threads_content_subtype_from_html(html, url)
+    content_type = threads_content_subtype_from_html(html, fetch_url)
     has_video = content_type == "threads_video"
 
     enqueued_type = task.get("content_type")
@@ -514,7 +531,7 @@ def step_threads_extract_text(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url, cookie_dir=config.cookie_dir)
+    html, _ = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     # Check for login wall
     if _is_login_wall(html):
@@ -604,7 +621,9 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url, cookie_dir=config.cookie_dir)
+    # _curl_threads returns the URL the body was actually fetched from — scope
+    # video extraction on that, not the share code (absent from the document).
+    html, fetch_url = _curl_threads(url, cookie_dir=config.cookie_dir)
 
     if _is_login_wall(html):
         raise StepError(
@@ -615,7 +634,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
         )
 
     # Extract video URL from video_versions JSON
-    video_url = _extract_video_url(html, url)
+    video_url = _extract_video_url(html, fetch_url)
     if not video_url:
         raise StepError(
             "No video URL found in Threads post — may not contain video",
