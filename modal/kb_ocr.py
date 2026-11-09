@@ -40,7 +40,7 @@ MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 # Cap decoded pixels before VLM preprocess (OOM / pixel bombs).
 MAX_IMAGE_PIXELS = 4_194_304  # 2048 x 2048
-MAX_NEW_OCR_TOKENS = 768
+MAX_NEW_OCR_TOKENS = 2048
 
 
 def _sanitize_emit(message: object) -> str:
@@ -48,7 +48,7 @@ def _sanitize_emit(message: object) -> str:
     import sys
     from pathlib import Path
 
-    for root in (Path(__file__).resolve().parent.parent, Path("/root/kb-agent")):
+    for root in (Path("/root/kb-agent"), Path(__file__).resolve().parent.parent):
         if root.is_dir():
             root_s = str(root)
             if root_s not in sys.path:
