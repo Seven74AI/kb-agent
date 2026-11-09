@@ -438,7 +438,13 @@ def step_threads_detect(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url, cookie_dir=config.cookie_dir)
+    # Resolve a /share/ short link to its canonical URL before scoping — the
+    # share code is absent from the canonical document, so anchoring on it falls
+    # back to the first permalink and can disagree with submit-time routing
+    # (which scopes on the canonical post code). Passing the resolved URL into
+    # _curl_threads also avoids a double probe (it no-ops on a canonical URL).
+    fetch_url = _resolve_threads_share_redirect(url, [], timeout=30)
+    html = _curl_threads(fetch_url, cookie_dir=config.cookie_dir)
 
     # Check for login wall before doing deeper analysis
     if _is_login_wall(html):
@@ -449,7 +455,7 @@ def step_threads_detect(task: dict, config: Config) -> str:
             details="Re-export cookies from Chrome to threads_cookies.txt",
         )
 
-    content_type = threads_content_subtype_from_html(html, url)
+    content_type = threads_content_subtype_from_html(html, fetch_url)
     has_video = content_type == "threads_video"
 
     enqueued_type = task.get("content_type")
@@ -616,7 +622,10 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
     """
     url = task["source_url"]
 
-    html = _curl_threads(url, cookie_dir=config.cookie_dir)
+    # Resolve a /share/ short link before extracting — scoping on the share code
+    # would fall back to the first permalink and can grab a related post's clip.
+    fetch_url = _resolve_threads_share_redirect(url, [], timeout=30)
+    html = _curl_threads(fetch_url, cookie_dir=config.cookie_dir)
 
     if _is_login_wall(html):
         raise StepError(
@@ -627,7 +636,7 @@ def step_threads_extract_video(task: dict, config: Config) -> str:
         )
 
     # Extract video URL from video_versions JSON
-    video_url = _extract_video_url(html, url)
+    video_url = _extract_video_url(html, fetch_url)
     if not video_url:
         raise StepError(
             "No video URL found in Threads post — may not contain video",

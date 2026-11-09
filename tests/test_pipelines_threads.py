@@ -359,6 +359,31 @@ class TestDetection:
         assert data["has_video"] is True
 
     @patch("agent.pipelines.threads._curl_threads")
+    def test_detect_share_link_scopes_on_resolved_url(self, mock_curl, monkeypatch, config, task_dict):
+        # A /share/ link must be resolved to its canonical URL BEFORE subtype
+        # scoping — the share code is absent from the canonical document, so
+        # scoping on it falls back to the first permalink and can disagree with
+        # submit-time routing.
+        html = '{"caption":{"text":"hello"},"username":"testuser"}<div class="_ab6c">x</div>'
+        mock_curl.return_value = html
+        canonical = "https://www.threads.net/@cejimages/post/DfEAyOoCd_p"
+        monkeypatch.setattr(
+            "agent.pipelines.threads._resolve_threads_share_redirect",
+            lambda u, ca, timeout=0: canonical,
+        )
+        captured = {}
+
+        def fake_subtype(h, source_url):
+            captured["source_url"] = source_url
+            return "threads_text"
+
+        monkeypatch.setattr("agent.pipelines.threads.threads_content_subtype_from_html", fake_subtype)
+
+        task = {**task_dict, "source_url": "https://www.threads.com/share/BAYD9ij7_f"}
+        step_threads_detect(task, config)
+        assert captured["source_url"] == canonical
+
+    @patch("agent.pipelines.threads._curl_threads")
     def test_detect_login_wall_pauses(self, mock_curl, config, task_dict):
         html = '<meta property="og:description" content="Follow @user on Threads"/>'
         mock_curl.return_value = html
