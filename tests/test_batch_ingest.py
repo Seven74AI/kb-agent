@@ -845,6 +845,22 @@ class TestKbOcrSizeCap:
         assert "MAX_NEW_OCR_TOKENS" in text
         assert "w * h > MAX_IMAGE_PIXELS" in text
 
+    def test_max_new_ocr_tokens_locked_to_2048(self):
+        text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
+        assert "MAX_NEW_OCR_TOKENS = 2048" in text
+
+    def test_sanitize_emit_resolves_repo_root_by_agent_package(self):
+        for name in ("kb_ocr.py", "kb_transcribe.py"):
+            text = (WORKSPACE / "modal" / name).read_text(encoding="utf-8")
+            # /root/kb-agent must be probed FIRST and selected only when it
+            # actually contains the `agent` package — Path(__file__).parent.parent
+            # is /root (not the repo) when the app runs from /root/modal.
+            assert (
+                'for root in (Path("/root/kb-agent"), Path(__file__).resolve().parent.parent):'
+                in text
+            )
+            assert '(root / "agent").is_dir()' in text
+
     def test_read_images_returns_structured_errors_per_item(self):
         text = (WORKSPACE / "modal" / "kb_ocr.py").read_text(encoding="utf-8")
         start = text.index("def read_images")
