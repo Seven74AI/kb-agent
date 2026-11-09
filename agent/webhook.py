@@ -1,10 +1,15 @@
 """Flask webhook — POST /submit and GET /dashboard.
 
-Bearer token (`KB_API_TOKEN` / config `api_token`) required on mutating routes
-and GET /dashboard. Flask runs sync in main thread; the asyncio consumer runs
-in a background thread.
+Machine clients (MCP, curl) authenticate mutating routes with a bearer token
+(`KB_API_TOKEN` / config `api_token`). The browser dashboard and its forms
+authenticate with a verified Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`,
+RS256 signature + `iss`/`aud` checked against the team's JWKS); the mutating
+forms additionally require a signed CSRF token as anti-forgery. Flask runs sync
+in the main thread; the asyncio consumer runs in a background thread.
 """
 
+import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -12,8 +17,10 @@ import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
+import jwt
 import yaml
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from jwt import PyJWKClient
 
 from agent.config import REPO_ROOT, Config, load_config
 from agent.core import (
@@ -93,18 +100,101 @@ def extract_request_token(req) -> str | None:
     return None
 
 
+# Browser dashboard forms authenticate via Cloudflare Access (a verified JWT) +
+# a CSRF token, instead of the bearer header (a browser cannot attach one).
+# These are the dashboard's mutating forms.
+_FORM_ENDPOINTS = frozenset({
+    "resume",
+    "upload_cookies",
+    "remove_ingest_item",
+})
+
+# Signed CSRF token secret: stable for the life of the process. A token is
+# `value.signature` where signature = HMAC-SHA256(value, _CSRF_SECRET); it is
+# rendered into the dashboard page and validated on POST as ANTI-FORGERY only —
+# authentication is the Access JWT, not the CSRF token.
+_CSRF_SECRET = secrets.token_bytes(32)
+
+
+def _csrf_token() -> str:
+    value = secrets.token_hex(32)
+    sig = hmac.new(_CSRF_SECRET, value.encode(), hashlib.sha256).hexdigest()
+    return f"{value}.{sig}"
+
+
+def _csrf_valid(token: str | None) -> bool:
+    if not token or "." not in token:
+        return False
+    value, sig = token.rsplit(".", 1)
+    if not sig.isascii():
+        # secrets.compare_digest raises TypeError on non-ASCII str — reject, not 500.
+        return False
+    expected = hmac.new(_CSRF_SECRET, value.encode(), hashlib.sha256).hexdigest()
+    return secrets.compare_digest(sig, expected)
+
+
+_access_jwks_cache: dict[str, PyJWKClient] = {}
+
+
+def _access_jwks_client(team: str) -> PyJWKClient:
+    client = _access_jwks_cache.get(team)
+    if client is None:
+        client = PyJWKClient(f"https://{team}.cloudflareaccess.com/cdn-cgi/access/certs")
+        _access_jwks_cache[team] = client
+    return client
+
+
+def _verify_access_jwt(assertion: str | None) -> bool:
+    """Verify the Cloudflare Access JWT (``Cf-Access-Jwt-Assertion`` header).
+
+    Validates the signature against the team's public JWKS and checks ``iss`` /
+    ``aud``. Fail-closed: an unset ``cloudflare_access_aud`` or any verification
+    error returns False (the request is treated as unauthenticated).
+    """
+    if not assertion:
+        return False
+    aud = config.cloudflare_access_aud
+    if not aud:
+        return False
+    team = config.cloudflare_access_team
+    if not team:
+        return False
+    issuer = f"https://{team}.cloudflareaccess.com"
+    try:
+        signing_key = _access_jwks_client(team).get_signing_key_from_jwt(assertion)
+        jwt.decode(
+            assertion,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=aud,
+            issuer=issuer,
+        )
+        return True
+    except Exception:
+        return False
+
+
 @app.before_request
 def _require_api_token():
     endpoint = request.endpoint
     if endpoint not in _PROTECTED_ENDPOINTS:
         return None
     configured = resolve_api_token()
+    # Machine client: a valid bearer token passes.
+    provided = extract_request_token(request)
+    if provided and configured and secrets.compare_digest(provided, configured):
+        return None
+    # Browser client: a valid Access JWT identifies the caller (proves the
+    # request passed Cloudflare Access).
+    assertion = request.headers.get("Cf-Access-Jwt-Assertion")
+    if _verify_access_jwt(assertion):
+        if endpoint == "dashboard":
+            return None  # read-only page: JWT alone is enough
+        if endpoint in _FORM_ENDPOINTS and _csrf_valid(request.form.get("csrf_token")):
+            return None  # mutating forms also need the CSRF token (anti-forgery)
     if not configured:
         return jsonify({"error": _TOKEN_NOT_CONFIGURED_MSG}), 503
-    provided = extract_request_token(request)
-    if not provided or not secrets.compare_digest(provided, configured):
-        return jsonify({"error": "Unauthorized"}), 401
-    return None
+    return jsonify({"error": "Unauthorized"}), 401
 
 
 # ── DB Helpers ────────────────────────────────────────────────────────────────
@@ -409,6 +499,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span style="font-weight:600;">Quick Actions:</span>
         {% for reason, label in pause_reasons %}
         <form method="POST" action="/resume?reason={{ reason }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="btn btn-resume">Resume: {{ label }}</button>
         </form>
         {% endfor %}
@@ -418,6 +509,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="upload-section">
         <h3>Upload Cookies</h3>
         <form method="POST" action="/upload-cookies" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="cookie_type" style="padding:0.3rem;margin-right:0.5rem;">
                 {% for fname, desc in cookie_types.items() %}
                 <option value="{{ fname }}">{{ fname }} — {{ desc }}</option>
@@ -450,7 +542,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <td><span class="status-badge {{ q.status }}" title="{{ status_help.get(q.status, '') }}">{{ q.status }}</span></td>
                 <td style="font-size:0.75rem;max-width:220px;overflow:hidden;text-overflow:ellipsis;" title="{{ q.error or '' }}">{{ q.error or '—' }}</td>
                 <td style="font-size:0.8rem;">{{ q.created_at }}</td>
-                <td><form method="POST" action="/remove-ingest" onsubmit="return confirm('Remove this ingest item?');"><input type="hidden" name="ingest_id" value="{{ q.id }}"><button type="submit" class="btn" style="font-size:0.75rem;padding:0.15rem 0.4rem;">Remove</button></form></td>
+                <td><form method="POST" action="/remove-ingest" onsubmit="return confirm('Remove this ingest item?');"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="ingest_id" value="{{ q.id }}"><button type="submit" class="btn" style="font-size:0.75rem;padding:0.15rem 0.4rem;">Remove</button></form></td>
             </tr>
             {% endfor %}
         </tbody>
@@ -641,6 +733,7 @@ def dashboard():
         pause_reasons=PAUSE_REASON_LABELS,
         cookie_types=ALLOWED_COOKIE_FILES,
         status_help=STATUS_HELP,
+        csrf_token=_csrf_token(),
     )
 
 

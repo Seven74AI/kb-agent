@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -13,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.core import slugify
-from agent.webhook import app, _format_elapsed, _compute_staleness
+from agent.webhook import app, _format_elapsed, _compute_staleness, _csrf_token, _csrf_valid, _verify_access_jwt
 from agent.db import (
     AGENT_SCHEMA, LOGS_SCHEMA,
     create_task, init_db, resume_tasks_by_reason,
@@ -694,9 +695,174 @@ def test_post_submit_ok_with_x_api_key_header(monkeypatch, tmp_path):
     assert resp.status_code == 201
 
 
-def test_dashboard_requires_auth(client, monkeypatch, tmp_path):
+def test_dashboard_requires_access_jwt(monkeypatch, tmp_path):
+    # GET /dashboard sits behind Cloudflare Access: without a valid Access JWT
+    # (or bearer token) a bare client reaching Flask directly is rejected.
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
-    monkeypatch.delenv("KB_API_TOKEN", raising=False)
+    bare = app.test_client()
+    assert bare.get("/dashboard").status_code == 401
+
+
+def test_dashboard_accessible_with_access_jwt(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    bare = app.test_client()
+    assert bare.get("/dashboard").status_code == 200
+
+
+def test_dashboard_embeds_valid_csrf_token(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
     bare = app.test_client()
     resp = bare.get("/dashboard")
-    assert resp.status_code == 503
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert 'name="csrf_token"' in html
+    m = re.search(r'name="csrf_token" value="([^"]+)"', html)
+    assert m, "dashboard did not render a csrf_token hidden field"
+    assert _csrf_valid(m.group(1))
+
+
+def _allow_access(monkeypatch, ok=True):
+    monkeypatch.setattr("agent.webhook._verify_access_jwt", lambda a: ok)
+
+
+def test_form_post_without_csrf_or_bearer_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    bare = app.test_client()  # no Authorization header, no Access JWT
+    assert bare.post("/resume?reason=cookies").status_code == 401
+    assert bare.post("/upload-cookies").status_code == 401
+    assert bare.post("/remove-ingest", data={"ingest_id": "x"}).status_code == 401
+
+
+def test_form_post_requires_access_jwt(monkeypatch, tmp_path):
+    # A CSRF token alone is NOT auth — the browser must also present a valid
+    # Access JWT. With JWT verification failing, the form is rejected.
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch, ok=False)
+    bare = app.test_client()
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": _csrf_token()})
+    assert resp.status_code == 401
+
+
+def test_resume_form_accepts_access_jwt_and_csrf(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    # Create a paused task to resume.
+    agent_db = tmp_path / "data" / "agent.db"
+    agent_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = init_db(agent_db, AGENT_SCHEMA)
+    task_id = create_task(conn, "https://youtube.com/watch?v=xyz", "youtube",
+                          "test_slug", ["step1"], status="paused")
+    conn.execute("UPDATE tasks SET error = ? WHERE id = ?",
+                 ("cookies invalid", task_id))
+    conn.commit()
+    conn.close()
+
+    bare = app.test_client()
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": _csrf_token()})
+    assert resp.status_code == 200
+    assert json.loads(resp.data)["resumed"] == 1
+
+
+def test_csrf_token_with_bad_signature_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    bare = app.test_client()
+    forged = "0" * 64 + "." + "f" * 64
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": forged})
+    assert resp.status_code == 401
+
+
+def test_csrf_token_non_ascii_signature_returns_401_not_500(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    bare = app.test_client()
+    token = "0" * 64 + "." + "\u00e9\u00e9\u00e9"  # non-ASCII signature
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": token})
+    assert resp.status_code == 401  # not 500
+
+
+def test_submit_rejects_csrf_only(monkeypatch, tmp_path):
+    # /submit is machine-only: a valid CSRF token must NOT authorize it.
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    bare = app.test_client()
+    resp = bare.post(
+        "/submit",
+        data={"url": "https://example.com", "csrf_token": _csrf_token()},
+    )
+    assert resp.status_code == 401
+
+
+# ── Access JWT verification (real RS256 signature) ──────────────────────────
+
+def _access_jwt(monkeypatch, *, aud="test-aud-tag", team="floral-surf-abe5",
+                exp=None, wrong_key=False):
+    """Sign a real RS256 JWT, wire config + a fake JWKS client, return (token, key)."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import jwt as pyjwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    claims = {
+        "email": "user@example.com",
+        "aud": [aud],
+        "iss": f"https://{team}.cloudflareaccess.com",
+    }
+    if exp is not None:
+        claims["exp"] = exp
+    token = pyjwt.encode(claims, key, algorithm="RS256")
+
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_team", team)
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_aud", aud)
+
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pub = (other if wrong_key else key).public_key()
+
+    class _SigningKey:
+        key = pub
+
+    class _Client:
+        def get_signing_key_from_jwt(self, tok):
+            return _SigningKey()
+
+    monkeypatch.setattr("agent.webhook._access_jwks_client", lambda t: _Client())
+    return token
+
+
+def test_verify_access_jwt_accepts_valid_signed_token(monkeypatch):
+    token = _access_jwt(monkeypatch)
+    assert _verify_access_jwt(token) is True
+
+
+def test_verify_access_jwt_rejects_wrong_signature(monkeypatch):
+    token = _access_jwt(monkeypatch, wrong_key=True)
+    assert _verify_access_jwt(token) is False
+
+
+def test_verify_access_jwt_rejects_wrong_audience(monkeypatch):
+    token = _access_jwt(monkeypatch, aud="some-other-app")
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_aud", "test-aud-tag")
+    assert _verify_access_jwt(token) is False
+
+
+def test_verify_access_jwt_rejects_expired_token(monkeypatch):
+    import time
+    token = _access_jwt(monkeypatch, exp=time.time() - 3600)
+    assert _verify_access_jwt(token) is False
+
+
+def test_verify_access_jwt_fails_closed_when_unconfigured(monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import jwt as pyjwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = pyjwt.encode(
+        {"email": "x@example.com", "aud": ["test-aud-tag"],
+         "iss": "https://floral-surf-abe5.cloudflareaccess.com"},
+        key, algorithm="RS256",
+    )
+    # team + aud left at their empty defaults
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_team", "")
+    monkeypatch.setattr("agent.webhook.config.cloudflare_access_aud", "")
+    assert _verify_access_jwt(token) is False

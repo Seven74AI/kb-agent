@@ -67,10 +67,16 @@ Python consumer loop (async)
   (tasks + steps + config) and `logs.db` (step outputs + LLM archives). FTS5 for search.
 - **Config:** YAML for structured config (paths, concurrency, thresholds, retry),
   `.env` for secrets (API keys). Same pattern as Hermes.
-- **Auth:** Bearer `KB_API_TOKEN` (env or `config.yaml` `api_token`) on webhook
-  mutating routes, GET /dashboard, and MCP when configured; webhook and MCP bind
-  loopback by default (see `config.yaml`). Tailscale and Cloudflare Access are
-  optional outer network layers — not a substitute for the API token when exposed.
+- **Auth:** Bearer `KB_API_TOKEN` (env or `config.yaml` `api_token`) on the webhook
+  machine routes (`submit`) and MCP. Browser access (the dashboard + its forms)
+  is authenticated by a verified Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`,
+  RS256 signature + `iss`/`aud` checked against the team's JWKS): `GET /dashboard`
+  accepts the JWT alone, and the mutating forms (`resume`, `upload-cookies`,
+  `remove-ingest`) also require a signed CSRF token the dashboard embeds
+  (anti-forgery on top of the JWT). Access config: `CF_ACCESS_TEAM` (Zero Trust
+  team subdomain) + `CF_ACCESS_AUD` (the app's AUD tag) — both empty by default,
+  so the browser path fails closed until set. Webhook and MCP bind loopback by
+  default (see `config.yaml`).
 
 ### Ingestion — Full Detection & Pre-Flight Model
 
