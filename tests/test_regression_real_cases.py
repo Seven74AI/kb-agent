@@ -7,6 +7,7 @@ must never reintroduce.
 """
 
 import pytest
+import subprocess
 
 from agent.config import Config
 from agent import detection
@@ -65,6 +66,56 @@ def test_null_then_real_still_video(monkeypatch):
     # the original extraction bug: first occurrence null, real array later
     monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_THEN_REAL)
     assert detection.detect_content_subtype(THREADS_VIDEO[1], "threads") == "threads_video"
+
+
+# ── Share-link redirect resolution (real 2026-11-09 failure) ────────────────
+# threads.com/share/<code> 302-redirects to the canonical @handle/post URL. The
+# SSRF-safe fetch resolves that hop manually; without it the fetch hits
+# --max-redirs 0 and returns an empty body, misclassifying a video share link
+# as threads_text.
+
+SHARE_URL = "https://www.threads.com/share/BAYD9ij7_f"
+SHARE_CANONICAL = "https://www.threads.com/@cejimages/post/DfEAyOoCd_p"
+SHARE_VIDEO_BODY = '"video_versions":[{"type":101,"url":"https://scontent.cdninstagram.com/v.mp4","height":1080}]'
+
+
+def _share_redirect_run(monkeypatch, *, location=SHARE_CANONICAL, body=SHARE_VIDEO_BODY):
+    def fake_run(cmd, **kwargs):
+        if "-I" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"HTTP/2 302\nlocation: {location}\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+    monkeypatch.setattr(detection.subprocess, "run", fake_run)
+
+
+def test_share_link_resolves_to_canonical_url(monkeypatch):
+    _share_redirect_run(monkeypatch)
+    resolved = detection._resolve_threads_share_redirect(SHARE_URL, [], timeout=15)
+    assert resolved == SHARE_CANONICAL
+
+
+def test_share_link_video_detected_as_threads_video(monkeypatch):
+    _share_redirect_run(monkeypatch)
+    monkeypatch.setattr(detection, "_curl_netscape_cookie_config", lambda p: ([], None))
+    subtype, fetch_failed = detection._detect_threads_subtype(SHARE_URL)
+    assert subtype == "threads_video"
+    assert fetch_failed is False
+
+
+def test_share_link_redirect_rejects_off_origin_host(monkeypatch):
+    _share_redirect_run(monkeypatch, location="https://evil.example.com/steal")
+    with pytest.raises(ValueError, match="not allowlisted"):
+        detection._resolve_threads_share_redirect(SHARE_URL, [], timeout=15)
+
+
+def test_canonical_threads_url_not_probed(monkeypatch):
+    calls = []
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+    monkeypatch.setattr(detection.subprocess, "run", fake_run)
+    resolved = detection._resolve_threads_share_redirect(SHARE_CANONICAL, [], timeout=15)
+    assert resolved == SHARE_CANONICAL
+    assert calls == []
 
 
 def test_comment_id_routes_to_comment():

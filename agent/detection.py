@@ -10,7 +10,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from agent.config import REPO_ROOT, load_config
 from agent.constants import FLARESOLVERR_URL
@@ -252,6 +252,79 @@ def _unlink_curl_netscape_sidecar(conf_path: Path | None) -> None:
         pass
 
 
+# Threads share links (threads.com/share/<code>) 302-redirect to the canonical
+# @handle/post/<id> URL. Fetching must follow that ONE same-origin hop — but the
+# SSRF policy forbids blind ``-L`` redirect following (a redirect could chain
+# off-origin), so resolve the hop manually: HEAD probe (no follow), parse
+# ``Location``, allow-list the target host, then GET the resolved URL.
+_THREADS_PAGE_HOST_SUFFIXES = (".threads.com", ".threads.net")
+_THREADS_UA = (
+    "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 "
+    "(compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+)
+
+
+def _parse_location_header(headers: str) -> str | None:
+    for line in headers.splitlines():
+        if line.lower().startswith("location:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _assert_threads_page_url_allowed(url: str) -> None:
+    """Reject Threads page URLs outside threads.com / threads.net (SSRF)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Threads page URL must use http or https")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("Threads page URL must include a host")
+    allowed = host in (
+        "threads.com", "threads.net", "www.threads.com", "www.threads.net",
+    ) or any(host.endswith(suffix) for suffix in _THREADS_PAGE_HOST_SUFFIXES)
+    if not allowed:
+        raise ValueError(f"Threads page host not allowlisted: {host}")
+    _assert_fetch_url_allowed(url)
+
+
+def _resolve_threads_share_redirect(
+    url: str, cookie_args: list[str], timeout: int
+) -> str:
+    """Resolve a Threads ``/share/`` short link to its canonical @handle/post URL.
+
+    SSRF-safe: probes the redirect with ``curl -I --max-redirs 0`` (no follow),
+    parses ``Location``, and validates the target stays on threads.com/.net before
+    returning it. Non-share URLs (canonical @handle/post, which return 200 with no
+    ``Location``) and probe failures return the URL unchanged.
+    """
+    if "/share/" not in url:
+        return url
+    try:
+        probe = subprocess.run(
+            [
+                "curl", "-s", "-I", "--max-redirs", "0", "--max-time", str(timeout),
+                "-H", f"User-Agent: {_THREADS_UA}",
+                "-H", "Accept: text/html,application/xhtml+xml",
+                *cookie_args,
+                url,
+            ],
+            capture_output=True, text=True, timeout=timeout + 10,
+        )
+    except Exception as exc:
+        logger.warning("Threads share-link redirect probe failed for %s: %s",
+                       _safe_url_for_log(url), exc, exc_info=True)
+        return url
+    if probe.returncode != 0:
+        return url
+    location = _parse_location_header(probe.stdout or "")
+    if not location:
+        return url
+    resolved = urljoin(url, location)
+    _assert_threads_page_url_allowed(resolved)
+    return resolved
+
+
 def _safe_url_for_log(url: str) -> str:
     """Log-safe URL: path only (no query) with credential-shaped segments redacted."""
     from agent.redact import url_for_display
@@ -271,12 +344,13 @@ def _fetch_content(url: str, platform: str) -> str | None:
         try:
             cookie_path = _resolve_threads_cookie_path()
             cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
+            fetch_url = _resolve_threads_share_redirect(url, cookie_args, timeout=15)
             cmd = [
                 "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "15",
                 "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
                 "-H", "Accept: text/html,application/xhtml+xml",
                 *cookie_args,
-                url,
+                fetch_url,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             return result.stdout or None
@@ -418,18 +492,19 @@ def _detect_threads_subtype(url: str) -> tuple[str, bool]:
     try:
         cookie_path = _resolve_threads_cookie_path()
         cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
+        fetch_url = _resolve_threads_share_redirect(url, cookie_args, timeout=15)
         cmd = [
             "curl", "-s", "-L", "--max-redirs", "0", "--max-time", "15",
             "-H", "User-Agent: Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
             "-H", "Accept: text/html,application/xhtml+xml",
             *cookie_args,
-            url,
+            fetch_url,
         ]
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=20,
         )
-        subtype = threads_content_subtype_from_html(result.stdout, url)
+        subtype = threads_content_subtype_from_html(result.stdout, fetch_url)
         return subtype, False
     except subprocess.TimeoutExpired:
         logger.warning(

@@ -27,6 +27,7 @@ from agent.detection import (
     _curl_netscape_cookie_config,
     _extract_json_array_after_key,
     _main_post_anchor_pos,
+    _resolve_threads_share_redirect,
     _safe_url_for_log,
     _threads_post_code_from_url,
     _unlink_curl_netscape_sidecar,
@@ -164,6 +165,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
     conf_path: Path | None = None
     try:
         cookie_args, conf_path = _curl_netscape_cookie_config(cookie_path)
+        fetch_url = _resolve_threads_share_redirect(url, cookie_args, timeout=timeout)
         result = subprocess.run(
             [
                 "curl", "-s", "--max-time", str(timeout),
@@ -172,7 +174,7 @@ def _curl_threads(url: str, timeout: int = 30, cookie_dir: Path | None = None) -
                 "-H", "Accept: text/html,application/xhtml+xml",
                 "-H", "Accept-Language: en-US,en;q=0.9",
                 "-L", "--max-redirs", "0",
-                url,
+                fetch_url,
             ],
             capture_output=True, text=True, timeout=timeout + 10,
         )
