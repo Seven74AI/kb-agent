@@ -187,7 +187,7 @@ class TestHelpers:
         cookie_dir.mkdir()
         (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
         parent_html = '{"caption":{"text":"Parent take on the topic."}}<div class="_ab6c">x</div>'
-        mock_curl.return_value = parent_html
+        mock_curl.return_value = (parent_html, "https://www.threads.net/@testuser/post/ABC123")
         assert _fetch_parent_post(
             "https://www.threads.net/t/XYZ789",
             cookie_dir=cookie_dir,
@@ -216,7 +216,7 @@ class TestHelpers:
         cookie_dir = tmp_path / "cookies"
         cookie_dir.mkdir()
         (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
-        mock_curl.return_value = '<html><body>no caption json</body></html>'
+        mock_curl.return_value = ('<html><body>no caption json</body></html>', "https://www.threads.net/@testuser/post/ABC123")
         with pytest.raises(StepError) as exc:
             _fetch_parent_post(
                 "https://www.threads.net/t/XYZ789",
@@ -288,6 +288,21 @@ class TestThreadsSsrf:
             _curl_threads(METADATA_URL, cookie_dir=cookie_dir)
         mock_run.assert_not_called()
 
+    @patch("agent.pipelines.threads.subprocess.run")
+    def test_curl_threads_rejects_off_origin_redirect_target(self, mock_run, config, tmp_path):
+        # A /share/ redirect whose Location lands off-origin must fail the step
+        # (StepError, FAIL) — not escape as an unhandled ValueError and pause.
+        cookie_dir = tmp_path / "cookies"
+        cookie_dir.mkdir()
+        (cookie_dir / "threads_cookies.txt").write_text("# Netscape\n")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="HTTP/2 302\nlocation: https://evil.example.com/steal\n",
+            stderr="",
+        )
+        with pytest.raises(StepError, match="not allowlisted"):
+            _curl_threads("https://www.threads.com/share/BAYD9ij7_f", cookie_dir=cookie_dir)
+
     @patch("agent.pipelines.threads._curl_threads")
     @patch("subprocess.run")
     def test_extract_video_rejects_metadata_cdn_url(self, mock_run, mock_curl, config, task_dict):
@@ -296,7 +311,7 @@ class TestThreadsSsrf:
             '"height":1080}],"caption":{"text":"x"},"username":"x"}'
             '<div class="_ab6c">x</div>'
         )
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
         with pytest.raises(StepError, match="not allowlisted"):
             step_threads_extract_video(task_dict, config)
         mock_run.assert_not_called()
@@ -325,7 +340,7 @@ class TestDetection:
     @patch("agent.pipelines.threads._curl_threads")
     def test_detect_text_post(self, mock_curl, config, task_dict):
         html = '{"caption":{"text":"hello"},"username":"testuser"}<div class="_ab6c">x</div>'
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
 
         result = step_threads_detect(task_dict, config)
         data = json.loads(result)
@@ -335,7 +350,7 @@ class TestDetection:
     @patch("agent.pipelines.threads._curl_threads")
     def test_detect_video_post(self, mock_curl, config, task_dict):
         html = '{"video_versions":[{"url":"x","height":720}],"caption":{"text":"video!"}}<div class="_ab6c">x</div>'
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
         task_dict = {**task_dict, "content_type": "threads_video"}
 
         result = step_threads_detect(task_dict, config)
@@ -344,9 +359,29 @@ class TestDetection:
         assert data["has_video"] is True
 
     @patch("agent.pipelines.threads._curl_threads")
+    def test_detect_share_link_scopes_on_resolved_url(self, mock_curl, monkeypatch, config, task_dict):
+        # _curl_threads returns the URL it actually fetched (the canonical post
+        # after a /share/ hop); the step must scope subtype detection on THAT,
+        # not the share short code (which is absent from the document).
+        html = '{"caption":{"text":"hello"},"username":"testuser"}<div class="_ab6c">x</div>'
+        canonical = "https://www.threads.net/@cejimages/post/DfEAyOoCd_p"
+        mock_curl.return_value = (html, canonical)
+        captured = {}
+
+        def fake_subtype(h, source_url):
+            captured["source_url"] = source_url
+            return "threads_text"
+
+        monkeypatch.setattr("agent.pipelines.threads.threads_content_subtype_from_html", fake_subtype)
+
+        task = {**task_dict, "source_url": "https://www.threads.com/share/BAYD9ij7_f"}
+        step_threads_detect(task, config)
+        assert captured["source_url"] == canonical
+
+    @patch("agent.pipelines.threads._curl_threads")
     def test_detect_login_wall_pauses(self, mock_curl, config, task_dict):
         html = '<meta property="og:description" content="Follow @user on Threads"/>'
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
 
         with pytest.raises(StepError) as exc:
             step_threads_detect(task_dict, config)
@@ -367,7 +402,7 @@ class TestDetection:
                     error_type=ErrorType.RETRY,
                     step_name="curl_threads",
                 )
-            return reply_html
+            return (reply_html, url)
 
         mock_curl.side_effect = curl_side_effect
 
@@ -385,7 +420,7 @@ class TestDetection:
             '"code":"ABC123","video_versions":[{"url":"x","height":720}],'
             '"caption":{"text":"video!"}}<div class="_ab6c">x</div>'
         )
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
         assert task_dict["content_type"] == "threads_text"
 
         with pytest.raises(StepError) as exc:
@@ -397,12 +432,12 @@ class TestDetection:
     def test_submit_and_pipeline_share_threads_video_signal(self, monkeypatch):
         """Submit-time and in-pipeline classification use the same post-scoped helper."""
         url = "https://www.threads.com/@bourne_ti/post/Da3I_d0ls4E"
-        monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_THEN_REAL)
+        monkeypatch.setattr(detection, "_fetch_content", lambda u, p: (NULL_THEN_REAL, u))
         submit_subtype = detection.detect_content_subtype(url, "threads")
         pipeline_subtype = detection.threads_content_subtype_from_html(NULL_THEN_REAL, url)
         assert submit_subtype == pipeline_subtype == "threads_video"
 
-        monkeypatch.setattr(detection, "_fetch_content", lambda u, p: NULL_VIDEO_JSON)
+        monkeypatch.setattr(detection, "_fetch_content", lambda u, p: (NULL_VIDEO_JSON, u))
         submit_text = detection.detect_content_subtype(url, "threads")
         pipeline_text = detection.threads_content_subtype_from_html(NULL_VIDEO_JSON, url)
         assert submit_text == pipeline_text == "threads_text"
@@ -416,7 +451,7 @@ class TestTextExtraction:
     @patch("agent.pipelines.threads._curl_threads")
     def test_extract_text_basic(self, mock_curl, config, task_dict):
         html = r'{"caption":{"text":"Hello world from Threads!"},"permalink":"https://www.threads.com/\u0040testuser/post/ABC","is_reply":false}'
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
 
         result = step_threads_extract_text(task_dict, config)
         data = json.loads(Path(result).read_text())
@@ -428,7 +463,7 @@ class TestTextExtraction:
     @patch("agent.pipelines.threads._curl_threads")
     def test_extract_text_login_wall_pauses(self, mock_curl, config, task_dict):
         html = '<meta property="og:description" content="Follow @user on Threads"/>'
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
 
         with pytest.raises(StepError) as exc:
             step_threads_extract_text(task_dict, config)
@@ -448,8 +483,8 @@ class TestTextExtraction:
 
         def curl_side_effect(url, **kwargs):
             if "/t/XYZ789" in url:
-                return parent_html
-            return reply_html
+                return (parent_html, url)
+            return (reply_html, url)
 
         mock_curl.side_effect = curl_side_effect
 
@@ -474,7 +509,7 @@ class TestTextExtraction:
                     error_type=ErrorType.RETRY,
                     step_name="curl_threads",
                 )
-            return reply_html
+            return (reply_html, url)
 
         mock_curl.side_effect = curl_side_effect
 
@@ -498,7 +533,7 @@ class TestVideoExtraction:
             '"height":1080}],"caption":{"text":"x"},"username":"x"}'
             '<div class="_ab6c">x</div>'
         )
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
 
         # Simulate successful curl download — actually create the output file
         def fake_run(*args, **kwargs):
@@ -520,7 +555,7 @@ class TestVideoExtraction:
     @patch("agent.pipelines.threads._curl_threads")
     def test_extract_video_no_video_in_page(self, mock_curl, config, task_dict):
         html = '{"caption":{"text":"text only"},"username":"x"}<div class="_ab6c">x</div>'
-        mock_curl.return_value = html
+        mock_curl.return_value = (html, "https://www.threads.net/@testuser/post/ABC123")
 
         with pytest.raises(StepError) as exc:
             step_threads_extract_video(task_dict, config)

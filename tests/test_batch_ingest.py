@@ -1788,7 +1788,7 @@ class TestBatchPipelineIdKeyedDownloadArtifacts:
 
         monkeypatch.setattr(
             "agent.pipelines.threads._curl_threads",
-            lambda *_a, **_kw: video_html,
+            lambda *_a, **_kw: (video_html, "https://www.threads.net/@u/post/XYZ"),
         )
 
         def fake_run(cmd, **_kw):

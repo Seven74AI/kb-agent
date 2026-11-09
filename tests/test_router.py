@@ -88,19 +88,19 @@ def test_detect_content_subtype_threads_deterministic(monkeypatch):
     monkeypatch.setattr(detection, "route_jev", lambda url, content: "UNREACHABLE")
     monkeypatch.setattr(
         detection, "_fetch_content",
-        lambda url, p: '<html>"video_versions":[{"url":"x"}]</html>',
+        lambda url, p: ('<html>"video_versions":[{"url":"x"}]</html>', url),
     )
     assert detection.detect_content_subtype("https://threads.net/@x/post/1", "threads") == "threads_video"
     # null video_versions (no array) is NOT a video
     monkeypatch.setattr(
         detection, "_fetch_content",
-        lambda url, p: '<html>"video_versions":null</html>',
+        lambda url, p: ('<html>"video_versions":null</html>', url),
     )
     assert detection.detect_content_subtype("https://threads.net/@x/post/1", "threads") == "threads_text"
 
 
 def test_detect_content_subtype_jev_failure_falls_back(monkeypatch):
-    monkeypatch.setattr(detection, "_fetch_content", lambda url, p: None)
+    monkeypatch.setattr(detection, "_fetch_content", lambda url, p: (None, url))
 
     def boom(url, content):
         raise RuntimeError("down")
@@ -114,6 +114,6 @@ def test_detect_content_subtype_jev_failure_falls_back(monkeypatch):
 
 def test_detect_content_subtype_web_uses_jev(monkeypatch):
     # regex missed (web) → Jev can recover the real platform
-    monkeypatch.setattr(detection, "_fetch_content", lambda url, p: None)
+    monkeypatch.setattr(detection, "_fetch_content", lambda url, p: (None, url))
     monkeypatch.setattr(detection, "route_jev", lambda url, content: "instagram_reel")
     assert detection.detect_content_subtype("https://www.instagram.com/x/", "web") == "instagram_reel"

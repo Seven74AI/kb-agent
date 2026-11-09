@@ -165,7 +165,7 @@ def test_fetch_content_rejects_metadata_ip(platform, monkeypatch):
 
 def test_comment_id_on_non_instagram_does_not_route_to_comment(monkeypatch):
     url = "https://example.com/page?comment_id=123"
-    monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: None)
+    monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: (None, u))
     monkeypatch.setattr("agent.detection.route_jev", lambda u, c: "web")
     assert detect_content_subtype(url, "web") == "web"
 
@@ -305,7 +305,7 @@ def test_fetch_content_threads_logs_on_failure(monkeypatch, caplog):
 
     monkeypatch.setattr("agent.detection.subprocess.run", boom)
     caplog.set_level(logging.WARNING)
-    assert _fetch_content("https://threads.net/@u/post/1", "threads") is None
+    assert _fetch_content("https://threads.net/@u/post/1", "threads")[0] is None
     assert any("Threads content fetch failed" in rec.message for rec in caplog.records)
 
 
@@ -315,7 +315,7 @@ def test_fetch_content_substack_logs_on_failure(monkeypatch, caplog):
 
     monkeypatch.setattr("agent.detection.subprocess.run", boom)
     caplog.set_level(logging.WARNING)
-    assert _fetch_content("https://blog.substack.com/p/post", "substack") is None
+    assert _fetch_content("https://blog.substack.com/p/post", "substack")[0] is None
     assert any("Substack content fetch failed" in rec.message for rec in caplog.records)
 
 
@@ -325,7 +325,7 @@ def test_fetch_content_mega_logs_on_failure(monkeypatch, caplog):
 
     monkeypatch.setattr("agent.detection.subprocess.run", boom)
     caplog.set_level(logging.WARNING)
-    assert _fetch_content("https://mega.nz/file/abc#key", "mega") is None
+    assert _fetch_content("https://mega.nz/file/abc#key", "mega")[0] is None
     assert any("Mega content fetch failed" in rec.message for rec in caplog.records)
 
 
@@ -487,7 +487,7 @@ def test_detect_content_subtype_jev_failure_logs_warning(monkeypatch, caplog):
     def boom(url, content):
         raise RuntimeError("jev down")
 
-    monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: "<html/>")
+    monkeypatch.setattr("agent.detection._fetch_content", lambda u, p: ("<html/>", u))
     monkeypatch.setattr("agent.detection.route_jev", boom)
     monkeypatch.setattr(
         "agent.detection._detect_substack_subtype", lambda url: "substack_text",
