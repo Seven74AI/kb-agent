@@ -93,8 +93,11 @@ def test_share_link_resolves_to_canonical_url(monkeypatch):
     assert resolved == SHARE_CANONICAL
 
 
-def test_share_link_video_detected_as_threads_video(monkeypatch):
+def test_share_link_video_detected_as_threads_video(monkeypatch, tmp_path):
     _share_redirect_run(monkeypatch)
+    # Keep _resolve_threads_cookie_path off the real /root/kb-agent/cookies —
+    # on CI the runner is not root and os.stat there raises PermissionError.
+    monkeypatch.setattr(detection, "_resolve_threads_cookie_path", lambda: tmp_path / "threads_cookies.txt")
     monkeypatch.setattr(detection, "_curl_netscape_cookie_config", lambda p: ([], None))
     subtype, fetch_failed = detection._detect_threads_subtype(SHARE_URL)
     assert subtype == "threads_video"
