@@ -71,10 +71,12 @@ Python consumer loop (async)
   machine routes (`submit`) and MCP. `GET /dashboard` is NOT token-gated — it is
   protected by Cloudflare Access (email) at the `kba.sevend.io` hostname. The
   dashboard's own mutating forms (`resume`, `upload-cookies`, `remove-ingest`)
-  accept EITHER the bearer token (curl/MCP) OR a signed CSRF token that the
-  dashboard page embeds (a browser cannot send a bearer header, and the CSRF
-  token blocks cross-site forgery). Webhook and MCP bind loopback by default (see
-  `config.yaml`).
+  accept EITHER the bearer token (curl/MCP) OR a verified Cloudflare Access JWT
+  (`Cf-Access-Jwt-Assertion`, signature + `iss`/`aud` checked against the team's
+  JWKS) PLUS a signed CSRF token the dashboard page embeds — the JWT is the
+  browser's identity, the CSRF token blocks cross-site forgery. Access config:
+  `CF_ACCESS_TEAM` (default `floral-surf-abe5`) + `CF_ACCESS_AUD` (the app's AUD
+  tag). Webhook and MCP bind loopback by default (see `config.yaml`).
 
 ### Ingestion — Full Detection & Pre-Flight Model
 

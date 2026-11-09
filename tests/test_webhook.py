@@ -718,16 +718,31 @@ def test_dashboard_embeds_valid_csrf_token(monkeypatch, tmp_path):
     assert _csrf_valid(m.group(1))
 
 
+def _allow_access(monkeypatch, ok=True):
+    monkeypatch.setattr("agent.webhook._verify_access_jwt", lambda a: ok)
+
+
 def test_form_post_without_csrf_or_bearer_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
-    bare = app.test_client()  # no Authorization header
+    bare = app.test_client()  # no Authorization header, no Access JWT
     assert bare.post("/resume?reason=cookies").status_code == 401
     assert bare.post("/upload-cookies").status_code == 401
     assert bare.post("/remove-ingest", data={"ingest_id": "x"}).status_code == 401
 
 
-def test_resume_form_accepts_csrf_token(monkeypatch, tmp_path):
+def test_form_post_requires_access_jwt(monkeypatch, tmp_path):
+    # A CSRF token alone is NOT auth — the browser must also present a valid
+    # Access JWT. With JWT verification failing, the form is rejected.
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch, ok=False)
+    bare = app.test_client()
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": _csrf_token()})
+    assert resp.status_code == 401
+
+
+def test_resume_form_accepts_access_jwt_and_csrf(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
     # Create a paused task to resume.
     agent_db = tmp_path / "data" / "agent.db"
     agent_db.parent.mkdir(parents=True, exist_ok=True)
@@ -747,15 +762,26 @@ def test_resume_form_accepts_csrf_token(monkeypatch, tmp_path):
 
 def test_csrf_token_with_bad_signature_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
     bare = app.test_client()
     forged = "0" * 64 + "." + "f" * 64
     resp = bare.post("/resume?reason=cookies", data={"csrf_token": forged})
     assert resp.status_code == 401
 
 
+def test_csrf_token_non_ascii_signature_returns_401_not_500(monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
+    bare = app.test_client()
+    token = "0" * 64 + "." + "\u00e9\u00e9\u00e9"  # non-ASCII signature
+    resp = bare.post("/resume?reason=cookies", data={"csrf_token": token})
+    assert resp.status_code == 401  # not 500
+
+
 def test_submit_rejects_csrf_only(monkeypatch, tmp_path):
     # /submit is machine-only: a valid CSRF token must NOT authorize it.
     monkeypatch.setattr("agent.webhook.config.kb_agent_dir", tmp_path)
+    _allow_access(monkeypatch)
     bare = app.test_client()
     resp = bare.post(
         "/submit",

@@ -16,8 +16,10 @@ import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
+import jwt
 import yaml
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from jwt import PyJWKClient
 
 from agent.config import REPO_ROOT, Config, load_config
 from agent.core import (
@@ -96,8 +98,9 @@ def extract_request_token(req) -> str | None:
     return None
 
 
-# Browser dashboard forms authenticate via a CSRF token instead of the bearer
-# header (a browser cannot attach one). These are the dashboard's mutating forms.
+# Browser dashboard forms authenticate via Cloudflare Access (a verified JWT) +
+# a CSRF token, instead of the bearer header (a browser cannot attach one).
+# These are the dashboard's mutating forms.
 _FORM_ENDPOINTS = frozenset({
     "resume",
     "upload_cookies",
@@ -106,8 +109,8 @@ _FORM_ENDPOINTS = frozenset({
 
 # Signed CSRF token secret: stable for the life of the process. A token is
 # `value.signature` where signature = HMAC-SHA256(value, _CSRF_SECRET); it is
-# only ever rendered into the dashboard page (behind Cloudflare Access), so a
-# cross-origin page cannot read it, and we validate the signature on POST.
+# rendered into the dashboard page and validated on POST as ANTI-FORGERY only —
+# authentication is the Access JWT, not the CSRF token.
 _CSRF_SECRET = secrets.token_bytes(32)
 
 
@@ -121,8 +124,50 @@ def _csrf_valid(token: str | None) -> bool:
     if not token or "." not in token:
         return False
     value, sig = token.rsplit(".", 1)
+    if not sig.isascii():
+        # secrets.compare_digest raises TypeError on non-ASCII str — reject, not 500.
+        return False
     expected = hmac.new(_CSRF_SECRET, value.encode(), hashlib.sha256).hexdigest()
     return secrets.compare_digest(sig, expected)
+
+
+_access_jwks_cache: dict[str, PyJWKClient] = {}
+
+
+def _access_jwks_client(team: str) -> PyJWKClient:
+    client = _access_jwks_cache.get(team)
+    if client is None:
+        client = PyJWKClient(f"https://{team}.cloudflareaccess.com/cdn-cgi/access/certs")
+        _access_jwks_cache[team] = client
+    return client
+
+
+def _verify_access_jwt(assertion: str | None) -> bool:
+    """Verify the Cloudflare Access JWT (``Cf-Access-Jwt-Assertion`` header).
+
+    Validates the signature against the team's public JWKS and checks ``iss`` /
+    ``aud``. Fail-closed: an unset ``cloudflare_access_aud`` or any verification
+    error returns False (the request is treated as unauthenticated).
+    """
+    if not assertion:
+        return False
+    aud = config.cloudflare_access_aud
+    if not aud:
+        return False
+    team = config.cloudflare_access_team
+    issuer = f"https://{team}.cloudflareaccess.com"
+    try:
+        signing_key = _access_jwks_client(team).get_signing_key_from_jwt(assertion)
+        jwt.decode(
+            assertion,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=aud,
+            issuer=issuer,
+        )
+        return True
+    except Exception:
+        return False
 
 
 @app.before_request
@@ -135,9 +180,11 @@ def _require_api_token():
     provided = extract_request_token(request)
     if provided and configured and secrets.compare_digest(provided, configured):
         return None
-    # Browser form: a valid CSRF token (issued by the dashboard behind Access).
-    if endpoint in _FORM_ENDPOINTS and _csrf_valid(request.form.get("csrf_token")):
-        return None
+    # Browser form: a valid Access JWT (identity) AND CSRF token (anti-forgery).
+    if endpoint in _FORM_ENDPOINTS:
+        assertion = request.headers.get("Cf-Access-Jwt-Assertion")
+        if _verify_access_jwt(assertion) and _csrf_valid(request.form.get("csrf_token")):
+            return None
     if not configured:
         return jsonify({"error": _TOKEN_NOT_CONFIGURED_MSG}), 503
     return jsonify({"error": "Unauthorized"}), 401

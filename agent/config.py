@@ -76,6 +76,10 @@ class Config:
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 5000
 
+    # ── Cloudflare Access (browser auth for the dashboard + its forms) ──
+    cloudflare_access_team: str = "floral-surf-abe5"
+    cloudflare_access_aud: str = ""
+
     # ── MCP (stateless streamable HTTP) ──
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8002
@@ -220,6 +224,12 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
         # Webhook
         webhook_host=str(raw.get("webhook_host", "127.0.0.1")),
         webhook_port=int(_env_or_default(raw.get("webhook_port"), "KB_WEBHOOK_PORT", 5000)),
+        cloudflare_access_team=str(
+            _env_or_default(raw.get("cloudflare_access_team"), "CF_ACCESS_TEAM", "floral-surf-abe5")
+        ),
+        cloudflare_access_aud=str(
+            _env_or_default(raw.get("cloudflare_access_aud"), "CF_ACCESS_AUD", "")
+        ),
         mcp_host=str(raw.get("mcp_host", "127.0.0.1")),
         mcp_port=int(_env_or_default(raw.get("mcp_port"), "KB_MCP_PORT", 8002)),
         mcp_path=str(raw.get("mcp_path", "/mcp")),
