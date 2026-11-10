@@ -263,9 +263,48 @@ def test_discover_substack_embedded_transcript_by_ingest_id(
     monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
     plan = repair_mod.discover(repair_config)
 
+    assert plan.redeploy == []
+    assert len(plan.manual_substack) == 1
+    assert plan.manual_substack[0].note_path == note_path
+    assert "manual dispatch" in plan.manual_substack[0].reason
+
+
+def test_discover_youtube_truncated_source_url_uses_video_key_slug(
+    repair_mod, repair_config, monkeypatch
+):
+    video_slug = "www.youtube.com_watch_v_dQw4w9WgXcQ"
+    truncated_url_slug = "www.youtube.com_watch"
+    kb = repair_config.vault_path / "Knowledge base" / "videos"
+    kb.mkdir(parents=True)
+    note_path = kb / "dQw4w9WgXcQ.md"
+    note_path.write_text(
+        _note(
+            slug="dQw4w9WgXcQ",
+            source_url="https://www.youtube.com/watch",
+            video_key=f"videos/{video_slug}.mp4",
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
+            if cmd[4].endswith("/transcripts/"):
+                return MagicMock(
+                    returncode=0,
+                    stdout=_mc_bare_json_lines(
+                        [f"{truncated_url_slug}.json", f"{video_slug}.json"]
+                    ),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stderr="unexpected", stdout="")
+
+    monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
+    plan = repair_mod.discover(repair_config)
+
     assert len(plan.redeploy) == 1
-    assert plan.redeploy[0].storage_slug == ingest_id
-    assert plan.redeploy[0].content_type == "substack_video_synthesize"
+    assert plan.redeploy[0].storage_slug == video_slug
+    assert plan.redeploy[0].storage_slug != truncated_url_slug
 
 
 def test_discover_redeploy_when_transcript_in_canonical_prefix(

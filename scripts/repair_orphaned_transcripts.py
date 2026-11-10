@@ -17,11 +17,17 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
 from agent.config import Config, load_config  # noqa: E402
-from agent.core.slugify import batch_standalone_video_storage_slug, slugify, slug_path  # noqa: E402
+from agent.core.slugify import (  # noqa: E402
+    _youtube_video_id,
+    batch_standalone_video_storage_slug,
+    slugify,
+    slug_path,
+)
 from agent.core.submit import dispatch_synthesize  # noqa: E402
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
@@ -94,16 +100,112 @@ class MissingTranscriptItem:
 
 
 @dataclass
+class ManualSubstackItem:
+    note_path: Path
+    source_url: str
+    reason: str = "embedded vs standalone substack needs manual dispatch decision"
+
+
+@dataclass
 class RepairPlan:
     redeploy: list[RedeployItem] = field(default_factory=list)
     migrate: list[MigrateItem] = field(default_factory=list)
     missing_transcript: list[MissingTranscriptItem] = field(default_factory=list)
     skipped_parent_reconcile: list[RedeployItem] = field(default_factory=list)
+    manual_substack: list[ManualSubstackItem] = field(default_factory=list)
 
 
 def slugify_for_storage(url: str, base_content_type: str) -> str:
     """Task slug before ``_resolve_slug`` (filesystem-safe path segment)."""
     return slugify(url, content_type=base_content_type)
+
+
+def _is_youtube_family_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host.endswith("youtube.com") or host == "youtu.be"
+
+
+def _source_url_has_youtube_video_id(url: str) -> bool:
+    """True when the URL still carries a YouTube video id (vault may strip ``?v=``)."""
+    if not url:
+        return False
+    if _youtube_video_id(url):
+        return True
+    path = urlparse(url).path or ""
+    m = re.search(r"/watch/([A-Za-z0-9_-]{11})(?:/|$)", path, re.IGNORECASE)
+    return bool(m)
+
+
+def _url_storage_slug_for_repair(
+    source_url: str, plan_params: tuple[str, str, str] | None
+) -> str | None:
+    if not plan_params:
+        return None
+    _, base, storage_slug = plan_params
+    if base == "youtube" and _is_youtube_family_url(source_url):
+        if not _source_url_has_youtube_video_id(source_url):
+            return None
+    return storage_slug
+
+
+def _substack_post_url(url: str) -> bool:
+    return "/p/" in (urlparse(url).path or "")
+
+
+def _note_has_material_article_body(body: str) -> bool:
+    """Heuristic: parent Substack articles carry substantial prose, not video-only stubs."""
+    text = body.strip()
+    if not text:
+        return False
+    lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        lines.append(s)
+    prose = "\n".join(lines).strip()
+    return len(prose) > 120
+
+
+def _is_standalone_substack_video_note(
+    *,
+    note_path: Path,
+    video_key: str | None,
+    body: str,
+    source_url: str,
+) -> bool:
+    if not video_key or not video_key.replace("\\", "/").startswith("videos/"):
+        return False
+    parsed = urlparse(source_url)
+    if _substack_post_url(source_url) and parsed.fragment:
+        return False
+    if "articles" in note_path.parts:
+        return False
+    if _note_has_material_article_body(body):
+        return False
+    return True
+
+
+def _substack_video_needs_manual_review(
+    *,
+    note_path: Path,
+    source_url: str,
+    video_key: str | None,
+    body: str,
+    base: str,
+    storage_slug: str,
+    video_stem: str | None,
+) -> bool:
+    if base != "substack_video":
+        return False
+    if video_stem and storage_slug == video_stem:
+        return not _is_standalone_substack_video_note(
+            note_path=note_path,
+            video_key=video_key,
+            body=body,
+            source_url=source_url,
+        )
+    return False
 
 
 def _local_video_base_from_platform(platform: str) -> str | None:
@@ -495,7 +597,7 @@ def discover(config: Config) -> RepairPlan:
             if source_url
             else None
         )
-        url_storage_slug = plan_params[2] if plan_params else None
+        url_storage_slug = _url_storage_slug_for_repair(source_url, plan_params)
 
         extra_slugs: list[str] = []
         if plan_params and plan_params[1] == "substack_video" and source_url:
@@ -538,7 +640,21 @@ def discover(config: Config) -> RepairPlan:
             )
             continue
 
-        synthesize_ct, _, _ = plan_params
+        synthesize_ct, base_ct, _ = plan_params
+
+        if _substack_video_needs_manual_review(
+            note_path=note_path,
+            source_url=source_url,
+            video_key=video_key,
+            body=body,
+            base=base_ct,
+            storage_slug=storage_slug,
+            video_stem=video_stem,
+        ):
+            plan.manual_substack.append(
+                ManualSubstackItem(note_path=note_path, source_url=source_url)
+            )
+            continue
 
         dedupe_key = (source_url, storage_slug)
         if dedupe_key in seen_redeploy:
@@ -691,7 +807,8 @@ def main(argv: list[str] | None = None) -> int:
             print("Dry-run (pass --apply to mutate storage and dispatch).")
         print(
             f"Plan: redeploy={len(plan.redeploy)} migrate={len(plan.migrate)} "
-            f"missing_transcript={len(plan.missing_transcript)}"
+            f"missing_transcript={len(plan.missing_transcript)} "
+            f"manual_substack={len(plan.manual_substack)}"
         )
 
         conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
@@ -706,6 +823,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             for item in plan.skipped_parent_reconcile:
                 print(f"  - slug={item.storage_slug} url={item.source_url!r}")
+
+        if plan.manual_substack:
+            print(f"Manual Substack review: {len(plan.manual_substack)}")
+            for item in plan.manual_substack:
+                print(
+                    f"  - note={item.note_path} url={item.source_url!r} reason={item.reason!r}"
+                )
 
         if plan.missing_transcript:
             print()
