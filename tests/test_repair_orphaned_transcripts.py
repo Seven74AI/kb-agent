@@ -111,6 +111,22 @@ def test_resolve_video_synthesize_plan_mega_video_returns_none(repair_mod):
     assert repair_mod.resolve_video_synthesize_plan("https://mega.nz/file/abc#key") is None
 
 
+def test_resolve_video_synthesize_plan_swallows_fetch_failure(repair_mod, monkeypatch):
+    """An unresolvable URL (e.g. a malformed `mega.nz (title)` ref) returns None, not a crash."""
+    monkeypatch.setattr(
+        repair_mod,
+        "detect_content_subtype",
+        lambda url, platform: (_ for _ in ()).throw(
+            ValueError("fetch URL host could not be resolved: mega.nz")
+        ),
+    )
+    monkeypatch.setattr(repair_mod, "_local_video_base_from_platform", lambda platform: None)
+    assert (
+        repair_mod.resolve_video_synthesize_plan("https://mega.nz (fichier local — Ep.02)")
+        is None
+    )
+
+
 def test_discover_redeploy_and_migrate_from_reels(
     repair_mod, repair_config, monkeypatch
 ):
