@@ -496,6 +496,49 @@ def test_apply_active_synthesize_guard_does_not_fail_existing_tasks(
     agent_conn.close()
 
 
+def test_apply_dispatches_when_synthesize_task_is_paused(
+    repair_mod, repair_config, agent_conn, monkeypatch
+):
+    from agent.db import create_task
+
+    slug = "orphan_paused_synth"
+    url = "https://www.youtube.com/watch?v=pausedorphan1"
+    synth_id = create_task(
+        agent_conn,
+        url,
+        "youtube_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="paused",
+    )
+    agent_conn.commit()
+
+    dispatch_calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"status": "pending", "task_id": synth_id, "redispatched": True}
+
+    monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
+
+    plan = repair_mod.RepairPlan(
+        redeploy=[
+            repair_mod.RedeployItem(
+                note_path=repair_config.vault_path / "Knowledge base" / "x.md",
+                source_url=url,
+                content_type="youtube_synthesize",
+                storage_slug=slug,
+            )
+        ],
+    )
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0][1]["slug"] == slug
+
+    agent_conn.close()
+
+
 def test_apply_skips_dispatch_when_done_synth_parent_siblings_no_deferral(
     repair_mod, repair_config, agent_conn, monkeypatch
 ):
@@ -526,6 +569,75 @@ def test_apply_skips_dispatch_when_done_synth_parent_siblings_no_deferral(
                 slug,
                 "image",
             ),
+        )
+    agent_conn.commit()
+
+    dispatch_calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"status": "pending", "task_id": "new"}
+
+    monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
+
+    plan = repair_mod.RepairPlan(
+        redeploy=[
+            repair_mod.RedeployItem(
+                note_path=repair_config.vault_path / "Knowledge base" / "x.md",
+                source_url=url,
+                content_type="substack_video_synthesize",
+                storage_slug=slug,
+            )
+        ],
+    )
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+
+    row = agent_conn.execute("SELECT status FROM tasks WHERE id=?", (synth_id,)).fetchone()
+    assert row[0] == "done"
+    assert dispatch_calls == []
+    assert len(plan.skipped_parent_reconcile) == 1
+    assert plan.skipped_parent_reconcile[0].storage_slug == slug
+
+    agent_conn.close()
+
+
+def test_apply_skips_dispatch_when_done_synth_parent_siblings_stale_deferral(
+    repair_mod, repair_config, agent_conn, monkeypatch
+):
+    from agent.db import create_task, ensure_parent_media_deferral
+
+    slug = "orphan_done_parent_stale_def"
+    url = "https://blog.substack.com/p/orphan-done-stale"
+    synth_id = create_task(
+        agent_conn,
+        url,
+        "substack_video_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="done",
+    )
+    with agent_conn:
+        agent_conn.execute(
+            """
+            INSERT INTO ingest_queue (id, url, content_type, slug, status, parent_slug, media_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                "https://example.com/i.png",
+                "substack_image",
+                "i1",
+                "dispatched",
+                slug,
+                "image",
+            ),
+        )
+        ensure_parent_media_deferral(
+            agent_conn,
+            slug,
+            url,
+            "substack_text",
+            expected_total=1,
         )
     agent_conn.commit()
 

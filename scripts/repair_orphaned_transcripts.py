@@ -26,7 +26,6 @@ from agent.core.submit import dispatch_synthesize  # noqa: E402
 from agent.db import (  # noqa: E402
     AGENT_SCHEMA,
     _parent_sibling_media_count,
-    get_parent_media_deferral,
     init_db,
     normalize_tags,
 )
@@ -354,18 +353,15 @@ def _has_active_synthesize_task(conn, slug: str) -> bool:
     """Read-only: whether a synthesize task is already queued for ``slug``."""
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        "AND status IN ('pending', 'in_progress', 'paused') LIMIT 1",
+        "AND status IN ('pending', 'in_progress') LIMIT 1",
         (slug,),
     ).fetchone()
     return row is not None
 
 
 def _needs_parent_reconcile_skip(conn, slug: str) -> bool:
-    """Pure-read: dispatch would supersede orphan deferral (siblings, no deferral row)."""
-    return (
-        get_parent_media_deferral(conn, slug) is None
-        and _parent_sibling_media_count(conn, slug) > 0
-    )
+    """Pure-read: parent slugs with ingest children use the deferral flow, not this repair."""
+    return _parent_sibling_media_count(conn, slug) > 0
 
 
 def discover(config: Config) -> RepairPlan:
@@ -510,7 +506,7 @@ def apply(plan: RepairPlan, config: Config, conn, *, dry_run: bool = True) -> No
         if _needs_parent_reconcile_skip(conn, item.storage_slug):
             print(
                 f"[skip] slug={item.storage_slug} is a parent with ingest siblings "
-                "and no deferral — needs manual reconciliation"
+                "— needs manual reconciliation"
             )
             plan.skipped_parent_reconcile.append(item)
             continue
