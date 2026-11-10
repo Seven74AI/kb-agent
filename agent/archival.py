@@ -81,18 +81,22 @@ def write_source_files_block(note_path: Path, uploaded: list[str], config) -> No
         }.get(suffix, "raw")
         lines.append(f"  {kind}: {u}")
     block = "\n".join(lines)
+    has_source_files = re.search(r"^source_files:", content, re.M) is not None
     new = re.sub(
         r"source_files:.*?(?=\n---|\n[a-zA-Z_]+:|\Z)",
         block, content, count=1, flags=re.DOTALL,
     )
-    if new != content:
-        write_vault_note(note_path, new)
+    if has_source_files:
+        if new != content:
+            write_vault_note(note_path, new)
         return
 
     # No source_files: line — insert after source_url: (or the opening fence).
-    new = re.sub(r"(^[ \t]*source_url:.*\n)", r"\1" + block + "\n", content, count=1)
+    new = re.sub(
+        r"(^[ \t]*source_url:.*\n)", r"\1" + block + "\n", content, count=1, flags=re.M,
+    )
     if new == content:
-        new = re.sub(r"(^---\s*\n)", r"\1" + block + "\n", content, count=1)
+        new = re.sub(r"(^---\s*\n)", r"\1" + block + "\n", content, count=1, flags=re.M)
     if new != content:
         write_vault_note(note_path, new)
 

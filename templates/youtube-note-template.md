@@ -3,9 +3,9 @@ date: YYYY-MM-DD
 source: "<channel>, <publication date>"  # MUST be quoted — may contain `:`
 source_url: https://youtube.com/watch?v=VIDEO_ID
 source_files:
-  video: http://minio.example.com/knowledge-base/videos/<slug>.webm
-  audio: http://minio.example.com/knowledge-base/videos/<slug>.mp3
-  transcript: http://minio.example.com/knowledge-base/videos/<slug>.json
+  video: videos/<slug>.mp4
+  audio: videos/<slug>.mp3
+  transcript: transcripts/<slug>.json
 confidence: plausible
 tags: [tag1, tag2, tag3]
 ---

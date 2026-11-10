@@ -679,6 +679,18 @@ def _process_embedded_videos(video_items: list[dict], config, conn, run_id: int)
                     conn, q["id"], "failed", error="parent raw markdown missing",
                 )
                 continue
+            try:
+                ensure_merged_transcript_file_redacted(merged)
+                upload_object(
+                    merged,
+                    f"{config.storage_bucket}/transcripts/{q['id']}.json",
+                    config,
+                )
+            except Exception as exc:  # noqa: BLE001
+                update_ingest_status(
+                    conn, q["id"], "failed", error=f"transcript upload failed: {exc}",
+                )
+                continue
             update_ingest_status(conn, q["id"], "dispatched")
             _maybe_dispatch_parent_synthesize(conn, config, q["parent_slug"])
 

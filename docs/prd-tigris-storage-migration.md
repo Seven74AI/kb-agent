@@ -21,7 +21,7 @@ Migrate the `knowledge-base` MinIO bucket to a **private Tigris** bucket (S3-com
 ## Implementation Decisions
 
 - **Vendor: Tigris** over Cloudflare R2 — $0.004/GB vs $0.015/GB, zero egress on both, globally-distributed, and already in use by music-library (harmonization).
-- **Bucket: private, single bucket** `kb-knowledge-base` (Tigris), same prefix layout (`videos/`, `reels/`, `transcripts/`, `audio/`, `books/`, `articles/`, `threads/`, `instagram/`, `epubs/`, `pdfs/`).
+- **Bucket: private, single bucket** `kb-knowledge-base` (Tigris), same prefix layout (`videos/`, `transcripts/`, `books/`, `articles/`, `threads/`, `instagram/`, `epubs/`, `pdfs/`). The legacy `reels/` prefix remains for read-backward-compat only (pre-migration objects); new writes use `videos/` and `transcripts/`.
 - **Access: presigned URLs**, not public-read — re-hosted conference/YouTube content must not be publicly listable. The reader generates presigned GET URLs via the AWS SDK (boto3), `region=auto`, `endpoint=fly.storage.tigris.dev`, `force_path_style=False` (virtual-hosted).
 - **Presigned TTL: 24h for video, 1h for transcripts.** music-library uses 1h for short audio tracks; KB videos are 30min–2h talks, so 1h would expire mid-playback and 403 range requests. Transcripts are single small fetches, 1h is fine.
 - **Notes store keys, not URLs.** `write_source_files_block` writes `videos/<name>.mp4` / `transcripts/<name>.json` (no `MINIO_TAILSCALE_BASE` prefix). The reader resolves keys → presigned URLs at render time.

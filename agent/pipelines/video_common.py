@@ -751,6 +751,32 @@ def upload_note_archive(slug: str, config: Config, note_path: Path, folder: str)
 
 # ── Synthesize-only (batch) path ─────────────────────────────────────────────
 
+def _synthesize_note_path(task: dict, config: Config) -> Path:
+    slug = task.get("slug", task["id"][:8])
+    ct = (task.get("content_type") or "").lower()
+    if ct == "bunny_stream_synthesize":
+        return config.vault_path / "Knowledge base" / f"{slug}.md"
+    return config.vault_path / "Knowledge base" / "videos" / f"{slug}.md"
+
+
+def _synthesize_archived_keys(task: dict) -> list[str]:
+    storage_slug = _resolve_slug(task)
+    return [
+        f"videos/{storage_slug}.mp4",
+        f"transcripts/{storage_slug}.json",
+    ]
+
+
+def step_rewrite_synthesize_source_files(task: dict, config: Config) -> str:
+    """Rewrite note ``source_files`` from known storage keys (synthesize-only pipelines)."""
+    from agent.archival import write_source_files_block
+
+    keys = _synthesize_archived_keys(task)
+    note_path = _synthesize_note_path(task, config)
+    write_source_files_block(note_path, keys, config)
+    return f"source_files: {', '.join(keys)}"
+
+
 def _duration_from_merged(merged: dict) -> float:
     """Infer media duration (seconds) from a merged transcript JSON payload."""
     duration = merged.get("duration")
@@ -789,15 +815,20 @@ def step_fetch_transcript(task: dict, config: Config) -> str:
     merged_path = Path(config.temp_dir) / f"{stem}_merged.json"
     merged_path.parent.mkdir(parents=True, exist_ok=True)
 
-    dest = f"{config.storage_bucket}/transcripts/{storage_slug}.json"
     alias = config.storage_alias
-    result = subprocess.run(
-        ["mc", "cp", f"{alias}/{dest}", str(merged_path)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
+    bucket = config.storage_bucket
+    dest_transcripts = f"{bucket}/transcripts/{storage_slug}.json"
+    dest_legacy = f"{bucket}/reels/{storage_slug}.json"
+    for dest in (dest_transcripts, dest_legacy):
+        result = subprocess.run(
+            ["mc", "cp", f"{alias}/{dest}", str(merged_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            break
+    else:
         raise StepError(
             f"Transcript fetch failed: {result.stderr.strip()[:200]}",
             error_type=ErrorType.RETRY,

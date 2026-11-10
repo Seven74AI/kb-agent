@@ -26,7 +26,12 @@ from agent.fetch_guard import _assert_fetch_url_allowed
 from agent.exceptions import ErrorType, StepError
 from agent.pipelines import Step, register_pipeline
 from agent.pipelines.see_also import step_see_also
-from agent.pipelines.video_common import _artifact_stem, ensure_h264, resolve_artifact_stem
+from agent.pipelines.video_common import (
+    _artifact_stem,
+    ensure_h264,
+    resolve_artifact_stem,
+    step_rewrite_synthesize_source_files,
+)
 from agent.redact import redact_http_urls_in_text, url_for_display
 from agent.pipelines.youtube import (
     step_cleanup_temp,
@@ -280,6 +285,7 @@ register_pipeline("rumble", [
 register_pipeline("rumble_synthesize", [
     Step(name="fetch_transcript", fn=step_fetch_transcript, on_error="retry"),
     Step(name="synthesize_youtube", fn=step_synthesize_youtube, on_error="retry"),
+    Step(name="rewrite_source_files", fn=step_rewrite_synthesize_source_files, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),

@@ -70,6 +70,39 @@ def bunny_uuid(url_slug):
     return m.group(1) if m else None
 
 
+def storage_prefixes(config):
+    """MinIO path prefixes for videos and transcripts (from agent config)."""
+    bucket = config.storage_bucket
+    alias = config.storage_alias
+    return f"{alias}/{bucket}/videos", f"{alias}/{bucket}/transcripts"
+
+
+def fully_processed_slugs(video_prefix, transcript_prefix):
+    """Slugs that have both mp4 and transcript objects in storage."""
+    r_vid = sh(["mc", "ls", video_prefix])
+    r_tr = sh(["mc", "ls", transcript_prefix])
+    vid_pattern = r"(tdah-adulte-2026-j\d+-[a-z0-9-]+)\.mp4"
+    trans_pattern = r"(tdah-adulte-2026-j\d+-[a-z0-9-]+)\.json"
+    videos = set(re.findall(vid_pattern, r_vid.stdout or ""))
+    transcripts = set(re.findall(trans_pattern, r_tr.stdout or ""))
+    return videos & transcripts
+
+
+def upload_transcript_and_dispatch(ns, mp4, mpath, video_prefix, transcript_prefix, page_url, config, conn):
+    """Upload video + transcript; dispatch synthesize only when both uploads succeed."""
+    rv = sh(["mc", "cp", mp4, f"{video_prefix}/{ns}.mp4"])
+    rt = sh(["mc", "cp", str(mpath), f"{transcript_prefix}/{ns}.json"])
+    if rv.returncode != 0 or rt.returncode != 0:
+        parts = []
+        if rv.returncode != 0:
+            parts.append(f"video upload: {(rv.stderr or rv.stdout or '').strip()[:120]}")
+        if rt.returncode != 0:
+            parts.append(f"transcript upload: {(rt.stderr or rt.stdout or '').strip()[:120]}")
+        print(f"  [warn] {ns}: upload failed ({'; '.join(parts)})")
+        return None
+    return _finalize_video_dispatch(page_url, config, conn, ns)
+
+
 def _finalize_video_dispatch(page_url, config, conn, slug):
     """Dispatch synthesize for one uploaded video; return task_id or None on error."""
     rr = dispatch_synthesize(
@@ -90,8 +123,7 @@ def _finalize_video_dispatch(page_url, config, conn, slug):
 def main():
     os.makedirs(TMP, exist_ok=True)
     config = load_config()
-    vb = f"{config.storage_alias}/kb-agent-archive/videos"
-    tb = f"{config.storage_alias}/kb-agent-archive/transcripts"
+    vb, tb = storage_prefixes(config)
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
 
     # 1. detect new slugs from the main page
@@ -99,9 +131,8 @@ def main():
     url_slugs = set(re.findall(r"/tdah-adulte-(j\d+-[a-z0-9-]+)/", html))
     note_slugs = {f"tdah-adulte-2026-{s}" for s in url_slugs}
 
-    # 2. already-processed = object storage videos
-    r = sh(["mc", "ls", vb])
-    existing = set(re.findall(r"(tdah-adulte-2026-j\d+-[a-z0-9-]+)\.mp4", r.stdout))
+    # 2. already-processed = both video and transcript in object storage
+    existing = fully_processed_slugs(vb, tb)
     new = sorted(note_slugs - existing)
     if not new:
         print("No new TDAH videos found.", file=sys.stderr)
@@ -155,11 +186,10 @@ def main():
         merged = merge_speakers_from_paths(diar, trans)
         write_merged_transcript_json(mpath, merged, indent=None)
         ensure_merged_transcript_file_redacted(mpath)
-        sh(["mc", "cp", mp4, f"{vb}/{ns}.mp4"])
-        sh(["mc", "cp", str(mpath), f"{tb}/{ns}.json"])
-
         page_url = f"https://www.terragrandir.com/{ns.replace('tdah-adulte-2026-', 'tdah-adulte-')}/"
-        task_id = _finalize_video_dispatch(page_url, config, conn, ns)
+        task_id = upload_transcript_and_dispatch(
+            ns, mp4, mpath, vb, tb, page_url, config, conn,
+        )
         if task_id is None:
             continue
         made.append((ns, task_id))

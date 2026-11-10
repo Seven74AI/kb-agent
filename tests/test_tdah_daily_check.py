@@ -90,6 +90,107 @@ def test_tdah_bunny_cdn_url_passes_fetch_guard():
     mod._assert_fetch_url_allowed(url)
 
 
+def test_tdah_storage_paths_use_config_bucket(monkeypatch):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    config = MagicMock()
+    config.storage_bucket = "kb-knowledge-base"
+    config.storage_alias = "tigris"
+    config.kb_agent_dir = MagicMock()
+    ls_targets: list[str] = []
+
+    def fake_sh(cmd, **kw):
+        if cmd[:2] == ["mc", "ls"]:
+            ls_targets.append(cmd[2])
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "sh", fake_sh)
+    monkeypatch.setattr(mod, "load_config", lambda: config)
+    monkeypatch.setattr(mod, "init_db", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        mod,
+        "fetch",
+        lambda url: (
+            '<a href="/tdah-adulte-j1-newslug/">'
+            if url == mod.MAIN
+            else ""
+        ),
+    )
+    monkeypatch.setattr(mod, "bunny_uuid", lambda slug: None)
+
+    mod.main()
+
+    expected_vb = "tigris/kb-knowledge-base/videos"
+    expected_tb = "tigris/kb-knowledge-base/transcripts"
+    assert expected_vb in ls_targets
+    assert expected_tb in ls_targets
+    assert "kb-agent-archive" not in ls_targets
+
+
+def test_tdah_fully_processed_requires_video_and_transcript(monkeypatch):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    vb = "tigris/bucket/videos"
+    tb = "tigris/bucket/transcripts"
+    slug = "tdah-adulte-2026-j2-only-mp4"
+
+    def fake_sh(cmd, **kw):
+        if cmd[2] == vb:
+            return MagicMock(returncode=0, stdout=f"{slug}.mp4", stderr="")
+        if cmd[2] == tb:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "sh", fake_sh)
+    assert slug not in mod.fully_processed_slugs(vb, tb)
+
+
+def test_tdah_skips_dispatch_when_mc_upload_fails(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "_finalize_video_dispatch",
+        lambda *a, **k: dispatched.append("called") or "task-x",
+    )
+
+    def fake_sh(cmd, **kw):
+        if cmd[:2] == ["mc", "cp"] and cmd[-1].endswith(".mp4"):
+            return MagicMock(returncode=1, stderr="video fail", stdout="")
+        if cmd[:2] == ["mc", "cp"] and cmd[-1].endswith(".json"):
+            return MagicMock(returncode=0, stderr="", stdout="")
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(mod, "sh", fake_sh)
+
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x" * 200)
+    mpath = tmp_path / "v.json"
+    mpath.write_text("{}", encoding="utf-8")
+    ns = "tdah-adulte-2026-j9-test"
+    vb = "tigris/kb-knowledge-base/videos"
+    tb = "tigris/kb-knowledge-base/transcripts"
+
+    task_id = mod.upload_transcript_and_dispatch(
+        ns,
+        str(mp4),
+        mpath,
+        vb,
+        tb,
+        "https://example.com/",
+        MagicMock(),
+        MagicMock(),
+    )
+
+    assert task_id is None
+    assert dispatched == []
+
+
 def test_tdah_finalize_dispatch_returns_none_on_error(monkeypatch):
     from unittest.mock import MagicMock
 

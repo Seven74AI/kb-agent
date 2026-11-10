@@ -1318,6 +1318,57 @@ class TestVideoStagingUsesQueueId:
             (i,),
         ).fetchone()["status"] == "dispatched" for i in (id_a, id_b))
 
+    def test_embedded_video_uploads_transcript_before_dispatch(
+        self, config, conn, monkeypatch, tmp_path,
+    ):
+        import scripts.batch_ingest as batch_ingest
+        from agent.db import queue_ingest
+
+        config.storage_bucket = "kb-knowledge-base"
+        config.temp_dir.mkdir(parents=True, exist_ok=True)
+        parent = "parent_upload_embed"
+        (config.temp_dir / f"{parent}_raw.md").write_text("# Post\n", encoding="utf-8")
+        ingest_id = queue_ingest(
+            conn,
+            "https://author.substack.com/p/post#vid",
+            "substack_video",
+            "embed_vid_slug",
+            parent_slug=parent,
+            media_kind="video",
+        )[0]
+        q = dict(conn.execute("SELECT * FROM ingest_queue WHERE id=?", (ingest_id,)).fetchone())
+        fake_video = tmp_path / "v.mp4"
+        fake_video.write_bytes(b"v" * 200)
+        monkeypatch.setattr(batch_ingest, "_download_video", lambda _q, _cfg: (fake_video, None))
+
+        upload_dest: list[str] = []
+
+        def track_upload(_src, dest_key, _config, **_kw):
+            upload_dest.append(dest_key)
+
+        monkeypatch.setattr(batch_ingest, "upload_object", track_upload)
+
+        def fake_run(cmd, **kwargs):
+            if "batch_transcribe.py" in cmd[1]:
+                out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / f"{ingest_id}.json").write_text(
+                    json.dumps({"segments": [{"text": "hello embedded"}]}),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.run(cmd, **kwargs)
+
+        monkeypatch.setattr(batch_ingest.subprocess, "run", fake_run)
+        batch_ingest._process_embedded_videos([q], config, conn, 99)
+
+        assert upload_dest == [f"kb-knowledge-base/transcripts/{ingest_id}.json"]
+        row = conn.execute(
+            "SELECT status FROM ingest_queue WHERE id=?",
+            (ingest_id,),
+        ).fetchone()
+        assert row["status"] == "dispatched"
+
     def test_two_standalone_native_videos_same_slug_distinct_storage_and_dispatch_keys(
         self, config, conn, monkeypatch, tmp_path,
     ):

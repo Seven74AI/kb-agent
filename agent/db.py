@@ -631,6 +631,99 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
     return task_id
 
 
+def _reconcile_synthesize_task_steps(
+    conn: sqlite3.Connection,
+    task_id: str,
+    content_type: str,
+    *,
+    from_order: int,
+) -> None:
+    """Align ``task_steps`` with the current pipeline definition from ``from_order`` onward."""
+    from agent.pipelines import get_pipeline_names
+
+    desired = get_pipeline_names(content_type)
+    if not desired:
+        return
+    existing_rows = conn.execute(
+        "SELECT id, name, step_order FROM task_steps WHERE task_id = ? ORDER BY step_order",
+        (task_id,),
+    ).fetchall()
+    by_name = {row[1]: row for row in existing_rows}
+    for i, name in enumerate(desired):
+        if i < from_order:
+            continue
+        if name in by_name:
+            row_id, _, current_order = by_name[name]
+            if current_order != i:
+                conn.execute(
+                    "UPDATE task_steps SET step_order = ? WHERE id = ?",
+                    (i, row_id),
+                )
+        else:
+            conn.execute(
+                """
+                INSERT INTO task_steps (task_id, step_order, name, status)
+                VALUES (?, ?, ?, 'pending')
+                """,
+                (task_id, i, name),
+            )
+
+
+def reset_paused_synthesize_fetch_transcript(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Re-queue a paused synthesize task stuck on ``fetch_transcript`` (batch re-dispatch)."""
+    with conn:
+        row = conn.execute(
+            "SELECT status, content_type FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row[0] != "paused":
+            return False
+        content_type = row[1]
+        step = conn.execute(
+            """
+            SELECT id, status, step_order FROM task_steps
+            WHERE task_id = ? AND name = 'fetch_transcript'
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if step is None or step[1] not in ("paused", "failed"):
+            return False
+        fetch_order = step[2]
+        earlier = conn.execute(
+            """
+            SELECT 1 FROM task_steps
+            WHERE task_id = ? AND step_order < ? AND status NOT IN ('done', 'skipped')
+            LIMIT 1
+            """,
+            (task_id, fetch_order),
+        ).fetchone()
+        if earlier is not None:
+            return False
+        cur = conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'pending', error = NULL, updated_at = datetime('now')
+            WHERE id = ? AND status = 'paused'
+            """,
+            (task_id,),
+        )
+        if cur.rowcount == 0:
+            return False
+        conn.execute(
+            """
+            UPDATE task_steps
+            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+            WHERE task_id = ? AND step_order >= ?
+            """,
+            (task_id, fetch_order),
+        )
+        _reconcile_synthesize_task_steps(
+            conn, task_id, content_type, from_order=fetch_order,
+        )
+    return True
+
+
 def create_synthesize_task(
     conn: sqlite3.Connection,
     url: str,
@@ -1098,6 +1191,15 @@ _ACTIVE_TASK_STATUSES = (
     "'pending', 'in_progress', 'paused', 'done', 'completed'"
 )
 
+_ACTIVE_TASK_ORDER = """
+ORDER BY CASE status
+  WHEN 'paused' THEN 0
+  WHEN 'in_progress' THEN 1
+  WHEN 'pending' THEN 2
+  ELSE 3
+END, created_at ASC, id ASC
+""".strip()
+
 
 def find_active_task(
     conn: sqlite3.Connection,
@@ -1119,7 +1221,7 @@ def find_active_task(
         row = conn.execute(
             "SELECT id, status FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
-            "ORDER BY created_at ASC, id ASC "
+            f"{_ACTIVE_TASK_ORDER} "
             "LIMIT 1",
             (slug,),
         ).fetchone()
@@ -1127,7 +1229,7 @@ def find_active_task(
         row = conn.execute(
             "SELECT id, status FROM tasks WHERE slug = ? AND content_type = ? "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
-            "ORDER BY created_at ASC, id ASC "
+            f"{_ACTIVE_TASK_ORDER} "
             "LIMIT 1",
             (slug, content_type),
         ).fetchone()

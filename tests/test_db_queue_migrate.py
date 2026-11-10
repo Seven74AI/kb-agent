@@ -1938,6 +1938,58 @@ def test_find_active_task_prefers_oldest_row_when_duplicates_exist(tmp_path):
     assert find_active_task(conn, slug, "substack_text_synthesize") == older_id
 
 
+def test_find_active_task_prefers_in_flight_over_done_synthesize(tmp_path):
+    """Older done row must not shadow a newer paused in-flight synthesize owner."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "paused_vs_done"
+    url = "https://www.youtube.com/watch?v=xyz"
+    conn.execute(f"DROP INDEX IF EXISTS {_ACTIVE_SYNTHESIZE_SLUG_INDEX}")
+    done_id = create_task(
+        conn, url, "youtube_synthesize", slug,
+        ["fetch_transcript", "synthesize_youtube"],
+        status="done",
+    )
+    paused_id = create_task(
+        conn, url, "youtube_synthesize", slug,
+        ["fetch_transcript", "synthesize_youtube", "rewrite_source_files"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = datetime('now', '-2 hours') WHERE id = ?",
+        (done_id,),
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = datetime('now', '-1 hour') WHERE id = ?",
+        (paused_id,),
+    )
+    steps = get_task_steps(conn, paused_id)
+    fetch_step = next(s for s in steps if s["name"] == "fetch_transcript")
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'missing transcript' WHERE id = ?",
+        (fetch_step["id"],),
+    )
+    conn.commit()
+
+    assert find_active_task(conn, slug, "youtube_synthesize") == paused_id
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    result = dispatch_synthesize(
+        url, config, conn, content_type="youtube_synthesize", slug=slug,
+    )
+    assert result["duplicate"] is True
+    assert result["task_id"] == paused_id
+    assert result.get("redispatched") is True
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (paused_id,)).fetchone()[0] == "pending"
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (done_id,)).fetchone()[0] == "done"
+
+
 def test_recover_stale_ingest_increments_attempts(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)
@@ -2009,6 +2061,68 @@ def test_dispatch_synthesize_idempotent_when_task_pending(tmp_path):
     assert second["duplicate"] is True
     assert first["task_id"] == second["task_id"]
     assert conn.execute("SELECT COUNT(*) FROM tasks WHERE slug=?", (slug,)).fetchone()[0] == 1
+
+
+def test_dispatch_synthesize_redispatches_paused_fetch_transcript(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://www.youtube.com/watch?v=abc"
+    slug = "yt_vid_slug"
+    task_id = create_task(
+        conn, url, "youtube_synthesize", slug,
+        ["fetch_transcript", "synthesize_youtube", "quality_gate"],
+        status="paused",
+    )
+    steps = get_task_steps(conn, task_id)
+    fetch_step = next(s for s in steps if s["name"] == "fetch_transcript")
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'missing transcript' WHERE id = ?",
+        (fetch_step["id"],),
+    )
+    conn.commit()
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    result = dispatch_synthesize(
+        url, config, conn, content_type="youtube_synthesize", slug=slug,
+    )
+    assert result["duplicate"] is True
+    assert result.get("redispatched") is True
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+    fetch = conn.execute(
+        "SELECT status FROM task_steps WHERE task_id = ? AND name = 'fetch_transcript'",
+        (task_id,),
+    ).fetchone()[0]
+    assert fetch == "pending"
+    rewrite = conn.execute(
+        "SELECT status, step_order FROM task_steps WHERE task_id = ? AND name = 'rewrite_source_files'",
+        (task_id,),
+    ).fetchone()
+    assert rewrite is not None
+    assert rewrite[0] == "pending"
+    assert rewrite[1] == 2
+
+
+def test_reset_paused_synthesize_returns_false_when_task_not_paused(tmp_path):
+    from agent.db import reset_paused_synthesize_fetch_transcript
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn, "https://example.com/v", "youtube_synthesize", "slug_x",
+        ["fetch_transcript", "synthesize_youtube"],
+        status="pending",
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ? AND name = 'fetch_transcript'",
+        (task_id,),
+    )
+    conn.commit()
+    assert reset_paused_synthesize_fetch_transcript(conn, task_id) is False
 
 
 def test_reconcile_deferred_parent_syntheses_orphan(tmp_path, monkeypatch):

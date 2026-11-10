@@ -46,6 +46,7 @@ from agent.pipelines.youtube import (
     step_diarize as _yt_diarize,
     step_extract_audio as _yt_extract_audio,
     step_fetch_transcript as _yt_fetch_transcript,
+    step_rewrite_synthesize_source_files,
     step_git_push as _yt_git_push,
     step_merge_and_identify as _yt_merge_and_identify,
     step_storage_upload as _yt_storage_upload,
@@ -1719,6 +1720,7 @@ register_pipeline("substack_video", [
 register_pipeline("substack_video_synthesize", [
     Step(name="fetch_transcript", fn=_yt_fetch_transcript, on_error="retry"),
     Step(name="synthesize_youtube", fn=_yt_synthesize, on_error="retry"),
+    Step(name="rewrite_source_files", fn=step_rewrite_synthesize_source_files, on_error="retry"),
     Step(name="quality_gate", fn=_yt_quality_gate, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=_yt_git_push, on_error="retry"),

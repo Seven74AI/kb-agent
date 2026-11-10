@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
 from agent.pipelines.video_common import (
+    _synthesize_archived_keys,
     step_fetch_transcript,
     upload_note_archive,
     upload_video_artifacts,
@@ -165,6 +166,30 @@ Mention {TOKENIZED} in the body.
     assert "raw: articles/slug.md" in written
 
 
+def test_step_fetch_transcript_falls_back_to_legacy_reels_prefix(config):
+    slug = "legacy_reel"
+    task = {"id": "t1", "slug": slug}
+    merged = {"segments": [{"start": 0.0, "end": 1.0, "text": "ok"}]}
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if "/reels/" in cmd[2]:
+            merged_path = Path(cmd[3])
+            merged_path.write_text(json.dumps(merged), encoding="utf-8")
+            return MagicMock(returncode=0, stderr="")
+        return MagicMock(returncode=1, stderr="not in transcripts")
+
+    config.storage_alias = "tigris"
+    with patch("subprocess.run", side_effect=fake_run):
+        result = step_fetch_transcript(task, config)
+
+    assert len(calls) == 2
+    assert f"tigris/{config.storage_bucket}/transcripts/{slug}.json" in calls[0][2]
+    assert f"tigris/{config.storage_bucket}/reels/{slug}.json" in calls[1][2]
+    assert result == str(Path(config.temp_dir) / f"{slug}_merged.json")
+
+
 def test_step_fetch_transcript_metadata_uses_top_level_duration(config):
     slug = "channel_video"
     task = {"id": "t1", "slug": slug}
@@ -177,3 +202,15 @@ def test_step_fetch_transcript_metadata_uses_top_level_duration(config):
 
     meta = json.loads((Path(config.temp_dir) / f"{slug}_metadata.json").read_text())
     assert meta["duration"] == 90.0
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["youtube_synthesize", "rumble_synthesize", "substack_video_synthesize", "bunny_stream_synthesize"],
+)
+def test_synthesize_archived_keys_omit_mp3(content_type):
+    slug = "my_video_slug"
+    task = {"id": "t1", "slug": slug, "content_type": content_type}
+    keys = _synthesize_archived_keys(task)
+    assert keys == [f"videos/{slug}.mp4", f"transcripts/{slug}.json"]
+    assert not any(k.endswith(".mp3") for k in keys)

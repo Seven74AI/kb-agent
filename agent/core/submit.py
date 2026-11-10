@@ -10,6 +10,7 @@ from agent.db import (
     create_synthesize_task,
     create_task,
     queue_ingest,
+    reset_paused_synthesize_fetch_transcript,
 )
 from agent.detection import (
     DedupCheckError,
@@ -251,4 +252,6 @@ def dispatch_synthesize(url: str, config: Config, agent_conn: sqlite3.Connection
     }
     if not created:
         result["duplicate"] = True
+        if reset_paused_synthesize_fetch_transcript(agent_conn, task_id):
+            result["redispatched"] = True
     return result
