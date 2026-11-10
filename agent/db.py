@@ -1191,6 +1191,15 @@ _ACTIVE_TASK_STATUSES = (
     "'pending', 'in_progress', 'paused', 'done', 'completed'"
 )
 
+_ACTIVE_TASK_ORDER = """
+ORDER BY CASE status
+  WHEN 'paused' THEN 0
+  WHEN 'in_progress' THEN 1
+  WHEN 'pending' THEN 2
+  ELSE 3
+END, created_at ASC, id ASC
+""".strip()
+
 
 def find_active_task(
     conn: sqlite3.Connection,
@@ -1212,7 +1221,7 @@ def find_active_task(
         row = conn.execute(
             "SELECT id, status FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
-            "ORDER BY created_at ASC, id ASC "
+            f"{_ACTIVE_TASK_ORDER} "
             "LIMIT 1",
             (slug,),
         ).fetchone()
@@ -1220,7 +1229,7 @@ def find_active_task(
         row = conn.execute(
             "SELECT id, status FROM tasks WHERE slug = ? AND content_type = ? "
             f"AND status IN ({_ACTIVE_TASK_STATUSES}) "
-            "ORDER BY created_at ASC, id ASC "
+            f"{_ACTIVE_TASK_ORDER} "
             "LIMIT 1",
             (slug, content_type),
         ).fetchone()

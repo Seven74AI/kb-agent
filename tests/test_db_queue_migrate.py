@@ -1938,6 +1938,58 @@ def test_find_active_task_prefers_oldest_row_when_duplicates_exist(tmp_path):
     assert find_active_task(conn, slug, "substack_text_synthesize") == older_id
 
 
+def test_find_active_task_prefers_in_flight_over_done_synthesize(tmp_path):
+    """Older done row must not shadow a newer paused in-flight synthesize owner."""
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    slug = "paused_vs_done"
+    url = "https://www.youtube.com/watch?v=xyz"
+    conn.execute(f"DROP INDEX IF EXISTS {_ACTIVE_SYNTHESIZE_SLUG_INDEX}")
+    done_id = create_task(
+        conn, url, "youtube_synthesize", slug,
+        ["fetch_transcript", "synthesize_youtube"],
+        status="done",
+    )
+    paused_id = create_task(
+        conn, url, "youtube_synthesize", slug,
+        ["fetch_transcript", "synthesize_youtube", "rewrite_source_files"],
+        status="paused",
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = datetime('now', '-2 hours') WHERE id = ?",
+        (done_id,),
+    )
+    conn.execute(
+        "UPDATE tasks SET created_at = datetime('now', '-1 hour') WHERE id = ?",
+        (paused_id,),
+    )
+    steps = get_task_steps(conn, paused_id)
+    fetch_step = next(s for s in steps if s["name"] == "fetch_transcript")
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'missing transcript' WHERE id = ?",
+        (fetch_step["id"],),
+    )
+    conn.commit()
+
+    assert find_active_task(conn, slug, "youtube_synthesize") == paused_id
+
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    result = dispatch_synthesize(
+        url, config, conn, content_type="youtube_synthesize", slug=slug,
+    )
+    assert result["duplicate"] is True
+    assert result["task_id"] == paused_id
+    assert result.get("redispatched") is True
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (paused_id,)).fetchone()[0] == "pending"
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (done_id,)).fetchone()[0] == "done"
+
+
 def test_recover_stale_ingest_increments_attempts(tmp_path):
     db_path = tmp_path / "agent.db"
     conn = init_db(db_path, AGENT_SCHEMA)

@@ -460,6 +460,39 @@ def test_write_source_files_block_emits_keys(tmp_path):
     assert "http://old-host" not in content
 
 
+def test_write_source_files_block_idempotent_when_keys_already_match(tmp_path):
+    """Second call must not duplicate source_files when keys already match the prompt."""
+    from agent.archival import write_source_files_block
+
+    uploaded = ["videos/slug.mp4", "transcripts/slug.json"]
+    note = tmp_path / "note.md"
+    note.write_text(
+        "---\n"
+        "date: 2026-01-01\n"
+        "source_url: https://example.com/watch\n"
+        "source_files:\n"
+        "  video: videos/slug.mp4\n"
+        "  transcript: transcripts/slug.json\n"
+        "---\n"
+        "# Note\n",
+        encoding="utf-8",
+    )
+
+    class _Cfg:
+        storage_bucket = "knowledge-base"
+
+    before = note.read_text(encoding="utf-8")
+    write_source_files_block(note, uploaded, _Cfg())
+    after_first = note.read_text(encoding="utf-8")
+    write_source_files_block(note, uploaded, _Cfg())
+    after_second = note.read_text(encoding="utf-8")
+
+    assert after_first.count("source_files:") == 1
+    assert after_second == after_first
+    assert after_second.count("source_files:") == 1
+    assert before.count("source_files:") == 1
+
+
 def test_upload_object_returns_key(tmp_path):
     """upload_object returns the bucket-stripped object key."""
     from unittest.mock import MagicMock, patch
