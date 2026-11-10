@@ -500,16 +500,22 @@ def test_apply_dispatches_when_synthesize_task_is_paused(
     repair_mod, repair_config, agent_conn, monkeypatch
 ):
     from agent.db import create_task
+    from agent.pipelines import get_pipeline_names
 
     slug = "orphan_paused_synth"
     url = "https://www.youtube.com/watch?v=pausedorphan1"
+    steps = get_pipeline_names("youtube_synthesize")
     synth_id = create_task(
         agent_conn,
         url,
         "youtube_synthesize",
         slug,
-        ["synthesize_note"],
+        steps,
         status="paused",
+    )
+    agent_conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ? AND name = 'fetch_transcript'",
+        (synth_id,),
     )
     agent_conn.commit()
 
@@ -595,8 +601,7 @@ def test_apply_skips_dispatch_when_done_synth_parent_siblings_no_deferral(
     row = agent_conn.execute("SELECT status FROM tasks WHERE id=?", (synth_id,)).fetchone()
     assert row[0] == "done"
     assert dispatch_calls == []
-    assert len(plan.skipped_parent_reconcile) == 1
-    assert plan.skipped_parent_reconcile[0].storage_slug == slug
+    assert plan.skipped_parent_reconcile == []
 
     agent_conn.close()
 
@@ -664,7 +669,150 @@ def test_apply_skips_dispatch_when_done_synth_parent_siblings_stale_deferral(
     row = agent_conn.execute("SELECT status FROM tasks WHERE id=?", (synth_id,)).fetchone()
     assert row[0] == "done"
     assert dispatch_calls == []
-    assert len(plan.skipped_parent_reconcile) == 1
-    assert plan.skipped_parent_reconcile[0].storage_slug == slug
+    assert plan.skipped_parent_reconcile == []
+
+    agent_conn.close()
+
+
+def test_apply_skips_dispatch_when_synthesize_task_done(
+    repair_mod, repair_config, agent_conn, monkeypatch
+):
+    from agent.db import create_task
+
+    slug = "orphan_done_no_parent"
+    url = "https://www.youtube.com/watch?v=doneorphan1"
+    create_task(
+        agent_conn,
+        url,
+        "youtube_synthesize",
+        slug,
+        ["fetch_transcript", "synthesize_youtube"],
+        status="done",
+    )
+    agent_conn.commit()
+
+    dispatch_calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"status": "pending", "task_id": "new"}
+
+    monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
+
+    plan = repair_mod.RepairPlan(
+        redeploy=[
+            repair_mod.RedeployItem(
+                note_path=repair_config.vault_path / "Knowledge base" / "x.md",
+                source_url=url,
+                content_type="youtube_synthesize",
+                storage_slug=slug,
+            )
+        ],
+    )
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+    assert dispatch_calls == []
+
+    agent_conn.close()
+
+
+def test_apply_skips_dispatch_when_paused_on_non_fetch_step(
+    repair_mod, repair_config, agent_conn, monkeypatch
+):
+    from agent.db import create_task
+    from agent.pipelines import get_pipeline_names
+
+    slug = "orphan_paused_synth_step"
+    url = "https://www.youtube.com/watch?v=pausedorphan2"
+    steps = get_pipeline_names("youtube_synthesize")
+    synth_id = create_task(
+        agent_conn,
+        url,
+        "youtube_synthesize",
+        slug,
+        steps,
+        status="paused",
+    )
+    agent_conn.execute(
+        "UPDATE task_steps SET status = 'done' WHERE task_id = ? AND name = 'fetch_transcript'",
+        (synth_id,),
+    )
+    agent_conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ? AND name = 'synthesize_youtube'",
+        (synth_id,),
+    )
+    agent_conn.commit()
+
+    dispatch_calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"status": "pending", "task_id": "new"}
+
+    monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
+
+    plan = repair_mod.RepairPlan(
+        redeploy=[
+            repair_mod.RedeployItem(
+                note_path=repair_config.vault_path / "Knowledge base" / "x.md",
+                source_url=url,
+                content_type="youtube_synthesize",
+                storage_slug=slug,
+            )
+        ],
+    )
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+    assert dispatch_calls == []
+
+    agent_conn.close()
+
+
+def test_apply_skips_when_canonical_target_note_already_has_transcript(
+    repair_mod, repair_config, agent_conn, monkeypatch
+):
+    storage_slug = "gandhi-construction-coloniale-simon-legalliot"
+    orphan_slug = "gandhi-stub-duplicate"
+    url = "https://www.instagram.com/reel/duplicate123/"
+    kb = repair_config.vault_path / "Knowledge base" / "instagram"
+    kb.mkdir(parents=True)
+    canonical = kb / f"{storage_slug}.md"
+    canonical.write_text(
+        _note(
+            slug=storage_slug,
+            source_url=url,
+            video_key=f"reels/{storage_slug}.mp4",
+            with_full_transcript=True,
+        ),
+        encoding="utf-8",
+    )
+    orphan = kb.parent / f"{orphan_slug}.md"
+    orphan.write_text(
+        _note(
+            slug=orphan_slug,
+            source_url=url,
+            video_key=f"reels/{storage_slug}.mp4",
+        ),
+        encoding="utf-8",
+    )
+
+    dispatch_calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"status": "pending", "task_id": "t"}
+
+    monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
+
+    plan = repair_mod.RepairPlan(
+        redeploy=[
+            repair_mod.RedeployItem(
+                note_path=orphan,
+                source_url=url,
+                content_type="instagram_reel_synthesize",
+                storage_slug=storage_slug,
+            )
+        ],
+    )
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+    assert dispatch_calls == []
 
     agent_conn.close()

@@ -349,14 +349,117 @@ def _candidate_storage_slugs(
     return out
 
 
-def _has_active_synthesize_task(conn, slug: str) -> bool:
-    """Read-only: whether a synthesize task is already queued for ``slug``."""
-    row = conn.execute(
-        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
-        "AND status IN ('pending', 'in_progress') LIMIT 1",
-        (slug,),
+@dataclass(frozen=True)
+class _SynthesizeDispatchDecision:
+    """Pure-read classification for whether ``apply`` should call ``dispatch_synthesize``."""
+
+    dispatch: bool
+    skip_message: str | None = None
+
+
+def _synthesize_task_row(conn, slug: str, content_type: str):
+    return conn.execute(
+        """
+        SELECT id, status FROM tasks
+        WHERE slug = ? AND content_type = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (slug, content_type),
     ).fetchone()
-    return row is not None
+
+
+def _paused_fetch_transcript_reset_eligible(conn, task_id: str) -> bool:
+    """Mirror ``reset_paused_synthesize_fetch_transcript`` preconditions (read-only)."""
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row[0] != "paused":
+        return False
+    step = conn.execute(
+        """
+        SELECT status, step_order FROM task_steps
+        WHERE task_id = ? AND name = 'fetch_transcript'
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if step is None or step[0] not in ("paused", "failed"):
+        return False
+    fetch_order = step[1]
+    earlier = conn.execute(
+        """
+        SELECT 1 FROM task_steps
+        WHERE task_id = ? AND step_order < ? AND status NOT IN ('done', 'skipped')
+        LIMIT 1
+        """,
+        (task_id, fetch_order),
+    ).fetchone()
+    return earlier is None
+
+
+def _primary_paused_step_name(conn, task_id: str) -> str | None:
+    row = conn.execute(
+        """
+        SELECT name FROM task_steps
+        WHERE task_id = ? AND status = 'paused'
+        ORDER BY step_order
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def classify_synthesize_dispatch(
+    conn, slug: str, content_type: str
+) -> _SynthesizeDispatchDecision:
+    """Classify existing synthesize task state before ``dispatch_synthesize`` (no side effects)."""
+    row = _synthesize_task_row(conn, slug, content_type)
+    if row is None:
+        return _SynthesizeDispatchDecision(dispatch=True)
+    task_id, status = row[0], row[1]
+    if status in ("pending", "in_progress"):
+        return _SynthesizeDispatchDecision(
+            dispatch=False,
+            skip_message=f"[skip] active synthesize already queued for slug={slug}",
+        )
+    if status == "paused":
+        if _paused_fetch_transcript_reset_eligible(conn, task_id):
+            return _SynthesizeDispatchDecision(dispatch=True)
+        step_name = _primary_paused_step_name(conn, task_id) or "unknown"
+        return _SynthesizeDispatchDecision(
+            dispatch=False,
+            skip_message=f"[skip] paused on {step_name}, manual slug={slug}",
+        )
+    if status in ("done", "completed"):
+        return _SynthesizeDispatchDecision(
+            dispatch=False,
+            skip_message=(
+                f"[skip] already done but note lacks transcript, manual slug={slug}"
+            ),
+        )
+    return _SynthesizeDispatchDecision(dispatch=True)
+
+
+def _target_note_already_synthesized(config: Config, item: RedeployItem) -> bool:
+    """True when synthesize would write a different note that already has a transcript."""
+    synth_path = expected_synthesize_note_path(
+        config, storage_slug=item.storage_slug, content_type=item.content_type
+    )
+    if not synth_path.is_file():
+        return False
+    if synth_path.resolve() == item.note_path.resolve():
+        return False
+    text = synth_path.read_text(encoding="utf-8")
+    fm, body = _split_frontmatter(text)
+    source_files = _parse_source_files(fm)
+    if "transcript" in source_files:
+        return True
+    if _FULL_TRANSCRIPT_HEADING.search(body):
+        return True
+    return False
 
 
 def _needs_parent_reconcile_skip(conn, slug: str) -> bool:
@@ -499,8 +602,21 @@ def apply(plan: RepairPlan, config: Config, conn, *, dry_run: bool = True) -> No
             print(f"[dry-run] {action}")
             continue
 
-        if _has_active_synthesize_task(conn, item.storage_slug):
-            print(f"[skip] active synthesize already queued for slug={item.storage_slug}")
+        if _target_note_already_synthesized(config, item):
+            synth_path = expected_synthesize_note_path(
+                config, storage_slug=item.storage_slug, content_type=item.content_type
+            )
+            print(
+                f"[skip] target already synthesized slug={item.storage_slug} "
+                f"target={synth_path} orphan={item.note_path}"
+            )
+            continue
+
+        decision = classify_synthesize_dispatch(
+            conn, item.storage_slug, item.content_type
+        )
+        if not decision.dispatch:
+            print(decision.skip_message)
             continue
 
         if _needs_parent_reconcile_skip(conn, item.storage_slug):
