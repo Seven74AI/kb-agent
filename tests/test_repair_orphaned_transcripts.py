@@ -493,6 +493,15 @@ def test_discover_skips_note_with_youtube_transcript_heading(
     assert plan.missing_transcript == []
 
 
+def test_note_needs_synthesis_skips_transcription_heading(repair_mod):
+    fm = """source_files:
+  video: reels/example.mp4
+"""
+    body = "## Summary\n\nShort.\n\n## Transcription\n\nHello.\n"
+    source_files = repair_mod._parse_source_files(fm)
+    assert repair_mod._note_needs_synthesis(fm, body, source_files) is False
+
+
 def test_apply_active_synthesize_guard_does_not_fail_existing_tasks(
     repair_mod, repair_config, agent_conn, monkeypatch
 ):

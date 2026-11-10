@@ -69,7 +69,7 @@ _SYNTHESIZE_NOTE_SUBDIR: dict[str, str] = {
 }
 
 _FULL_TRANSCRIPT_HEADING = re.compile(
-    r"^##\s+(Full )?Transcript\s*$", re.MULTILINE
+    r"^##\s+(Full\s+)?(Transcript|Transcription)\s*$", re.MULTILINE
 )
 _SOURCE_URL = re.compile(r"^source_url:\s*(.+)\s*$", re.MULTILINE)
 _TAGS_LINE = re.compile(r"^tags:\s*\[(.*)\]\s*$", re.MULTILINE)
