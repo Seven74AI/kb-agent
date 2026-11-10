@@ -23,7 +23,13 @@ sys.path.insert(0, str(_REPO))
 from agent.config import Config, load_config  # noqa: E402
 from agent.core.slugify import batch_standalone_video_storage_slug, slugify, slug_path  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
-from agent.db import AGENT_SCHEMA, init_db, normalize_tags  # noqa: E402
+from agent.db import (  # noqa: E402
+    AGENT_SCHEMA,
+    _parent_sibling_media_count,
+    get_parent_media_deferral,
+    init_db,
+    normalize_tags,
+)
 from agent.detection import detect_content_subtype, detect_platform, normalize_url  # noqa: E402
 from agent.pipelines import get_pipeline  # noqa: E402
 from agent.pipelines.video_common import _resolve_slug  # noqa: E402
@@ -93,6 +99,7 @@ class RepairPlan:
     redeploy: list[RedeployItem] = field(default_factory=list)
     migrate: list[MigrateItem] = field(default_factory=list)
     missing_transcript: list[MissingTranscriptItem] = field(default_factory=list)
+    skipped_parent_reconcile: list[RedeployItem] = field(default_factory=list)
 
 
 def slugify_for_storage(url: str, base_content_type: str) -> str:
@@ -353,6 +360,14 @@ def _has_active_synthesize_task(conn, slug: str) -> bool:
     return row is not None
 
 
+def _needs_parent_reconcile_skip(conn, slug: str) -> bool:
+    """Pure-read: dispatch would supersede orphan deferral (siblings, no deferral row)."""
+    return (
+        get_parent_media_deferral(conn, slug) is None
+        and _parent_sibling_media_count(conn, slug) > 0
+    )
+
+
 def discover(config: Config) -> RepairPlan:
     """Enumerate repair actions by cross-referencing storage and vault notes."""
     index = _build_transcript_index(config)
@@ -492,6 +507,14 @@ def apply(plan: RepairPlan, config: Config, conn, *, dry_run: bool = True) -> No
             print(f"[skip] active synthesize already queued for slug={item.storage_slug}")
             continue
 
+        if _needs_parent_reconcile_skip(conn, item.storage_slug):
+            print(
+                f"[skip] slug={item.storage_slug} is a parent with ingest siblings "
+                "and no deferral — needs manual reconciliation"
+            )
+            plan.skipped_parent_reconcile.append(item)
+            continue
+
         result = dispatch_synthesize(
             item.source_url,
             config,
@@ -564,6 +587,13 @@ def main(argv: list[str] | None = None) -> int:
             apply(plan, config, conn, dry_run=dry_run)
         finally:
             conn.close()
+
+        if plan.skipped_parent_reconcile:
+            print(
+                f"Skipped parent reconcile (manual): {len(plan.skipped_parent_reconcile)}"
+            )
+            for item in plan.skipped_parent_reconcile:
+                print(f"  - slug={item.storage_slug} url={item.source_url!r}")
 
         if plan.missing_transcript:
             print()
