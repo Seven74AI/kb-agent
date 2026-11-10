@@ -168,12 +168,16 @@ def resolve_video_synthesize_plan(
     except ValueError:
         return None
 
-    platform = detect_platform(url)
-    base = _local_video_base_from_platform(platform)
-    if base is None:
-        fetched = detect_content_subtype(url, platform)
-        if fetched in VIDEO_BASE_TYPES:
-            base = fetched
+    try:
+        platform = detect_platform(url)
+        base = _local_video_base_from_platform(platform)
+        if base is None:
+            fetched = detect_content_subtype(url, platform)
+            if fetched in VIDEO_BASE_TYPES:
+                base = fetched
+    except Exception:
+        # Unresolvable / non-fetchable URL (e.g. a broken mega.nz ref) — not a video we can repair.
+        return None
     if base not in VIDEO_BASE_TYPES:
         return None
 
