@@ -103,7 +103,7 @@ class MissingTranscriptItem:
 class ManualSubstackItem:
     note_path: Path
     source_url: str
-    reason: str = "embedded vs standalone substack needs manual dispatch decision"
+    reason: str = "substack_video requires manual dispatch"
 
 
 @dataclass
@@ -146,66 +146,6 @@ def _url_storage_slug_for_repair(
         if not _source_url_has_youtube_video_id(source_url):
             return None
     return storage_slug
-
-
-def _substack_post_url(url: str) -> bool:
-    return "/p/" in (urlparse(url).path or "")
-
-
-def _note_has_material_article_body(body: str) -> bool:
-    """Heuristic: parent Substack articles carry substantial prose, not video-only stubs."""
-    text = body.strip()
-    if not text:
-        return False
-    lines = []
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("#"):
-            continue
-        lines.append(s)
-    prose = "\n".join(lines).strip()
-    return len(prose) > 120
-
-
-def _is_standalone_substack_video_note(
-    *,
-    note_path: Path,
-    video_key: str | None,
-    body: str,
-    source_url: str,
-) -> bool:
-    if not video_key or not video_key.replace("\\", "/").startswith("videos/"):
-        return False
-    parsed = urlparse(source_url)
-    if _substack_post_url(source_url) and parsed.fragment:
-        return False
-    if "articles" in note_path.parts:
-        return False
-    if _note_has_material_article_body(body):
-        return False
-    return True
-
-
-def _substack_video_needs_manual_review(
-    *,
-    note_path: Path,
-    source_url: str,
-    video_key: str | None,
-    body: str,
-    base: str,
-    storage_slug: str,
-    video_stem: str | None,
-) -> bool:
-    if base != "substack_video":
-        return False
-    if video_stem and storage_slug == video_stem:
-        return not _is_standalone_substack_video_note(
-            note_path=note_path,
-            video_key=video_key,
-            body=body,
-            source_url=source_url,
-        )
-    return False
 
 
 def _local_video_base_from_platform(platform: str) -> str | None:
@@ -376,6 +316,14 @@ def _reels_slug_from_key(key: str) -> str:
     return stem
 
 
+def _is_canonical_reels_transcript_key(key: str) -> bool:
+    """True for ``reels/{slug}.json``, false for legacy ``reels/{slug}_transcript.json``."""
+    stem = Path(key).name
+    if not stem.endswith(".json"):
+        return False
+    return not Path(stem).stem.endswith("_transcript")
+
+
 @dataclass
 class _TranscriptIndex:
     canonical: set[str]
@@ -402,7 +350,13 @@ def _build_transcript_index(config: Config) -> _TranscriptIndex:
         slug = _reels_slug_from_key(key)
         if slug in canonical:
             continue
-        reels_only[slug] = key
+        existing = reels_only.get(slug)
+        if existing is None:
+            reels_only[slug] = key
+        elif _is_canonical_reels_transcript_key(
+            key
+        ) and not _is_canonical_reels_transcript_key(existing):
+            reels_only[slug] = key
 
     return _TranscriptIndex(canonical=canonical, reels_only=reels_only)
 
@@ -642,15 +596,7 @@ def discover(config: Config) -> RepairPlan:
 
         synthesize_ct, base_ct, _ = plan_params
 
-        if _substack_video_needs_manual_review(
-            note_path=note_path,
-            source_url=source_url,
-            video_key=video_key,
-            body=body,
-            base=base_ct,
-            storage_slug=storage_slug,
-            video_stem=video_stem,
-        ):
+        if base_ct == "substack_video":
             plan.manual_substack.append(
                 ManualSubstackItem(note_path=note_path, source_url=source_url)
             )

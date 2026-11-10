@@ -227,9 +227,36 @@ def test_discover_substack_finds_transcript_at_url_slug_when_video_uses_ingest_i
     monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
     plan = repair_mod.discover(repair_config)
 
-    assert len(plan.redeploy) == 1
-    assert plan.redeploy[0].storage_slug == url_slug
-    assert plan.redeploy[0].content_type == "substack_video_synthesize"
+    assert plan.redeploy == []
+    assert len(plan.manual_substack) == 1
+    assert plan.manual_substack[0].note_path == note_path
+    assert "manual dispatch" in plan.manual_substack[0].reason
+
+
+def test_build_transcript_index_prefers_canonical_reels_over_transcript_suffix(
+    repair_mod, repair_config, monkeypatch
+):
+    slug = "reel-collision-slug"
+    canonical_key = f"{slug}.json"
+    stray_key = f"{slug}_transcript.json"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
+            if cmd[4].endswith("/reels/"):
+                # List stray first so iteration order would pick it without the fix.
+                return MagicMock(
+                    returncode=0,
+                    stdout=_mc_bare_json_lines([stray_key, canonical_key]),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stderr="unexpected", stdout="")
+
+    monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
+    index = repair_mod._build_transcript_index(repair_config)
+
+    assert slug in index.reels_only
+    assert index.reels_only[slug] == f"reels/{canonical_key}"
 
 
 def test_discover_substack_embedded_transcript_by_ingest_id(
