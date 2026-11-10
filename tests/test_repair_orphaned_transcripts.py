@@ -185,6 +185,53 @@ def test_discover_prefers_video_key_slug_over_url_storage_slug(
     assert plan.redeploy[0].storage_slug == video_slug
 
 
+def test_discover_substack_finds_transcript_at_url_slug_when_video_uses_ingest_id(
+    repair_mod, repair_config, monkeypatch
+):
+    from agent.core.slugify import slugify
+    from agent.pipelines.video_common import _resolve_slug
+
+    ingest_id = "ing-queue-only-uuid"
+    substack_url = "https://author.substack.com/p/example-post"
+    url_slug = _resolve_slug(
+        {
+            "id": str(uuid.uuid4()),
+            "slug": slugify(substack_url, content_type="substack_video"),
+        }
+    )
+    assert url_slug != ingest_id
+
+    kb = repair_config.vault_path / "Knowledge base" / "articles"
+    kb.mkdir(parents=True)
+    note_path = kb / f"{url_slug}.md"
+    note_path.write_text(
+        _note(
+            slug=url_slug,
+            source_url=substack_url,
+            video_key=f"videos/{ingest_id}.mp4",
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
+            if cmd[4].endswith("/transcripts/"):
+                return MagicMock(
+                    returncode=0,
+                    stdout=_mc_bare_json_lines([f"{url_slug}.json"]),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stderr="unexpected", stdout="")
+
+    monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
+    plan = repair_mod.discover(repair_config)
+
+    assert len(plan.redeploy) == 1
+    assert plan.redeploy[0].storage_slug == url_slug
+    assert plan.redeploy[0].content_type == "substack_video_synthesize"
+
+
 def test_discover_substack_embedded_transcript_by_ingest_id(
     repair_mod, repair_config, monkeypatch
 ):
@@ -349,5 +396,101 @@ def test_apply_dry_run_skips_dispatch_and_mc_cp(
     assert len(dispatch_calls) == 1
     assert dispatch_calls[0][1]["content_type"] == "rumble_synthesize"
     assert dispatch_calls[0][1]["slug"] == storage_slug
+
+    agent_conn.close()
+
+
+def test_discover_skips_note_with_youtube_transcript_heading(
+    repair_mod, repair_config, monkeypatch
+):
+    kb = repair_config.vault_path / "Knowledge base" / "videos"
+    kb.mkdir(parents=True)
+    slug = "already-has-transcript"
+    url = "https://www.youtube.com/watch?v=abcdefghijk"
+    (kb / f"{slug}.md").write_text(
+        _note(
+            slug=slug,
+            source_url=url,
+            video_key=f"videos/{slug}.mp4",
+        ).replace("## Summary", "## Transcript\n\nDone.\n\n## Summary"),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stderr="unexpected", stdout="")
+
+    monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
+    plan = repair_mod.discover(repair_config)
+    assert plan.redeploy == []
+    assert plan.missing_transcript == []
+
+
+def test_apply_active_synthesize_guard_does_not_fail_existing_tasks(
+    repair_mod, repair_config, agent_conn, monkeypatch
+):
+    from agent.db import create_task
+
+    slug = "orphan_dup_parent"
+    url = "https://blog.substack.com/p/orphan-dup"
+    parent_id = create_task(
+        agent_conn,
+        url,
+        "substack_text",
+        slug,
+        ["substack_cleanup"],
+        status="paused",
+    )
+    with agent_conn:
+        agent_conn.execute(
+            """
+            INSERT INTO ingest_queue (id, url, content_type, slug, status, parent_slug, media_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                "https://example.com/i.png",
+                "substack_image",
+                "i1",
+                "dispatched",
+                slug,
+                "image",
+            ),
+        )
+    synth_id = create_task(
+        agent_conn,
+        url,
+        "substack_video_synthesize",
+        slug,
+        ["synthesize_note"],
+        status="pending",
+    )
+    agent_conn.commit()
+
+    dispatch_calls = []
+
+    def fake_dispatch(*args, **kwargs):
+        dispatch_calls.append((args, kwargs))
+        return {"status": "pending", "task_id": "new"}
+
+    monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
+
+    plan = repair_mod.RepairPlan(
+        redeploy=[
+            repair_mod.RedeployItem(
+                note_path=repair_config.vault_path / "Knowledge base" / "x.md",
+                source_url=url,
+                content_type="substack_video_synthesize",
+                storage_slug=slug,
+            )
+        ],
+    )
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+
+    row = agent_conn.execute("SELECT status FROM tasks WHERE id=?", (synth_id,)).fetchone()
+    assert row[0] == "pending"
+    assert dispatch_calls == []
+    assert parent_id  # parent row untouched; guard must not supersede synthesize tasks
 
     agent_conn.close()

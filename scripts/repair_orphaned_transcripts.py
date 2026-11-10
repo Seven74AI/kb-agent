@@ -23,7 +23,7 @@ sys.path.insert(0, str(_REPO))
 from agent.config import Config, load_config  # noqa: E402
 from agent.core.slugify import batch_standalone_video_storage_slug, slugify, slug_path  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
-from agent.db import AGENT_SCHEMA, find_active_task, init_db, normalize_tags  # noqa: E402
+from agent.db import AGENT_SCHEMA, init_db, normalize_tags  # noqa: E402
 from agent.detection import detect_content_subtype, detect_platform, normalize_url  # noqa: E402
 from agent.pipelines import get_pipeline  # noqa: E402
 from agent.pipelines.video_common import _resolve_slug  # noqa: E402
@@ -51,13 +51,15 @@ _LOCAL_PLATFORM_VIDEO_BASE: dict[str, str] = {
 _SYNTHESIZE_NOTE_SUBDIR: dict[str, str] = {
     "instagram_reel_synthesize": "instagram",
     "threads_video_synthesize": "threads",
-    "substack_video_synthesize": "articles",
+    "substack_video_synthesize": "videos",
     "bunny_stream_synthesize": "",
     "youtube_synthesize": "videos",
     "rumble_synthesize": "videos",
 }
 
-_FULL_TRANSCRIPT_HEADING = re.compile(r"^##\s+Full Transcript\s*$", re.MULTILINE)
+_FULL_TRANSCRIPT_HEADING = re.compile(
+    r"^##\s+(Full )?Transcript\s*$", re.MULTILINE
+)
 _SOURCE_URL = re.compile(r"^source_url:\s*(.+)\s*$", re.MULTILINE)
 _TAGS_LINE = re.compile(r"^tags:\s*\[(.*)\]\s*$", re.MULTILINE)
 
@@ -306,11 +308,23 @@ def _slug_from_video_key(video_key: str) -> str | None:
     return path.name or None
 
 
+def _substack_url_storage_slug(url: str) -> str | None:
+    """Storage slug from the normalized URL (live pipeline), not ingest queue id."""
+    plan = resolve_video_synthesize_plan(url)
+    if plan is None or plan[1] != "substack_video":
+        return None
+    task_slug = slugify_for_storage(url, "substack_video")
+    return _resolve_slug(
+        {"id": "00000000-0000-0000-0000-000000000099", "slug": task_slug}
+    )
+
+
 def _candidate_storage_slugs(
     *,
     note_path: Path,
     video_key: str | None,
     url_storage_slug: str | None,
+    extra_slugs: list[str] | None = None,
 ) -> list[str]:
     """Slugs to try when locating a transcript (prefer uploaded object keys)."""
     seen: set[str] = set()
@@ -323,8 +337,20 @@ def _candidate_storage_slugs(
 
     add(_slug_from_video_key(video_key or ""))
     add(url_storage_slug)
+    for slug in extra_slugs or []:
+        add(slug)
     add(note_path.stem)
     return out
+
+
+def _has_active_synthesize_task(conn, slug: str) -> bool:
+    """Read-only: whether a synthesize task is already queued for ``slug``."""
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE slug = ? AND content_type GLOB '*_synthesize' "
+        "AND status IN ('pending', 'in_progress', 'paused') LIMIT 1",
+        (slug,),
+    ).fetchone()
+    return row is not None
 
 
 def discover(config: Config) -> RepairPlan:
@@ -357,12 +383,19 @@ def discover(config: Config) -> RepairPlan:
         )
         url_storage_slug = plan_params[2] if plan_params else None
 
+        extra_slugs: list[str] = []
+        if plan_params and plan_params[1] == "substack_video" and source_url:
+            url_slug = _substack_url_storage_slug(source_url)
+            if url_slug:
+                extra_slugs.append(url_slug)
+
         loc: tuple[str, str] | None = None
         storage_slug: str | None = None
         for candidate in _candidate_storage_slugs(
             note_path=note_path,
             video_key=video_key,
             url_storage_slug=url_storage_slug,
+            extra_slugs=extra_slugs,
         ):
             loc = index.locate(candidate)
             if loc is not None:
@@ -455,12 +488,7 @@ def apply(plan: RepairPlan, config: Config, conn, *, dry_run: bool = True) -> No
             print(f"[dry-run] {action}")
             continue
 
-        if find_active_task(
-            conn,
-            item.storage_slug,
-            item.content_type,
-            temp_dir=config.temp_dir,
-        ):
+        if _has_active_synthesize_task(conn, item.storage_slug):
             print(f"[skip] active synthesize already queued for slug={item.storage_slug}")
             continue
 
