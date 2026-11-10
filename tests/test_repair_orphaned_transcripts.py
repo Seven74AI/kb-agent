@@ -25,12 +25,9 @@ def _load_module():
     return mod
 
 
-def _mc_json_lines(keys: list[str]) -> str:
-    lines = []
-    bucket = "knowledge-base"
-    for key in keys:
-        lines.append(json.dumps({"type": "file", "key": f"{bucket}/{key}"}))
-    return "\n".join(lines) + "\n"
+def _mc_bare_json_lines(filenames: list[str]) -> str:
+    """``mc ls --json`` lines: ``key`` is the bare object name under the listed prefix."""
+    return "\n".join(json.dumps({"type": "file", "key": name}) for name in filenames) + "\n"
 
 
 def _note(
@@ -48,7 +45,6 @@ def _note(
     body = "## Summary\n\nShort.\n"
     if with_full_transcript:
         body += "\n## Full Transcript\n\nHello.\n"
-    folder = subdir.strip("/")
     return f"""---
 source_url: {source_url}
 source_files:
@@ -89,26 +85,44 @@ def agent_conn(repair_config):
 
 
 def test_storage_slug_matches_resolve_slug(repair_mod):
+    from agent.core.slugify import batch_standalone_video_storage_slug, slugify
     from agent.pipelines.video_common import _resolve_slug
 
     url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    _, _, storage_slug = repair_mod.resolve_video_synthesize_plan(url)
-    task_slug = repair_mod.slugify_for_storage(url, "youtube")
+    _, base, storage_slug = repair_mod.resolve_video_synthesize_plan(url)
+    task_slug = slugify(url, content_type=base)
     assert storage_slug == _resolve_slug({"id": str(uuid.uuid4()), "slug": task_slug})
+
+    ingest_id = "ingest-queue-uuid-1234"
+    substack_url = "https://author.substack.com/p/example-post"
+    _, base_ss, slug_ss = repair_mod.resolve_video_synthesize_plan(
+        substack_url, ingest_id=ingest_id
+    )
+    assert base_ss == "substack_video"
+    assert slug_ss == batch_standalone_video_storage_slug(
+        ingest_id=ingest_id,
+        slug=slugify(substack_url, content_type="substack_video"),
+        content_type="substack_video",
+        parent_slug=None,
+    )
+
+
+def test_resolve_video_synthesize_plan_mega_video_returns_none(repair_mod):
+    assert repair_mod.resolve_video_synthesize_plan("https://mega.nz/file/abc#key") is None
 
 
 def test_discover_redeploy_and_migrate_from_reels(
     repair_mod, repair_config, monkeypatch
 ):
     slug = "gandhi-construction-coloniale-simon-legalliot"
-    reels_key = f"reels/{slug}_transcript.json"
+    reels_bare = f"{slug}_transcript.json"
     kb = repair_config.vault_path / "Knowledge base"
     note_path = kb / f"{slug}.md"
     note_path.write_text(
         _note(
             slug=slug,
             source_url="https://www.instagram.com/reel/abc123/",
-            video_key=f"videos/{slug}.mp4",
+            video_key=f"reels/{slug}.mp4",
         ),
         encoding="utf-8",
     )
@@ -117,28 +131,94 @@ def test_discover_redeploy_and_migrate_from_reels(
         if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
             prefix = cmd[4]
             if prefix.endswith("/reels/"):
-                return MagicMock(returncode=0, stdout=_mc_json_lines([reels_key]), stderr="")
+                return MagicMock(returncode=0, stdout=_mc_bare_json_lines([reels_bare]), stderr="")
             if prefix.endswith("/transcripts/"):
                 return MagicMock(returncode=0, stdout="", stderr="")
-            if prefix.endswith("/videos/"):
-                return MagicMock(
-                    returncode=0,
-                    stdout=_mc_json_lines([f"videos/{slug}.mp4"]),
-                    stderr="",
-                )
         return MagicMock(returncode=1, stderr="unexpected mc", stdout="")
 
     monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
     plan = repair_mod.discover(repair_config)
 
     assert len(plan.redeploy) == 1
-    assert plan.redeploy[0].storage_slug == slug  # matched via video object key stem
+    assert plan.redeploy[0].storage_slug == slug
     assert plan.redeploy[0].content_type == "instagram_reel_synthesize"
     assert len(plan.migrate) == 1
-    assert plan.migrate[0].storage_slug == slug
-    assert plan.migrate[0].src.endswith(f"reels/{slug}_transcript.json")
-    assert plan.migrate[0].dst.endswith(f"transcripts/{slug}.json")
+    assert plan.migrate[0].src == f"reels/{reels_bare}"
+    assert plan.migrate[0].dst == f"transcripts/{slug}.json"
     assert plan.missing_transcript == []
+
+
+def test_discover_prefers_video_key_slug_over_url_storage_slug(
+    repair_mod, repair_config, monkeypatch
+):
+    video_slug = "my-reel-clean-slug"
+    url_slug = "www.instagram.com_reel_xyz_"
+    kb = repair_config.vault_path / "Knowledge base"
+    note_path = kb / "orphan-display-name.md"
+    note_path.write_text(
+        _note(
+            slug="orphan-display-name",
+            source_url="https://www.instagram.com/reel/xyz/",
+            video_key=f"reels/{video_slug}.mp4",
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
+            prefix = cmd[4]
+            if prefix.endswith("/transcripts/"):
+                return MagicMock(
+                    returncode=0,
+                    stdout=_mc_bare_json_lines(
+                        [f"{url_slug}.json", f"{video_slug}.json"]
+                    ),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stderr="unexpected", stdout="")
+
+    monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
+    plan = repair_mod.discover(repair_config)
+
+    assert len(plan.redeploy) == 1
+    assert plan.redeploy[0].storage_slug == video_slug
+
+
+def test_discover_substack_embedded_transcript_by_ingest_id(
+    repair_mod, repair_config, monkeypatch
+):
+    ingest_id = "ing-emb-uuid"
+    parent_slug = "author.substack.com_p_parent"
+    kb = repair_config.vault_path / "Knowledge base" / "articles"
+    kb.mkdir(parents=True)
+    note_path = kb / f"{parent_slug}.md"
+    note_path.write_text(
+        _note(
+            slug=parent_slug,
+            source_url="https://author.substack.com/p/parent#video-slot",
+            video_key=f"videos/{ingest_id}.mp4",
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
+            if cmd[4].endswith("/transcripts/"):
+                return MagicMock(
+                    returncode=0,
+                    stdout=_mc_bare_json_lines([f"{ingest_id}.json"]),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stderr="unexpected", stdout="")
+
+    monkeypatch.setattr(repair_mod.subprocess, "run", fake_run)
+    plan = repair_mod.discover(repair_config)
+
+    assert len(plan.redeploy) == 1
+    assert plan.redeploy[0].storage_slug == ingest_id
+    assert plan.redeploy[0].content_type == "substack_video_synthesize"
 
 
 def test_discover_redeploy_when_transcript_in_canonical_prefix(
@@ -152,18 +232,17 @@ def test_discover_redeploy_when_transcript_in_canonical_prefix(
         _note(
             slug=display_slug,
             source_url="https://www.instagram.com/reel/xyz/",
-            video_key=f"videos/{display_slug}.mp4",
+            video_key=f"videos/{storage_slug}.mp4",
         ),
         encoding="utf-8",
     )
 
     def fake_run(cmd, **kwargs):
         if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
-            prefix = cmd[4]
-            if prefix.endswith("/transcripts/"):
+            if cmd[4].endswith("/transcripts/"):
                 return MagicMock(
                     returncode=0,
-                    stdout=_mc_json_lines([f"transcripts/{storage_slug}.json"]),
+                    stdout=_mc_bare_json_lines([f"{storage_slug}.json"]),
                     stderr="",
                 )
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -197,7 +276,7 @@ def test_discover_missing_transcript_report_only(repair_mod, repair_config, monk
             if cmd[4].endswith("/videos/"):
                 return MagicMock(
                     returncode=0,
-                    stdout=_mc_json_lines([f"videos/{slug}.mp4"]),
+                    stdout=_mc_bare_json_lines([f"{slug}.mp4"]),
                     stderr="",
                 )
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -215,15 +294,20 @@ def test_discover_missing_transcript_report_only(repair_mod, repair_config, monk
 def test_apply_dry_run_skips_dispatch_and_mc_cp(
     repair_mod, repair_config, agent_conn, monkeypatch
 ):
-    from agent.db import AGENT_SCHEMA, init_db
+    from agent.core.slugify import slugify
+    from agent.detection import normalize_url
 
     slug = "dry-run-slug"
+    url = "https://rumble.com/v12345-title.html"
+    url_norm = normalize_url(url)
+    storage_slug = slugify(url_norm, content_type="rumble")
+
     kb = repair_config.vault_path / "Knowledge base"
     (kb / f"{slug}.md").write_text(
         _note(
             slug=slug,
-            source_url="https://rumble.com/v12345-title.html",
-            video_key=f"videos/{slug}.mp4",
+            source_url=url,
+            video_key=f"videos/{storage_slug}.mp4",
         ),
         encoding="utf-8",
     )
@@ -231,18 +315,17 @@ def test_apply_dry_run_skips_dispatch_and_mc_cp(
     dispatch_calls = []
     mc_calls = []
 
-    storage_slug = "rumble.com_v12345_title.html"
-
     def fake_run(cmd, **kwargs):
         mc_calls.append(list(cmd))
         if cmd[:4] == ["mc", "ls", "--recursive", "--json"]:
-            prefix = cmd[4]
-            if prefix.endswith("/transcripts/"):
+            if cmd[4].endswith("/transcripts/"):
                 return MagicMock(
                     returncode=0,
-                    stdout=_mc_json_lines([f"transcripts/{storage_slug}.json"]),
+                    stdout=_mc_bare_json_lines([f"{storage_slug}.json"]),
                     stderr="",
                 )
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd[:2] == ["mc", "cp"]:
             return MagicMock(returncode=0, stdout="", stderr="")
         return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -254,14 +337,17 @@ def test_apply_dry_run_skips_dispatch_and_mc_cp(
     monkeypatch.setattr(repair_mod, "dispatch_synthesize", fake_dispatch)
 
     plan = repair_mod.discover(repair_config)
-    repair_mod.apply(plan, repair_config, agent_conn, dry_run=True)
+    assert len(plan.redeploy) == 1
 
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=True)
     assert dispatch_calls == []
     assert not any(c[:2] == ["mc", "cp"] for c in mc_calls)
 
-    agent_conn.close()
-    conn = init_db(repair_config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
-    count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-    conn.close()
-    assert count == 0
+    dispatch_calls.clear()
+    mc_calls.clear()
+    repair_mod.apply(plan, repair_config, agent_conn, dry_run=False)
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0][1]["content_type"] == "rumble_synthesize"
+    assert dispatch_calls[0][1]["slug"] == storage_slug
 
+    agent_conn.close()

@@ -21,10 +21,11 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
 
 from agent.config import Config, load_config  # noqa: E402
-from agent.core.slugify import slugify  # noqa: E402
+from agent.core.slugify import batch_standalone_video_storage_slug, slugify, slug_path  # noqa: E402
 from agent.core.submit import dispatch_synthesize  # noqa: E402
 from agent.db import AGENT_SCHEMA, find_active_task, init_db, normalize_tags  # noqa: E402
 from agent.detection import detect_content_subtype, detect_platform, normalize_url  # noqa: E402
+from agent.pipelines import get_pipeline  # noqa: E402
 from agent.pipelines.video_common import _resolve_slug  # noqa: E402
 
 VIDEO_BASE_TYPES = frozenset(
@@ -35,15 +36,25 @@ VIDEO_BASE_TYPES = frozenset(
         "instagram_reel",
         "threads_video",
         "substack_video",
-        "mega_video",
     }
 )
 
-_SIMPLE_VIDEO_PLATFORM_BASE = {
+_LOCAL_PLATFORM_VIDEO_BASE: dict[str, str] = {
     "youtube": "youtube",
     "rumble": "rumble",
     "bunny_stream": "bunny_stream",
     "instagram_reel": "instagram_reel",
+    "threads": "threads_video",
+    "substack": "substack_video",
+}
+
+_SYNTHESIZE_NOTE_SUBDIR: dict[str, str] = {
+    "instagram_reel_synthesize": "instagram",
+    "threads_video_synthesize": "threads",
+    "substack_video_synthesize": "articles",
+    "bunny_stream_synthesize": "",
+    "youtube_synthesize": "videos",
+    "rumble_synthesize": "videos",
 }
 
 _FULL_TRANSCRIPT_HEADING = re.compile(r"^##\s+Full Transcript\s*$", re.MULTILINE)
@@ -87,7 +98,17 @@ def slugify_for_storage(url: str, base_content_type: str) -> str:
     return slugify(url, content_type=base_content_type)
 
 
-def resolve_video_synthesize_plan(url: str) -> tuple[str, str, str] | None:
+def _local_video_base_from_platform(platform: str) -> str | None:
+    """URL-pattern video base type without network I/O (excludes mega)."""
+    return _LOCAL_PLATFORM_VIDEO_BASE.get(platform)
+
+
+def resolve_video_synthesize_plan(
+    url: str,
+    *,
+    ingest_id: str | None = None,
+    parent_slug: str | None = None,
+) -> tuple[str, str, str] | None:
     """Return (synthesize_content_type, base_content_type, storage_slug) for a video URL."""
     raw = (url or "").strip()
     if not raw:
@@ -98,16 +119,43 @@ def resolve_video_synthesize_plan(url: str) -> tuple[str, str, str] | None:
         return None
 
     platform = detect_platform(url)
-    base = detect_content_subtype(url, platform)
-    if base not in VIDEO_BASE_TYPES:
-        base = _SIMPLE_VIDEO_PLATFORM_BASE.get(platform, base)
+    base = _local_video_base_from_platform(platform)
+    if base is None:
+        fetched = detect_content_subtype(url, platform)
+        if fetched in VIDEO_BASE_TYPES:
+            base = fetched
     if base not in VIDEO_BASE_TYPES:
         return None
 
     synthesize_ct = base if base.endswith("_synthesize") else f"{base}_synthesize"
+    if get_pipeline(synthesize_ct) is None:
+        return None
+
     task_slug = slugify_for_storage(url, base)
-    storage_slug = _resolve_slug({"id": "00000000-0000-0000-0000-000000000099", "slug": task_slug})
+    if base == "substack_video" and ingest_id:
+        storage_slug = batch_standalone_video_storage_slug(
+            ingest_id=ingest_id,
+            slug=task_slug,
+            content_type=base,
+            parent_slug=parent_slug,
+        )
+    else:
+        storage_slug = _resolve_slug(
+            {"id": "00000000-0000-0000-0000-000000000099", "slug": task_slug}
+        )
     return synthesize_ct, base, storage_slug
+
+
+def expected_synthesize_note_path(
+    config: Config, *, storage_slug: str, content_type: str
+) -> Path:
+    """Vault path the synthesize pipeline will write for the given dispatch slug."""
+    safe = slug_path(storage_slug)
+    subdir = _SYNTHESIZE_NOTE_SUBDIR.get(content_type, "videos")
+    kb = config.vault_path / "Knowledge base"
+    if not subdir:
+        return kb / f"{safe}.md"
+    return kb / subdir / f"{safe}.md"
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:
@@ -201,6 +249,8 @@ def mc_ls_keys(config: Config, folder: str) -> list[str]:
                 raw = "/".join(parts[idx + 1 :])
             except ValueError:
                 pass
+        if not raw.startswith(f"{folder}/"):
+            raw = f"{folder}/{raw}"
         keys.append(raw)
     return keys
 
@@ -262,7 +312,7 @@ def _candidate_storage_slugs(
     video_key: str | None,
     url_storage_slug: str | None,
 ) -> list[str]:
-    """Slugs to try when locating a transcript (URL slug is canonical for dispatch when found first)."""
+    """Slugs to try when locating a transcript (prefer uploaded object keys)."""
     seen: set[str] = set()
     out: list[str] = []
 
@@ -271,8 +321,8 @@ def _candidate_storage_slugs(
             seen.add(slug)
             out.append(slug)
 
-    add(url_storage_slug)
     add(_slug_from_video_key(video_key or ""))
+    add(url_storage_slug)
     add(note_path.stem)
     return out
 
@@ -298,9 +348,14 @@ def discover(config: Config) -> RepairPlan:
         source_url = (m.group(1).strip().strip('"').strip("'") if m else "") or ""
         tags = _parse_tags(fm)
 
-        plan_params = resolve_video_synthesize_plan(source_url) if source_url else None
-        url_storage_slug = plan_params[2] if plan_params else None
         video_key = source_files.get("video")
+        video_stem = _slug_from_video_key(video_key or "")
+        plan_params = (
+            resolve_video_synthesize_plan(source_url, ingest_id=video_stem)
+            if source_url
+            else None
+        )
+        url_storage_slug = plan_params[2] if plan_params else None
 
         loc: tuple[str, str] | None = None
         storage_slug: str | None = None
@@ -424,6 +479,14 @@ def apply(plan: RepairPlan, config: Config, conn, *, dry_run: bool = True) -> No
             "duplicate" if result.get("duplicate") else "created"
         )
         print(f"[dispatch] {item.storage_slug} -> task {tid} ({flag})")
+        synth_path = expected_synthesize_note_path(
+            config, storage_slug=item.storage_slug, content_type=item.content_type
+        )
+        if synth_path.resolve() != item.note_path.resolve():
+            print(
+                f"[note] orphan={item.note_path} "
+                f"synthesize will write={synth_path}"
+            )
 
 
 def _print_missing(plan: RepairPlan) -> None:
