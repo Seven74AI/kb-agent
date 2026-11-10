@@ -97,19 +97,55 @@ def test_tdah_storage_paths_use_config_bucket(monkeypatch):
     config = MagicMock()
     config.storage_bucket = "kb-knowledge-base"
     config.storage_alias = "tigris"
-    captured: dict = {}
+    config.kb_agent_dir = MagicMock()
+    ls_targets: list[str] = []
 
-    def fake_main_inner():
-        captured["vb"] = f"{config.storage_alias}/{config.storage_bucket}/videos"
-        captured["tb"] = f"{config.storage_alias}/{config.storage_bucket}/transcripts"
+    def fake_sh(cmd, **kw):
+        if cmd[:2] == ["mc", "ls"]:
+            ls_targets.append(cmd[2])
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
 
-    # Mirror main() bucket wiring without running the full cron.
-    bucket = config.storage_bucket
-    captured["vb"] = f"{config.storage_alias}/{bucket}/videos"
-    captured["tb"] = f"{config.storage_alias}/{bucket}/transcripts"
-    assert captured["vb"] == "tigris/kb-knowledge-base/videos"
-    assert captured["tb"] == "tigris/kb-knowledge-base/transcripts"
-    assert "kb-agent-archive" not in captured["vb"]
+    monkeypatch.setattr(mod, "sh", fake_sh)
+    monkeypatch.setattr(mod, "load_config", lambda: config)
+    monkeypatch.setattr(mod, "init_db", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        mod,
+        "fetch",
+        lambda url: (
+            '<a href="/tdah-adulte-j1-newslug/">'
+            if url == mod.MAIN
+            else ""
+        ),
+    )
+    monkeypatch.setattr(mod, "bunny_uuid", lambda slug: None)
+
+    mod.main()
+
+    expected_vb = "tigris/kb-knowledge-base/videos"
+    expected_tb = "tigris/kb-knowledge-base/transcripts"
+    assert expected_vb in ls_targets
+    assert expected_tb in ls_targets
+    assert "kb-agent-archive" not in ls_targets
+
+
+def test_tdah_fully_processed_requires_video_and_transcript(monkeypatch):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    vb = "tigris/bucket/videos"
+    tb = "tigris/bucket/transcripts"
+    slug = "tdah-adulte-2026-j2-only-mp4"
+
+    def fake_sh(cmd, **kw):
+        if cmd[2] == vb:
+            return MagicMock(returncode=0, stdout=f"{slug}.mp4", stderr="")
+        if cmd[2] == tb:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "sh", fake_sh)
+    assert slug not in mod.fully_processed_slugs(vb, tb)
 
 
 def test_tdah_skips_dispatch_when_mc_upload_fails(monkeypatch, tmp_path):
@@ -123,10 +159,7 @@ def test_tdah_skips_dispatch_when_mc_upload_fails(monkeypatch, tmp_path):
         lambda *a, **k: dispatched.append("called") or "task-x",
     )
 
-    calls: list[list] = []
-
     def fake_sh(cmd, **kw):
-        calls.append(cmd)
         if cmd[:2] == ["mc", "cp"] and cmd[-1].endswith(".mp4"):
             return MagicMock(returncode=1, stderr="video fail", stdout="")
         if cmd[:2] == ["mc", "cp"] and cmd[-1].endswith(".json"):
@@ -140,14 +173,21 @@ def test_tdah_skips_dispatch_when_mc_upload_fails(monkeypatch, tmp_path):
     mpath = tmp_path / "v.json"
     mpath.write_text("{}", encoding="utf-8")
     ns = "tdah-adulte-2026-j9-test"
+    vb = "tigris/kb-knowledge-base/videos"
+    tb = "tigris/kb-knowledge-base/transcripts"
 
-    rv = mod.sh(["mc", "cp", str(mp4), f"tigris/kb-knowledge-base/videos/{ns}.mp4"])
-    rt = mod.sh(["mc", "cp", str(mpath), f"tigris/kb-knowledge-base/transcripts/{ns}.json"])
-    should_dispatch = rv.returncode == 0 and rt.returncode == 0
-    if should_dispatch:
-        mod._finalize_video_dispatch("https://example.com/", MagicMock(), MagicMock(), ns)
+    task_id = mod.upload_transcript_and_dispatch(
+        ns,
+        str(mp4),
+        mpath,
+        vb,
+        tb,
+        "https://example.com/",
+        MagicMock(),
+        MagicMock(),
+    )
 
-    assert rv.returncode != 0
+    assert task_id is None
     assert dispatched == []
 
 

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import Config
 from agent.pipelines.video_common import (
+    _synthesize_archived_keys,
     step_fetch_transcript,
     upload_note_archive,
     upload_video_artifacts,
@@ -201,3 +202,15 @@ def test_step_fetch_transcript_metadata_uses_top_level_duration(config):
 
     meta = json.loads((Path(config.temp_dir) / f"{slug}_metadata.json").read_text())
     assert meta["duration"] == 90.0
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["youtube_synthesize", "rumble_synthesize", "substack_video_synthesize", "bunny_stream_synthesize"],
+)
+def test_synthesize_archived_keys_omit_mp3(content_type):
+    slug = "my_video_slug"
+    task = {"id": "t1", "slug": slug, "content_type": content_type}
+    keys = _synthesize_archived_keys(task)
+    assert keys == [f"videos/{slug}.mp4", f"transcripts/{slug}.json"]
+    assert not any(k.endswith(".mp3") for k in keys)

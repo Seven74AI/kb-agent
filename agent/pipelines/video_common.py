@@ -761,14 +761,10 @@ def _synthesize_note_path(task: dict, config: Config) -> Path:
 
 def _synthesize_archived_keys(task: dict) -> list[str]:
     storage_slug = _resolve_slug(task)
-    ct = (task.get("content_type") or "").lower()
-    keys = [
+    return [
         f"videos/{storage_slug}.mp4",
         f"transcripts/{storage_slug}.json",
     ]
-    if ct in ("youtube_synthesize", "rumble_synthesize", "substack_video_synthesize"):
-        keys.insert(1, f"videos/{storage_slug}.mp3")
-    return keys
 
 
 def step_rewrite_synthesize_source_files(task: dict, config: Config) -> str:

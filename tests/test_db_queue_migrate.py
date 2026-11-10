@@ -2046,6 +2046,31 @@ def test_dispatch_synthesize_redispatches_paused_fetch_transcript(tmp_path):
         (task_id,),
     ).fetchone()[0]
     assert fetch == "pending"
+    rewrite = conn.execute(
+        "SELECT status, step_order FROM task_steps WHERE task_id = ? AND name = 'rewrite_source_files'",
+        (task_id,),
+    ).fetchone()
+    assert rewrite is not None
+    assert rewrite[0] == "pending"
+    assert rewrite[1] == 2
+
+
+def test_reset_paused_synthesize_returns_false_when_task_not_paused(tmp_path):
+    from agent.db import reset_paused_synthesize_fetch_transcript
+
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    task_id = create_task(
+        conn, "https://example.com/v", "youtube_synthesize", "slug_x",
+        ["fetch_transcript", "synthesize_youtube"],
+        status="pending",
+    )
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused' WHERE task_id = ? AND name = 'fetch_transcript'",
+        (task_id,),
+    )
+    conn.commit()
+    assert reset_paused_synthesize_fetch_transcript(conn, task_id) is False
 
 
 def test_reconcile_deferred_parent_syntheses_orphan(tmp_path, monkeypatch):
