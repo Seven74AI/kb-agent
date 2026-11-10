@@ -631,6 +631,55 @@ def create_task(conn: sqlite3.Connection, url: str, content_type: str, slug: str
     return task_id
 
 
+def reset_paused_synthesize_fetch_transcript(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Re-queue a paused synthesize task stuck on ``fetch_transcript`` (batch re-dispatch)."""
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row[0] != "paused":
+        return False
+    step = conn.execute(
+        """
+        SELECT id, status, step_order FROM task_steps
+        WHERE task_id = ? AND name = 'fetch_transcript'
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if step is None or step[1] not in ("paused", "failed"):
+        return False
+    fetch_order = step[2]
+    earlier = conn.execute(
+        """
+        SELECT 1 FROM task_steps
+        WHERE task_id = ? AND step_order < ? AND status NOT IN ('done', 'skipped')
+        LIMIT 1
+        """,
+        (task_id, fetch_order),
+    ).fetchone()
+    if earlier is not None:
+        return False
+    with conn:
+        conn.execute(
+            """
+            UPDATE task_steps
+            SET status = 'pending', output = NULL, started_at = NULL, finished_at = NULL
+            WHERE task_id = ? AND step_order >= ?
+            """,
+            (task_id, fetch_order),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'pending', error = NULL, updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+    return True
+
+
 def create_synthesize_task(
     conn: sqlite3.Connection,
     url: str,

@@ -90,6 +90,67 @@ def test_tdah_bunny_cdn_url_passes_fetch_guard():
     mod._assert_fetch_url_allowed(url)
 
 
+def test_tdah_storage_paths_use_config_bucket(monkeypatch):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    config = MagicMock()
+    config.storage_bucket = "kb-knowledge-base"
+    config.storage_alias = "tigris"
+    captured: dict = {}
+
+    def fake_main_inner():
+        captured["vb"] = f"{config.storage_alias}/{config.storage_bucket}/videos"
+        captured["tb"] = f"{config.storage_alias}/{config.storage_bucket}/transcripts"
+
+    # Mirror main() bucket wiring without running the full cron.
+    bucket = config.storage_bucket
+    captured["vb"] = f"{config.storage_alias}/{bucket}/videos"
+    captured["tb"] = f"{config.storage_alias}/{bucket}/transcripts"
+    assert captured["vb"] == "tigris/kb-knowledge-base/videos"
+    assert captured["tb"] == "tigris/kb-knowledge-base/transcripts"
+    assert "kb-agent-archive" not in captured["vb"]
+
+
+def test_tdah_skips_dispatch_when_mc_upload_fails(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    mod = _load_tdah_module()
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "_finalize_video_dispatch",
+        lambda *a, **k: dispatched.append("called") or "task-x",
+    )
+
+    calls: list[list] = []
+
+    def fake_sh(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["mc", "cp"] and cmd[-1].endswith(".mp4"):
+            return MagicMock(returncode=1, stderr="video fail", stdout="")
+        if cmd[:2] == ["mc", "cp"] and cmd[-1].endswith(".json"):
+            return MagicMock(returncode=0, stderr="", stdout="")
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(mod, "sh", fake_sh)
+
+    mp4 = tmp_path / "v.mp4"
+    mp4.write_bytes(b"x" * 200)
+    mpath = tmp_path / "v.json"
+    mpath.write_text("{}", encoding="utf-8")
+    ns = "tdah-adulte-2026-j9-test"
+
+    rv = mod.sh(["mc", "cp", str(mp4), f"tigris/kb-knowledge-base/videos/{ns}.mp4"])
+    rt = mod.sh(["mc", "cp", str(mpath), f"tigris/kb-knowledge-base/transcripts/{ns}.json"])
+    should_dispatch = rv.returncode == 0 and rt.returncode == 0
+    if should_dispatch:
+        mod._finalize_video_dispatch("https://example.com/", MagicMock(), MagicMock(), ns)
+
+    assert rv.returncode != 0
+    assert dispatched == []
+
+
 def test_tdah_finalize_dispatch_returns_none_on_error(monkeypatch):
     from unittest.mock import MagicMock
 

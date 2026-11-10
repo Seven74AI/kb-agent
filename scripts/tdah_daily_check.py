@@ -90,8 +90,9 @@ def _finalize_video_dispatch(page_url, config, conn, slug):
 def main():
     os.makedirs(TMP, exist_ok=True)
     config = load_config()
-    vb = f"{config.storage_alias}/kb-agent-archive/videos"
-    tb = f"{config.storage_alias}/kb-agent-archive/transcripts"
+    bucket = config.storage_bucket
+    vb = f"{config.storage_alias}/{bucket}/videos"
+    tb = f"{config.storage_alias}/{bucket}/transcripts"
     conn = init_db(config.kb_agent_dir / "data" / "agent.db", AGENT_SCHEMA)
 
     # 1. detect new slugs from the main page
@@ -155,8 +156,16 @@ def main():
         merged = merge_speakers_from_paths(diar, trans)
         write_merged_transcript_json(mpath, merged, indent=None)
         ensure_merged_transcript_file_redacted(mpath)
-        sh(["mc", "cp", mp4, f"{vb}/{ns}.mp4"])
-        sh(["mc", "cp", str(mpath), f"{tb}/{ns}.json"])
+        rv = sh(["mc", "cp", mp4, f"{vb}/{ns}.mp4"])
+        rt = sh(["mc", "cp", str(mpath), f"{tb}/{ns}.json"])
+        if rv.returncode != 0 or rt.returncode != 0:
+            parts = []
+            if rv.returncode != 0:
+                parts.append(f"video upload: {(rv.stderr or rv.stdout or '').strip()[:120]}")
+            if rt.returncode != 0:
+                parts.append(f"transcript upload: {(rt.stderr or rt.stdout or '').strip()[:120]}")
+            print(f"  [warn] {ns}: upload failed ({'; '.join(parts)})")
+            continue
 
         page_url = f"https://www.terragrandir.com/{ns.replace('tdah-adulte-2026-', 'tdah-adulte-')}/"
         task_id = _finalize_video_dispatch(page_url, config, conn, ns)

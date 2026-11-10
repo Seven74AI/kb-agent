@@ -37,6 +37,7 @@ from agent.pipelines.video_common import (
     run_video_quality_gate,
     step_extract_audio,
     step_fetch_transcript,
+    step_rewrite_synthesize_source_files,
     strip_code_fence,
     upload_video_artifacts,
 )
@@ -533,6 +534,7 @@ register_pipeline("bunny_stream", [
 register_pipeline("bunny_stream_synthesize", [
     Step(name="fetch_transcript", fn=step_fetch_transcript, on_error="retry"),
     Step(name="synthesize_note", fn=step_synthesize_note, on_error="retry"),
+    Step(name="rewrite_source_files", fn=step_rewrite_synthesize_source_files, on_error="retry"),
     Step(name="quality_gate", fn=step_quality_gate, on_error="retry"),
     Step(name="see_also", fn=step_see_also, on_error="fail"),
     Step(name="git_push", fn=step_git_push, on_error="retry"),

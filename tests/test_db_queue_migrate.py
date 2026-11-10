@@ -2011,6 +2011,43 @@ def test_dispatch_synthesize_idempotent_when_task_pending(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM tasks WHERE slug=?", (slug,)).fetchone()[0] == 1
 
 
+def test_dispatch_synthesize_redispatches_paused_fetch_transcript(tmp_path):
+    db_path = tmp_path / "agent.db"
+    conn = init_db(db_path, AGENT_SCHEMA)
+    url = "https://www.youtube.com/watch?v=abc"
+    slug = "yt_vid_slug"
+    task_id = create_task(
+        conn, url, "youtube_synthesize", slug,
+        ["fetch_transcript", "synthesize_youtube", "quality_gate"],
+        status="paused",
+    )
+    steps = get_task_steps(conn, task_id)
+    fetch_step = next(s for s in steps if s["name"] == "fetch_transcript")
+    conn.execute(
+        "UPDATE task_steps SET status = 'paused', output = 'missing transcript' WHERE id = ?",
+        (fetch_step["id"],),
+    )
+    conn.commit()
+    config = Config(
+        kb_agent_dir=Path(__file__).resolve().parents[1],
+        vault_path=tmp_path / "vault",
+        temp_dir=tmp_path / "tmp",
+        cookie_dir=tmp_path / "cookies",
+        firecrawl_url="http://localhost:3002/v2/scrape",
+    )
+    result = dispatch_synthesize(
+        url, config, conn, content_type="youtube_synthesize", slug=slug,
+    )
+    assert result["duplicate"] is True
+    assert result.get("redispatched") is True
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "pending"
+    fetch = conn.execute(
+        "SELECT status FROM task_steps WHERE task_id = ? AND name = 'fetch_transcript'",
+        (task_id,),
+    ).fetchone()[0]
+    assert fetch == "pending"
+
+
 def test_reconcile_deferred_parent_syntheses_orphan(tmp_path, monkeypatch):
     import scripts.batch_ingest as batch_ingest
 
