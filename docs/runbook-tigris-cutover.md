@@ -43,7 +43,7 @@ systemctl restart kb-stream tdah-2026
 
 ## Step 4 — verify
 ```bash
-# catalog lists (now from Tigris)
+# catalog lists (from Tigris)
 curl -s http://127.0.0.1:8001/api/catalog | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d),"entries")'
 # presigned URL points at fly.storage.tigris.dev (not media.sevend.io)
 curl -s http://127.0.0.1:8001/api/play/<slug> | python3 -m json.tool
