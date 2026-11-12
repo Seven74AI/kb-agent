@@ -62,7 +62,7 @@ only **claims** existing `pending` rows.
 
 | File | Symbol | Purity | Dependencies | Must switch to core |
 |------|--------|--------|--------------|---------------------|
-| `agent/pipelines/books.py` | `step_classify_content` | IO | Mega download dir, `_pdf_preflight`, JSON classification | Future **core** submit may replace inline `create_task` in `step_delegate_books` (delegate step is implemented today) |
+| `agent/pipelines/books.py` | `step_classify_content` | IO | Mega download dir, `_pdf_preflight`, JSON classification | Future **core** submit may replace inline `create_task` in `step_delegate_books` (delegate step is already implemented) |
 | `agent/pipelines/books.py` | `step_delegate_books` / `Step(name="delegate", …)` | IO | Reads classify output; `_resolve_delegate_child_task` + `create_task` per book | Implemented — one child task per classified book with registered pipeline; future refactor to `core.submit_url` |
 | `scripts/tdah_daily_check.py` | `main()` | IO | curl, ffmpeg, Modal, MinIO, **Hermes kanban** | Future `watch_source` should call `core.submit_url` (Bunny/TDAH URLs) instead of Hermes tickets |
 
